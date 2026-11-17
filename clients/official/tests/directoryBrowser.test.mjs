@@ -246,7 +246,7 @@ try {
       if (command === 'save_workspace_cached_file') return { status: 'saved', label: 'device/README.md' }
       throw new Error(`Unexpected workspace IPC ${command}`)
     }
-    const props = reactive({ open: true, work: { id: 'work', lifecycle: 'active', runtimeGeneration: 1, displayName: 'Project' }, context: { connectionId: 'connection', selectionGeneration: 1 }, hostEpoch: 'epoch' })
+    const props = reactive({ open: true, work: { id: 'work', lifecycle: 'active', runtimeGeneration: 1, displayName: 'Project', executor: { kind: 'pi-sdk', version: 'fixture' } }, context: { connectionId: 'connection', selectionGeneration: 1 }, hostEpoch: 'epoch' })
     const browser = mount(WorkspaceBrowser, props)
     await settle()
     await browser.click('显示隐藏文件'); assert.ok(browser.button('.hidden'))

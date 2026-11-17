@@ -8,9 +8,10 @@
  * fields they do not know, so a newer Main can add to them.
  */
 
-import { isAbsolute, win32 } from "node:path";
-import { cloneBoundedJsonObject, type JsonObject } from "./json-value.js";
 import { MODEL_SPEED_TIERS, type ModelSpeedTier } from "./model-speed.js";
+import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "./instance-display-name.js";
+
+export const DEFAULT_ASSISTANT_DISPLAY_NAME = "alu";
 
 /** The two texts the owner and the assistant edit: who she is, and what the owner told her by hand. */
 export const ASSISTANT_DOCUMENTS = ["persona", "notes"] as const;
@@ -123,38 +124,26 @@ export interface AssistantHandoffSettings {
   /** The entire writing instruction; conversation and previous record are supplied separately. */
   prompt: string;
 }
-/** Explicitly trusted code on Main; config is private and never part of a tool declaration. */
-export interface AssistantExtensionSettings {
-  id: string;
-  module: string;
-  enabled: boolean;
-  config: JsonObject;
-}
 export interface AssistantSettings {
+  /** Main's global identity label, independent of persona and session titles. Absent on older Hosts. */
+  displayName?: string;
   /** The model that turns her conversations into memories; without it nothing is extracted. */
   extractionModel?: AssistantModelRef;
   /** Background memory requests use their own speed; Main returns standard when not configured. */
   extractionSpeed?: ModelSpeedTier;
   /** Absent only on older Hosts that do not offer rolling hand-over settings. */
   handoff?: AssistantHandoffSettings;
-  /** Absent on older Hosts. An empty array loads no extensions. */
-  extensions?: AssistantExtensionSettings[];
 }
 export interface AssistantSettingsEdit {
+  /** Omitted preserves her identity label. */
+  displayName?: string;
   /** Omitted leaves it unchanged; null stops making memories. */
   extractionModel?: AssistantModelRef | null;
   /** Omitted preserves the background speed, independently of her chat Work. */
   extractionSpeed?: ModelSpeedTier;
   /** Omitted leaves the existing hand-over settings unchanged. */
   handoff?: AssistantHandoffSettings;
-  /** Omitted preserves the saved list; supplied replaces it. */
-  extensions?: AssistantExtensionSettings[];
 }
-
-/** New installations offer the bundled web tools; an explicitly saved [] disables all extensions. */
-export const DEFAULT_ASSISTANT_EXTENSIONS: readonly AssistantExtensionSettings[] = [
-  { id: "web", module: "builtin:web", enabled: true, config: {} },
-];
 
 /** One factory default, returned by Main; the Worker never guesses it when settings cannot be read. */
 export const DEFAULT_ASSISTANT_HANDOFF: Readonly<AssistantHandoffSettings> = {
@@ -567,31 +556,21 @@ function parseHandoffSettings(input: unknown, field: string, closed: boolean): A
   return { startTokens, keepRecentTokens, prompt };
 }
 
-function parseExtensions(input: unknown, field: string, closed: boolean): AssistantExtensionSettings[] {
-  if (!Array.isArray(input)) return fail(`${field} must be an array`);
-  const ids = new Set<string>();
-  return input.map((raw, index) => {
-    const itemField = `${field}[${index}]`, value = record(raw, itemField);
-    if (closed) only(value, ["id", "module", "enabled", "config"], itemField);
-    const extensionId = text(value.id, `${itemField}.id`, 64, 1);
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u.test(extensionId)) fail("扩展标识请只用字母、数字、下划线和短横线；这次没有保存。");
-    if (ids.has(extensionId)) fail(`扩展标识 ${extensionId} 重复了，请改成不同的标识后保存。`);
-    ids.add(extensionId);
-    const module = text(value.module, `${itemField}.module`, 16_384, 1);
-    if (!/^builtin:[a-zA-Z0-9_-]+$/u.test(module) && !((isAbsolute(module) || win32.isAbsolute(module)) && /\.(mjs|js)$/u.test(module))) {
-      fail("扩展模块请填写 Main 上的绝对 .mjs/.js 文件路径，或 builtin:名称；这次没有保存。");
-    }
-    return { id: extensionId, module, enabled: flag(value.enabled, `${itemField}.enabled`), config: cloneBoundedJsonObject(value.config, `${itemField}.config`) };
-  });
+function assistantDisplayName(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) fail("请填写助手的名字；这次没有保存。");
+  const name = (value as string).trim();
+  if (name.length > MAX_INSTANCE_DISPLAY_NAME_CHARS) fail(`名字最多 ${MAX_INSTANCE_DISPLAY_NAME_CHARS} 个字，请缩短后保存。`);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) fail("名字中不能使用换行或控制字符，请删去后保存。");
+  return name;
 }
 
 function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantSettingsEdit {
-  if (value.extractionModel === undefined && value.extractionSpeed === undefined && value.handoff === undefined && value.extensions === undefined) fail(`${field} changes nothing`);
+  if (value.displayName === undefined && value.extractionModel === undefined && value.extractionSpeed === undefined && value.handoff === undefined) fail(`${field} changes nothing`);
   return {
+    ...(value.displayName === undefined ? {} : { displayName: assistantDisplayName(value.displayName) }),
     ...(value.extractionModel === undefined ? {} : { extractionModel: value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true) }),
     ...(value.extractionSpeed === undefined ? {} : { extractionSpeed: oneOf(value.extractionSpeed, MODEL_SPEED_TIERS, `${field}.extractionSpeed`) }),
     ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, true) }),
-    ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, true) }),
   };
 }
 
@@ -734,7 +713,7 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op"], field);
         return { op: "settings_get" };
       case "settings_set":
-        only(value, ["op", "extractionModel", "extractionSpeed", "handoff", "extensions"], field);
+        only(value, ["op", "displayName", "extractionModel", "extractionSpeed", "handoff"], field);
         return { op: "settings_set", ...parseSettingsSet(value, field) };
       case "reorganize":
         only(value, ["op", "extractionModel"], field);
@@ -922,10 +901,10 @@ export function parseAssistantSettings(input: unknown, field = "assistant settin
   return answer(() => {
     const value = record(input, field);
     return {
+      ...(value.displayName === undefined ? {} : { displayName: assistantDisplayName(value.displayName) }),
       ...(value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) }),
       extractionSpeed: value.extractionSpeed === undefined ? "standard" : oneOf(value.extractionSpeed, MODEL_SPEED_TIERS, `${field}.extractionSpeed`),
       ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, false) }),
-      ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, false) }),
     };
   });
 }

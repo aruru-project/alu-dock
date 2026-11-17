@@ -16,6 +16,8 @@ export const MAX_DOCK_TOOL_TARGET_CHARS = 256;
 export const MAX_DOCK_TOOL_CWD_CHARS = 16_384;
 export const MAX_DOCK_TOOL_NAME_CHARS = 256;
 export const MAX_DOCK_TOOL_MESSAGE_CHARS = 254_000;
+/** The resident assistant delegates engineering work independently of her chat thinking level (#671). */
+export const ASSISTANT_CHILD_THINKING_LEVEL: ThinkingLevel = "high";
 /**
  * The user's list of models shown to Agents for child Works: a short hand-picked list, not a catalog.
  * It only names models; a note on when to use one would be followed as a rule (user decision 2026-11-04).

@@ -4,7 +4,7 @@ import { useComposer } from '../lib/composer'
 import { dequeueMessages, getCommandCompletions, isTauri, submitMessage, submitText } from '../lib/bridge'
 import { attachmentUploadMatches, attachmentUploadTarget } from '../lib/attachmentDraft'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
-import { conversationBoundaryKey } from '../lib/uiBoundaries'
+import { conversationBoundaryKey, isResidentAssistant } from '../lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from '../lib/commandSuggest'
 import { controlCommandAvailable, filterLocalControlCommands, localControlCommands, submittedLocalControl, type LocalControlCommand } from '../lib/localCommands'
 import { shellRunQuote } from '../lib/conversation'
@@ -143,7 +143,7 @@ export const useInputStore = defineStore('input', () => {
   const commandSuggestItems = computed<ComposerCommandSuggestion[]>(() => {
     const query = slashQuery.value
     if (query === null) return []
-    const local = filterLocalControlCommands(query, selected.value?.assistant).filter(command => command.id !== 'speed' || controlPanel.speedAvailable).map((command) => ({
+    const local = filterLocalControlCommands(query, isResidentAssistant(selected.value)).filter(command => command.id !== 'speed' || controlPanel.speedAvailable).map((command) => ({
       kind: 'local' as const,
       name: command.name,
       description: command.description,
@@ -331,7 +331,7 @@ export const useInputStore = defineStore('input', () => {
       const operation = app.captureOperation(capturedHost, work.id, capturedAttachments.map(item => item.fileId))
       const result = await submitMessage(work.id, captured, capturedAttachments.map(item => item.fileId), operation)
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
-        if (!result.receipt.queued) conversation.showAgentActivity(work.id)
+        if (!result.receipt.queued) conversation.scrollOutputToBottom(true)
       }
       return true
     } catch (cause) {
@@ -359,7 +359,7 @@ export const useInputStore = defineStore('input', () => {
   /** `typed` is the editor text that asked for the control, cleared once it runs; a quick button passes null. */
   async function executeLocalControl(command: LocalControlCommand, typed: string | null): Promise<boolean> {
     if (!selected.value || selected.value.lifecycle !== 'active') return false
-    if (!controlCommandAvailable(command.name, selected.value.assistant)) {
+    if (!controlCommandAvailable(command.name, isResidentAssistant(selected.value))) {
       submissionError.value = '助手一直用同一段对话，不提供这个 Pi 操作。可以继续和她说话。'
       return false
     }
@@ -417,7 +417,7 @@ export const useInputStore = defineStore('input', () => {
     try {
       const result = await submitText(work.id, text, work.executor.piSessionId, app.captureOperationTarget(capturedHost, work.id))
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
-        if (!result.receipt.queued) conversation.showAgentActivity(work.id)
+        if (!result.receipt.queued) conversation.scrollOutputToBottom(true)
       }
       return true
     } catch (cause) {
@@ -434,8 +434,8 @@ export const useInputStore = defineStore('input', () => {
   }
 
   function quickButtonVisible(button: QuickButton) {
-    const command = button.text.trim().match(/^\/([^\s/]+)(?:\s|$)/)?.[1]
-    return !command || controlCommandAvailable(command, selected.value?.assistant)
+    const command = button.mode === 'send' ? submittedLocalControl(button.text) : undefined
+    return !command || controlCommandAvailable(command.name, isResidentAssistant(selected.value))
   }
 
   function quickButtonDisabled(button: QuickButton) {

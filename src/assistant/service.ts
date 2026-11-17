@@ -1,7 +1,7 @@
 import {
   ASSISTANT_MEMORY_TOPICS,
   DEFAULT_ASSISTANT_HANDOFF,
-  DEFAULT_ASSISTANT_EXTENSIONS,
+  DEFAULT_ASSISTANT_DISPLAY_NAME,
   parseAssistantSettings,
   type AssistantSettings,
   type AssistantSettingsEdit,
@@ -87,18 +87,18 @@ export class AssistantCore {
 
   private settings(): AssistantSettings {
     const row = this.store.connection.prepare("SELECT value FROM meta WHERE key = 'handoff_settings'").get() as { value: string } | undefined;
-    const extensions = this.store.connection.prepare("SELECT value FROM meta WHERE key = 'tool_extensions'").get() as { value: string } | undefined;
+    const identity = this.store.connection.prepare("SELECT value FROM meta WHERE key = 'display_name'").get() as { value: string } | undefined;
     return parseAssistantSettings({
+      displayName: identity?.value ?? DEFAULT_ASSISTANT_DISPLAY_NAME,
       ...this.extraction.settings(),
       handoff: row === undefined ? DEFAULT_ASSISTANT_HANDOFF : JSON.parse(row.value),
-      extensions: extensions === undefined ? DEFAULT_ASSISTANT_EXTENSIONS : JSON.parse(extensions.value),
     });
   }
 
   private setSettings(edit: AssistantSettingsEdit): AssistantSettings {
-    // The shared request parser validates the entire edit before either setting changes.
+    // The shared request parser validates the entire edit before any setting changes.
+    if (edit.displayName !== undefined) this.store.connection.prepare("INSERT INTO meta(key, value) VALUES ('display_name', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(edit.displayName);
     if (edit.handoff !== undefined) this.store.connection.prepare("INSERT INTO meta(key, value) VALUES ('handoff_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(edit.handoff));
-    if (edit.extensions !== undefined) this.store.connection.prepare("INSERT INTO meta(key, value) VALUES ('tool_extensions', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(edit.extensions));
     if (edit.extractionSpeed !== undefined) this.store.connection.prepare("INSERT INTO meta(key, value) VALUES ('extraction_speed', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(edit.extractionSpeed);
     if (edit.extractionModel !== undefined) this.extraction.setModel(edit.extractionModel);
     return this.settings();

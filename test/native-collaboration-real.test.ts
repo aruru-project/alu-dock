@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -188,10 +189,13 @@ test("a child Work that stops without giving its parent the result is reported t
   asked.tools({ id: "files-done", name: "dock_send", arguments: { message: "FILES: sum.js", done: true } });
   const more = await reviewer.request(2);
   assert.equal(sent(more, "[来自父 Work「Coordinator」]\\nPARENT_MORE").length, 1, "The second message reaches the reviewer after its final result");
+  // Let the parent consume the first result before the child finishes the
+  // second question. Its context already contains the earlier stop notice.
+  parentWaits.text("Waiting for the files.");
+  await coordinator.request(5);
   more.text("The tests look fine.");
   await waitFor(async () => (await client.status(child.id)).execution === "idle", "The reviewer did not settle");
-  parentWaits.text("Waiting for the files.");
-  const secondNotice = await coordinatorSees(5, "[子 Work「Reviewer」异常停止]");
+  const secondNotice = await coordinatorSees(5, "> The tests look fine.");
   assert.ok(coordinator.requests.some((request) => sent(request, "[来自子 Work「Reviewer」· 已完成]\\nFILES").length === 1), "The final result for the first question arrives as such");
   assert.ok(JSON.stringify(secondNotice.body.messages).includes("> The tests look fine."), "The notice quotes what the reviewer said on the second message");
   secondNotice.text("I will look at the tests myself.");
@@ -214,9 +218,184 @@ test("a child Work that stops without giving its parent the result is reported t
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle after the stop notice");
 });
 
+// Card #671: Main's resident assistant could neither discover another Work's child nor inspect
+// its tool evidence. The same Host paths must keep ordinary Works and control operations scoped.
+test("the resident assistant discovers another Work's child and reads its own conversation and tool evidence", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "reviewer", "chat"], { prefix: "alu-resident-inspect-", assistant: true, mainDockTools: true });
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  await client.setModel(alu.id, "chat", "fixture");
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "inspect-parent", trust));
+  const child = await client.create(team.cwd, "Reviewer", "inspect-child", undefined, undefined,
+    { model: { provider: "reviewer", id: "fixture" } }, { parentId: parent.id, allowedTools: ["read"] });
+  const evidence = `TOOL_EVIDENCE_START\n${"workspace evidence\n".repeat(1_000)}TOOL_EVIDENCE_END`;
+  const file = join(team.cwd, "evidence.txt");
+  await writeFile(file, evidence);
+  await client.prompt(child.id, "CHILD_TASK_ORIGINAL: read evidence.txt", "auto", "read-evidence");
+  (await team.providers.reviewer.request(0)).tools({ id: "evidence-read", name: "read", arguments: { path: file } });
+  (await team.providers.reviewer.request(1)).text("CHILD_REPLY_ORIGINAL: I read the evidence.");
+  await waitFor(async () => (await client.status(child.id)).execution === "idle", "The child did not finish its read");
+  await client.runBash(child.id, "printf PUBLIC_COMMAND_EVIDENCE", false);
+  await waitFor(async () => (await client.history(child.id)).entries.some((entry) => entry.kind === "bash_execution"), "The command evidence was not saved");
+  await client.runBash(child.id, "printf PRIVATE_EXCLUDED_OUTPUT", true);
+  await waitFor(async () => (await client.history(child.id)).entries.some((entry) => entry.excludeFromContext), "The excluded command was not saved");
+
+  // Local and Main-routed tools share the read permission; only Main's actual assistant gets it.
+  const local = await team.registry!.invokeDockTool(alu.id, { type: "list", includeHistory: true });
+  assert.ok(local.type === "list");
+  assert.ok(local.result.instances.some((work) => work.id === child.id && work.parentId === parent.id), "The resident can find another Work's child locally");
+  await client.prompt(alu.id, "Inspect the reviewer's work directly.", "auto", "resident-inspect");
+  (await team.providers.chat.request(0)).tools({ id: "list-live", name: "dock_list", arguments: {} });
+  const live = await team.providers.chat.request(1);
+  assert.ok(JSON.stringify(live.body.messages!.at(-1)).includes(child.id), "Main lists the child, not just its parent");
+  live.tools({ id: "list-all", name: "dock_list", arguments: { scope: "all" } });
+  const all = await team.providers.chat.request(2);
+  const allText = JSON.stringify(all.body.messages!.at(-1));
+  assert.ok(allText.includes(child.id) && allText.includes(`parent=${parent.id}`) && allText.includes("active/idle"));
+  all.tools({ id: "inspect-child", name: "dock_inspect", arguments: { target: "Reviewer", limit: 20 } });
+  const inspected = await team.providers.chat.request(3);
+  const raw = JSON.stringify(inspected.body.messages!.at(-1));
+  for (const marker of ["CHILD_TASK_ORIGINAL", "CHILD_REPLY_ORIGINAL", "evidence-read", "evidence.txt", "TOOL_EVIDENCE_START", "TOOL_EVIDENCE_END", "PUBLIC_COMMAND_EVIDENCE"]) assert.ok(raw.includes(marker), `The assistant sees ${marker} from the child itself`);
+  assert.ok(!raw.includes("PRIVATE_EXCLUDED_OUTPUT"), "The owner's excluded command remains excluded");
+  // Go through the assistant's real tool bridge too: Main must not turn read access into control.
+  let blocked = inspected;
+  for (const [index, name] of ["dock_send", "dock_interrupt", "dock_stop"].entries()) {
+    blocked.tools({ id: `blocked-${index}`, name, arguments: { target: child.id, ...(name === "dock_send" ? { message: "DO_NOT_DELIVER" } : {}) } });
+    blocked = await team.providers.chat.request(4 + index);
+  }
+  const deniedResults = (await client.history(alu.id)).entries.flatMap((entry) => entry.content)
+    .flatMap((block) => block.type === "tool_result" && block.toolCallId.startsWith("blocked-") ? [block.isError] : []);
+  assert.deepEqual(deniedResults, [true, true, true]);
+  assert.equal(team.providers.reviewer.requests.length, 2, "Read access did not let the assistant wake another parent's child");
+  blocked.text("I checked the child's evidence directly.");
+  await waitFor(async () => (await client.status(alu.id)).execution === "idle", "The assistant did not settle");
+
+  const unrelated = await trustOnce((trust) => client.create(team.cwd, "Unrelated", "inspect-unrelated", trust));
+  const ordinary = await team.registry!.invokeDockTool(unrelated.id, { type: "list", includeHistory: true });
+  assert.ok(ordinary.type === "list");
+  assert.ok(!ordinary.result.instances.some((work) => work.id === child.id));
+  await assert.rejects(team.registry!.invokeDockTool(unrelated.id, { type: "inspect", target: "Reviewer" }));
+  await assert.rejects(team.registry!.invokeDockTool(child.id, { type: "inspect", target: unrelated.id }));
+  // #671 grants reading, not control of another parent's children, even when the caller knows the ID.
+  for (const type of ["send", "interrupt", "stop"] as const) {
+    await assert.rejects(team.registry!.invokeDockTool(alu.id, { type, target: child.id, operationId: `resident-${type}`, message: "do not deliver" }));
+  }
+  assert.equal((await client.status(child.id)).lifecycle, "active");
+});
+
+// #671 review: inspect dropped live tool frames, so the assistant could not see progress that
+// the user's Work page already showed. Both tools below are Pi's real built-ins, not tool fixtures.
+test("the resident assistant reads a child's tool progress before it returns and sees each saved call and result once", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "reviewer", "chat"], { prefix: "alu-resident-progress-", assistant: true, mainDockTools: true });
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  await client.setModel(alu.id, "chat", "fixture");
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "progress-parent", trust));
+  const child = await client.create(team.cwd, "Reviewer", "progress-child", undefined, undefined,
+    { model: { provider: "reviewer", id: "fixture" } }, { parentId: parent.id, allowedTools: ["read", "bash"] });
+  const readPath = join(team.cwd, "completed.txt"), script = join(team.cwd, "progress.cjs");
+  const nextStage = join(team.cwd, "next-stage"), release = join(team.cwd, "release");
+  team.onCleanup = () => writeFileSync(release, "");
+  await writeFile(readPath, "COMPLETED_READ_EVIDENCE");
+  await writeFile(script, `
+const fs = require("node:fs");
+console.log("LIVE_PROGRESS_FIRST");
+let advanced = false;
+const timer = setInterval(() => {
+  if (!advanced && fs.existsSync(${JSON.stringify(nextStage)})) {
+    advanced = true;
+    console.log("LIVE_PROGRESS_LATEST");
+  }
+  if (fs.existsSync(${JSON.stringify(release)})) {
+    console.error("LIVE_FAILURE_RESULT");
+    clearInterval(timer);
+    process.exitCode = 7;
+  }
+}, 20);
+`);
+  await client.prompt(child.id, "Read completed.txt, then run progress.cjs.", "auto", "progress-task");
+  (await team.providers.reviewer.request(0)).tools(
+    { id: "completed-read", name: "read", arguments: { path: readPath } },
+    { id: "running-bash", name: "bash", arguments: { command: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`, timeout: 30 } },
+  );
+  const hasProgress = async (text: string) => (await client.read(child.id, undefined, "conversation_bootstrap")).page.events
+    .some((event) => event.type === "tool.output_updated" && event.data.toolCallId === "running-bash" && event.data.text.includes(text));
+  await waitFor(() => hasProgress("LIVE_PROGRESS_FIRST"), "The real bash tool did not publish its first progress");
+  await writeFile(nextStage, "");
+  await waitFor(() => hasProgress("LIVE_PROGRESS_LATEST"), "The real bash tool did not publish its latest progress");
+  const bootstrap = await client.read(child.id, undefined, "conversation_bootstrap");
+  assert.ok(bootstrap.page.events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "completed-read"), "The earlier tool also still has live frames");
+  assert.ok(!bootstrap.page.events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "running-bash"), "The inspected tool has not returned");
+  assert.equal(team.providers.reviewer.requests.length, 1);
+
+  await client.prompt(alu.id, "Check the reviewer's current tool progress.", "auto", "inspect-progress");
+  (await team.providers.chat.request(0)).tools({ id: "live-inspect", name: "dock_inspect", arguments: { target: "Reviewer", types: ["other"], limit: 1 } });
+  const partial = await team.providers.chat.request(1);
+  const progressText = partial.body.messages!.at(-1)!.content;
+  assert.equal(typeof progressText, "string");
+  assert.ok((progressText as string).includes("LIVE_PROGRESS_LATEST"), "The assistant sees the output before the tool returns");
+  assert.ok((progressText as string).includes("running"), "Progress is not presented as a successful final result");
+  const cursor = /continuation cursor: ([^\n]+)/u.exec(progressText as string)?.[1];
+  assert.ok(cursor, "The earlier calls and completed tool remain available through pagination");
+  partial.tools({ id: "earlier-evidence", name: "dock_inspect", arguments: { target: "Reviewer", types: ["other"], limit: 20, cursor } });
+  const earlier = await team.providers.chat.request(2);
+  const whole = `${progressText}\n${earlier.body.messages!.at(-1)!.content}`;
+  for (const marker of ["LIVE_PROGRESS_FIRST", "LIVE_PROGRESS_LATEST", "COMPLETED_READ_EVIDENCE", "tool call · read · completed-read", "tool call · bash · running-bash"]) {
+    assert.equal(whole.split(marker).length - 1, 1, `${marker} occurs once across live and saved pages`);
+  }
+  const ordinary = await team.registry!.invokeDockTool(parent.id, { type: "inspect", target: child.id, types: ["other"], limit: 20 });
+  assert.ok(!JSON.stringify(ordinary).includes("LIVE_PROGRESS"), "Ordinary Works keep their original conversation-only view");
+
+  await writeFile(release, "");
+  const childReply = await team.providers.reviewer.request(1);
+  earlier.tools({ id: "finished-evidence", name: "dock_inspect", arguments: { target: "Reviewer", types: ["other"], limit: 20 } });
+  const finished = await team.providers.chat.request(3);
+  const finalText = finished.body.messages!.at(-1)!.content as string;
+  for (const marker of ["LIVE_PROGRESS_FIRST", "LIVE_PROGRESS_LATEST", "LIVE_FAILURE_RESULT", "COMPLETED_READ_EVIDENCE"]) assert.equal(finalText.split(marker).length - 1, 1);
+  assert.ok(finalText.includes("tool result · bash · running-bash · error"), "The saved error replaces running progress");
+  finished.text("I saw the current progress and then the failure.");
+  childReply.text("The tool failed with exit code 7.");
+  await waitFor(async () => (await client.status(alu.id)).execution === "idle", "The assistant did not settle");
+});
+
+// Card #671: the assistant's chat model/low thinking must not silently become an engineering default.
+test("the resident assistant delegates with explicit choices or Pi's engineering model and high thinking, not her chat settings", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "reviewer", "implementer", "chat"], { prefix: "alu-resident-spawn-", assistant: true, mainDockTools: true, thinkingLevel: "low" });
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  await client.setModel(alu.id, "chat", "fixture");
+  await client.setThinking(alu.id, "low");
+  await client.prompt(alu.id, "Delegate the engineering tasks.", "auto", "resident-delegate");
+  const choices = [
+    { name: "Explicit high", model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "high", provider: "reviewer", actual: "high" },
+    { name: "Engineering defaults", provider: "coordinator", actual: "high" },
+    { name: "No reasoning", model: { provider: "implementer", id: "fixture" }, provider: "implementer", actual: "off" },
+    { name: "Explicit low", model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", provider: "reviewer", actual: "low" },
+  ] as const;
+  let next = await team.providers.chat.request(0);
+  for (const [index, choice] of choices.entries()) {
+    next.tools({ id: `delegate-${index}`, name: "dock_spawn", arguments: {
+      name: choice.name, task: "Review this engineering task.", allowedTools: ["read"],
+      ...("model" in choice ? { model: choice.model } : {}),
+      ...("thinkingLevel" in choice ? { thinkingLevel: choice.thinkingLevel } : {}),
+    } });
+    next = await team.providers.chat.request(index + 1);
+    const work = (await client.list()).find((item) => item.name === choice.name)!;
+    assert.ok(work, "The child was actually created");
+    assert.deepEqual(work.executor.model, { provider: choice.provider, id: "fixture" });
+    assert.equal(work.executor.thinkingLevel, choice.actual);
+    assert.equal(work.parentId, alu.id);
+    if (choice.name === "No reasoning") assert.ok(JSON.stringify(next.body.messages!.at(-1)).includes("high, so it runs at off"));
+  }
+  next.text("The engineering tasks are delegated.");
+  await waitFor(async () => (await client.status(alu.id)).execution === "idle", "The assistant did not settle");
+  assert.deepEqual((await client.status(alu.id)).executor.model, { provider: "chat", id: "fixture" });
+  assert.equal((await client.status(alu.id)).executor.thinkingLevel, "low");
+});
+
 // User decision 2026-10-31: a child Work talks only to its parent, and the runtime holds it
-// there rather than its prompt. Other top-level Works neither see nor reach it.
-test("a child Work can only message its parent, and other top-level Works cannot see it", { timeout: 60_000 }, async (context) => {
+// there rather than its prompt. Other ordinary top-level Works neither see nor reach it.
+test("a child Work can only message its parent, and other ordinary top-level Works cannot see it", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "reviewer"], { prefix: "alu-native-bounds-" });
   const { cwd, workerPids } = team;
   const { coordinator } = team.providers;
@@ -332,8 +511,8 @@ test("a top-level Work's child Works end with it and do not come back after a Ho
   await waitFor(() => exited(orphaned.pid), "The crashed parent's child process survived");
   await waitFor(async () => !(await client.list()).some((work) => work.id === orphaned.id), "The crashed parent's child stayed listed");
 
-  // Continuing the parent lets it delegate again.
-  await trustOnce((trust) => client.reopen(other.id, "reopen-other", undefined, trust));
+  // Continuing this Work in the same directory retains its trust_once and lets it delegate again.
+  await client.reopen(other.id, "reopen-other");
   const restarted = await startChild(other.id, "Restarted", "implementer");
   const restartedSession = await converse(restarted.id, implementer, "RESTARTED_HISTORY");
 

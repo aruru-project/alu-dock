@@ -46,8 +46,8 @@ export interface HandoffDeps {
   contextWindow(): number;
   /** Main supplies the saved instruction, including its factory default. No local prompt fallback. */
   settings(): Promise<AssistantHandoffSettings | undefined>;
-  /** The Work's existing status surface; terminal results also stay in its own session. */
-  status(text: string): void;
+  /** Brief attention/activity only. Full details are read on demand; results also stay in the session. */
+  status(text: string | undefined): void;
   rememberResult(text: string): void;
   /** One call to her model; rejects when it fails or is cancelled. */
   complete(system: string, prompt: string, maxTokens: number, signal: AbortSignal): Promise<string>;
@@ -169,17 +169,23 @@ export class Handoff {
 
   private showStatus(): void {
     if (this.stopped) return;
+    this.deps.status(this.settingsError ? "暂未读到整理设置，稍后会重试。"
+      : this.failures > 0 ? "整理未完成，对话保留，稍后会重试。"
+      : undefined);
+  }
+
+  /** Read-only report for the command center, never a permanent chat banner. */
+  details(): string {
     const settings = this.inUse?.settings ?? this.settings;
     if (settings === undefined) {
-      this.deps.status(`${this.settingsError ? "暂未读到" : "正在读取"}滚动整理设置，暂不整理，完整对话保留；聊天照常。${this.lastResult}`);
-      return;
+      return `${this.settingsError ? "暂未读到" : "正在读取"}滚动整理设置，暂不整理，完整对话保留；聊天照常。\n${this.lastResult}`;
     }
     const limits = this.inUse?.limits ?? this.limits();
     const parts = [this.activity, this.lastResult,
       `${this.inUse ? "本次采用" : "当前采用"}：${limits.startTokens} token 开始整理，保留最近原话约 ${limits.keepRecentTokens} token（按整轮保留）。`];
     if (settings.keepRecentTokens !== null && settings.keepRecentTokens !== limits.keepRecentTokens) parts.push(`保存的保留量 ${settings.keepRecentTokens} token 超过当前整理预算，运行时已收敛为 ${limits.keepRecentTokens}；保存值未改。`);
     if (this.settingsError) parts.push("未读到新设置，沿用上次有效配置；之后会重新读取。");
-    this.deps.status(parts.join("\n"));
+    return parts.join("\n");
   }
 
   private result(text: string): void {
@@ -213,7 +219,7 @@ export class Handoff {
       this.result(`上次整理失败：${localTime(new Date((this.deps.now ?? Date.now)()))}（${error instanceof Error ? error.message : String(error)}）。`);
       if (this.toldFailure) return;
       this.toldFailure = true;
-      this.deps.tell(`助手整理较早的对话没有成功（${error instanceof Error ? error.message : String(error)}）。对话照常继续，她过一阵会再试；一直不成功的话，对话太长时回复可能出错。`);
+      this.deps.tell("对话整理没有成功，原始对话仍然保留，稍后会自动重试。详细原因可在命令中心的助手状态中查看。");
     }).finally(() => {
       if (this.writing?.promise === promise) { this.writing = undefined; this.inUse = undefined; }
       this.showStatus();

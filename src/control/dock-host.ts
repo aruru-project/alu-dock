@@ -56,7 +56,7 @@ import {
 } from "../core/managed-instance.js";
 import { InvalidHistoryCursorError } from "../core/instance-event-journal.js";
 import type { JsonObject } from "../core/json-value.js";
-import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
+import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentQueryTimeoutError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
 import { ResourceContentError } from "../core/resource-content.js";
 import { DeliverableUnavailableError } from "../core/instance-deliverables.js";
@@ -169,7 +169,7 @@ export interface DockHostOptions {
   /** Main edits that list for every machine; a SubHost leaves it out. */
   childModelsEditor?: ChildModelsEditor;
   /** Main's assistant service, for clients to read and edit her persona and notes and search her conversations (card #295). */
-  assistant?: AssistantHostPort;
+  assistant?: AssistantHostPort & { onReady?(listener: () => void): () => void };
   listen?: boolean;
 }
 
@@ -203,7 +203,9 @@ export class DockHost {
   private readonly modelVisibility: ModelVisibilityPort | undefined;
   private readonly childModels: ChildModelsSource | undefined;
   private readonly childModelsEditor: ChildModelsEditor | undefined;
-  private readonly assistant: AssistantHostPort | undefined;
+  private readonly assistant: DockHostOptions["assistant"];
+  private unsubscribeAssistantReady: (() => void) | undefined;
+  private assistantNameRead: AbortController | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -387,6 +389,7 @@ export class DockHost {
       });
       this.state = "running";
       this.registry.startAssistant();
+      this.startAssistantNameUpdates();
     } catch (error) {
       await this.instanceManager.stop().catch(() => {});
       await this.remoteAccess?.stop().catch(() => {});
@@ -403,15 +406,41 @@ export class DockHost {
       this.unsubscribeRuntimeReopened = undefined;
       this.unsubscribeCatalogRemoval?.();
       this.unsubscribeCatalogRemoval = undefined;
+      this.stopAssistantNameUpdates();
       if (this.state === "starting") this.state = "new";
       this.startPromise = undefined;
       throw error;
     }
   }
 
+  /** Her identity follows memory-service readiness, never gates the independent chat Worker. */
+  private startAssistantNameUpdates(): void {
+    const assistant = this.assistant;
+    if (!assistant) return;
+    const refresh = () => {
+      if (this.state !== "running") return;
+      this.assistantNameRead?.abort();
+      const controller = this.assistantNameRead = new AbortController();
+      void this.registry.refreshAssistantDisplayName(async () => {
+        const settings = await assistant.request({ op: "settings_get" }, { owner: true }, controller.signal);
+        return this.state === "running" && !controller.signal.aborted ? settings.displayName : undefined;
+      }).catch(() => { /* Keep the known name; the next ready notification retries after recovery. */ });
+    };
+    if (assistant.onReady) this.unsubscribeAssistantReady = assistant.onReady(refresh);
+    else refresh();
+  }
+
+  private stopAssistantNameUpdates(): void {
+    this.unsubscribeAssistantReady?.();
+    this.unsubscribeAssistantReady = undefined;
+    this.assistantNameRead?.abort();
+    this.assistantNameRead = undefined;
+  }
+
   private async performStop(): Promise<void> {
     try {
       if (this.startPromise) await this.startPromise.catch(() => {});
+      this.stopAssistantNameUpdates();
       await this.registry.stopAssistantRecovery();
 
       const server = this.server;
@@ -903,7 +932,7 @@ export class DockHost {
       }
       case "workspace.file.read": await this.streamWorkspaceFile(request, socket); return;
       case "instance.read": {
-        const instance=this.registry.get(request.params.instanceId);
+        const instance=await this.registry.getForObservation(request.params.instanceId);
         if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
         const projection=await instance.getAttachProjection(request.params.since,MAX_HISTORY_ITEMS,request.params.replay);
         this.sendSuccessAndEnd(socket,request.requestId,projection,(projected)=>createBoundedReadResult(projected,request.requestId,streamAudience(request))); return;
@@ -1106,7 +1135,8 @@ export class DockHost {
   }
 
   private async deliverInstanceRecords(request: Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,socket:Socket,channel:InstanceRecordChannel,setUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
-    const instance=this.registry.get(request.params.instanceId);
+    const instance=await this.registry.getForObservation(request.params.instanceId);
+    if(socket.destroyed)return;
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
     if(request.type==="instance.read") {
@@ -1181,7 +1211,8 @@ export class DockHost {
   }
 
   private async followEventStream(request: Extract<ControlRequest,{type:"instance.follow"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
-    const instance=this.registry.get(request.params.instanceId);
+    const instance=await this.registry.getForObservation(request.params.instanceId);
+    if(socket.destroyed)return;
     this.trackAttachStream(instance.id, socket);
     const cursor=request.params.since;
     if(cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
@@ -1373,7 +1404,11 @@ export class DockHost {
       case "assistant.settings.get": return ask({ op: "settings_get" });
       case "assistant.settings.set": {
         const { operationId, ...settings } = request.params;
-        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", ...settings }));
+        return this.operationLedger.run(operationId, request.type, request.params, async () => {
+          const saved = await assistant.request({ op: "settings_set", ...settings }, { owner: true });
+          if (settings.displayName !== undefined && saved.displayName !== undefined) this.registry.setAssistantDisplayName(saved.displayName);
+          return saved;
+        });
       }
       case "assistant.reorganize": {
         const { operationId, extractionModel } = request.params;
@@ -1756,6 +1791,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof RuntimeEffectUnknownError || error instanceof MachineMutationEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
   }
+  if (error instanceof AgentQueryTimeoutError) return { code: "query_timeout", message: error.message, retryable: true };
   if (error instanceof AgentUnavailableBeforeEffectError) {
     return { code: "runtime_unavailable", message: error.message };
   }

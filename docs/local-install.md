@@ -48,8 +48,8 @@ Alu Dock 自带 Pi。运行 `aludock` 后可在 **Settings → Pi** 查看可用
 在 `models.json` 里自己加的 `openai-responses` 供应商（比如经 CLIProxyAPI 这类代理转发到 OpenAI 或 Codex），要在供应商一级写上 `"compat": { "supportsStrictMode": true }`：
 
 ```json
-"openai-sub": {
-  "baseUrl": "http://192.168.1.195:38317/v1",
+"my-openai-proxy": {
+  "baseUrl": "https://proxy.example.com/v1",
   "api": "openai-responses",
   "compat": { "supportsStrictMode": true },
   "models": [ … ]
@@ -87,7 +87,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 ## 给 Agent 看的模型
 
-子 Work 默认和父 Work 用同一个模型、同一档 thinking。只有你在对话里点名，或者项目文件（如 `AGENTS.md`）里写明时，Agent 才给子 Work 换模型或 thinking；换了的模型没有这一档时，用它最接近的一档，开子 Work 的结果里会写明。
+普通 Pi Work 的子 Work 默认沿用父 Work 的模型和 thinking；只有你点名或项目文件写明时才改选。Main 的常驻助手采用独立派工策略：可按任务选择可用模型和思考强度，省略模型时用目标机器的正常 Pi 默认，省略 thinking 时用 high，不机械继承聊天的 low 档。模型不支持所选强度时采用最接近的一档，创建结果说明实际选择。速度档位仍须单独获得你的授权。
 
 你说"这次用 deepseek 审查"时，Agent 用 `dock_models` 在一份名单里找到准确的那个模型，而不是在全部模型里猜。名单只有 Main 上一份，SubHost 上的 Work 也读它。通常在官方客户端的 **Host 设置 → 子 Work 模型** 里管理，或者在 Main 上运行 `aludock`，进 **Settings → Pi → Models for child Works**；也可以直接编辑 Main 的 Host 私有状态目录中的 `child-models.json`，和 `model-visibility.json` 在同一个目录：
 
@@ -103,6 +103,18 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 `provider` 与 `id` 的写法和隐藏列表一样，名单最多 50 个模型，只写模型，不写用途：写给 Agent 的"什么时候用"会被它当成规则，固定的分工请写进项目文件。父 Work 自己的模型总排在第一位；名单里的每个模型会自动附上它支持的 thinking level、上下文长度和能不能看图，这台机器当前用不了的会单独列出。
 
 名单不限制子 Work 能用哪个模型：你点名要的其他模型照样可以用。文件不存在时，父 Work 只会看到它自己的模型。Host 每次被问到时现读这个文件，改完不用重启；格式写错时，Agent 会看到错误原因并可以转告你，设置页也会指出问题，在页面上保存一次会写回正确的内容。
+
+## 模型速度
+
+Work 顶栏的速度入口读 Main 的支持信息。标准不请求加速，Fast/Ultrafast 可能增加费用；选择模型或思考强度不等于授权加速。可以只设置当前 Work，也可以共享给仍跟随父级的当前和以后子 Work；子 Work 自己的选择优先，恢复跟随后再沿用父级。
+
+支持配置只有 Main 的 Dock 私有状态目录一份：`model-speed-support.json`，不在 Pi 目录。自建代理若使用别的 provider 名称，可显式映射到已登记供应商，例如：
+
+```json
+{ "aliases": { "my-proxy": "openai-codex" } }
+```
+
+保存支持文件后，运行中的 Work 在查询或修改速度设置、读取 Pi 模型列表时更新支持信息，不用重建 Work。读取失败保留最近有效信息，不把临时失败当成不支持。修改支持表不会替你选择档位，也不会发模型请求。实际接受哪一档由上游决定；后台整理记忆的速度单独保存在助手设置中。
 
 ## 个人助手
 
@@ -125,11 +137,13 @@ Windows: %LOCALAPPDATA%\Alu Dock\assistant\
 
 通常在官方客户端的「助手」页里看和改，也可以直接编辑两个 Markdown 文件，或者让她自己改。阿露常驻在 Main；改动在「刷新人设和记忆」（Reload）、重启她或她整理较早的对话时换成最新的。备份用 `aludock assistant:backup 新目录`，在 Main 上运行，Host 不用停：它把人设、手写设定和对话记忆按运行这条命令那一刻的样子复制到新目录，复制期间新说的话留给下一次备份。不要在 Host 运行时直接复制 `memory.sqlite`，最近的对话可能还在旁边的 `-wal` 文件里。恢复时先停 Host，把备份里的三个文件放回 `assistant/` 目录，再启动。
 
-她的工作区固定在 Main 的 `~/.aludock/assistant`。Main 启动后工作列表最上面就有她，不用再新建，SubHost 不开第二个。新安装的显示名为“助手”，可以改名；出厂人设里的阿露也只是可编辑的初始内容，不强制角色或口吻，升级和重启不会覆盖。升级时 Main 最近用过的助手对话成为她，其余旧助手 Work 变成普通 Pi Work；对话文件和记忆都保留。点「重启」保留名字、对话与记忆、停止她的子 Work；中止当前回答仍只是中止回答，不等于重启 Work。
+她的工作区固定在 Main 的 `~/.aludock/assistant`。Main 启动后就有她，官方客户端把唯一助手固定在侧栏顶部，不放进普通工作列表或计数，SubHost 不开第二个。显示名字默认 `alu`，点聊天顶栏的名字进入助手页，在设置中修改；名字由 Main 保存，其他客户端读取同一份，不改会话标题、人设或记忆。出厂人设里的阿露仍是可编辑的初始内容，升级和重启不会覆盖。升级时 Main 最近用过的助手对话成为她，其余旧助手 Work 变成普通 Pi Work；对话文件和记忆都保留。点「重启」保留名字、对话与记忆、停止她的子 Work；中止当前回答仍只是中止回答，不等于重启 Work。
 
 在「助手 → 设置」中可编辑滚动整理的启动阈值、保留原话量和完整交接提示词，下一次整理采用保存值；它沿用当前聊天模型，与上面的长期记忆提炼模型是两件事。
 
-联网作为 `builtin:web` 随 Dock 提供，不要求预装 Pi 扩展。私人业务能力通过[助手工具扩展](agent/assistant-tool-extensions.md)显式配置，保存后在助手空闲时 Reload 生效；已有 Pi 扩展不会自动迁入助手，普通 Pi Work 的扩展仍按原方式使用。已有的人设不会被新出厂指导覆盖，若其中写着旧的工具能力或工作分工，需要自行调整。
+联网作为 `builtin:web` 随 Dock 提供，不要求预装 Pi 扩展。私人业务能力通过工作区的 `extensions.json` 显式配置，保存后在助手空闲时 Reload 生效；旧数据库配置会一次迁移并保留所有参数及扩展数据。普通用户设置页不再放通用 JSON 编辑器。扩展可同时提供工具、主人直接执行的命令和 Skill 声明，详见[助手扩展接口](agent/assistant-tool-extensions.md)。普通 Pi Work 的扩展仍按原方式使用。
+
+助手会发现工作区 `.pi/skills`、向上至仓库根的 `.agents/skills`，以及 Home 下 `.aludock/skills`、`.agents/skills` 和扩展手册。本机扩展没有显式 Skill 声明时，默认发现模块旁的 `skills/` 目录；已有随包手册不必另填路径。提示只列用途和读取位置，匹配任务时再读正文；正常新回复和 Reload 重新发现，不导入整套 Pi 用户身份。运行详情可从命令中心的 `/assistant-status` 查看，正常扩展加载和后台整理不再常驻聊天警告栏。已有的人设不会被新出厂指导覆盖，若其中写着旧的工具能力或工作分工，需要自行调整。
 
 ## Service 命令
 

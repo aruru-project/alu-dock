@@ -1,14 +1,14 @@
 import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import {
-  abortRun, abortShellCommands, compactSession, forgetWork, isTauri, listMachines, reopenWork, runShellCommand, sessionContext, stopWork,
+  abortRun, abortShellCommands, compactSession, forgetWork, isTauri, listMachines, reopenWork, runShellCommand, sessionContext, stopWork, type CreateWorkContinuation,
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { subhostMachineName } from '../lib/machines'
 import { replyLost } from '../lib/operationBinding'
-import { stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
+import { isResidentAssistant, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { ConnectionContext, MachineDto, Work } from '../lib/types'
+import type { MachineDto, Work } from '../lib/types'
 import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
@@ -26,7 +26,12 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const compactionErrors = ref<Record<string, { scope: FeedbackScope; message: string }>>({})
 
   const pendingWorkActions = ref(new Set<string>())
-  const workMutating = computed(() => pendingWorkActions.value.has(feedbackIdentity.value))
+  const reopening = computed(() => selected.value?.lifecycle !== 'active' && [...app.nativeOperations.values()].some(operation => operation.kind === 'reopen_work'
+    && operation.state === 'pending' && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id
+    && operation.hostEpoch === app.payload?.host.hostEpoch && operation.runtimeGeneration === selected.value?.runtimeGeneration))
+  const reopenIdentity = computed(() => JSON.stringify([feedbackIdentity.value, 'reopen', selected.value?.runtimeGeneration]))
+  const workMutating = computed(() => pendingWorkActions.value.has(feedbackIdentity.value)
+    || (selected.value?.lifecycle !== 'active' && (pendingWorkActions.value.has(reopenIdentity.value) || reopening.value)))
   const pendingAborts = ref(new Set<string>())
   const aborting = computed(() => pendingAborts.value.has(feedbackIdentity.value))
   const feedbackIdentity = computed(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration,
@@ -47,7 +52,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   function reportAction(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
     if (feedbackMatches(scope)) feedback.value = { scope, message, tone }
   }
-  // A lost reply is reported once like any failure; the conversation and Work state show what happened.
+  // A still-lost reply is reported once like any failure. Continue first observes
+  // once in native code; if that read also fails, its result offers an explicit state read.
   // The message shows above the composer; once it is on screen there, the Work result
   // entry does not say it again. A stopped Work has no composer: its entry says it.
   function reportFailure(scope: FeedbackScope, cause: unknown) {
@@ -69,25 +75,32 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   })
 
   /** One Host step stops the reply and returns the waiting Queue to the editor. */
-  async function abortCurrentRun() {
+  async function abortCurrentRun(presentFailure?: (cause: unknown) => boolean) {
     const work = selected.value
-    if (!work || work.execution !== 'running' || aborting.value) return
+    // Extension commands can be running or waiting for confirmation while chat is idle.
+    if (!work || work.lifecycle !== 'active' || aborting.value) return
     const feedbackScope = captureFeedback()
     const capturedHost = requireConnectionContext(app)
     pendingAborts.value.add(feedbackScope.identity)
-    reportAction(feedbackScope, null)
+    if (!presentFailure) reportAction(feedbackScope, null)
     try {
       const result = await abortRun(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return
       const returned = result.receipt.restored.length
       const kept = result.receipt.inFlight.length
-      if (kept) {
+      if (result.instance.execution === 'running') {
+        reportAction(feedbackScope, `中止请求已送达。${returned ? `${returned} 条排队消息已放回输入框。` : ''}${kept ? `另有 ${kept} 条已经交给 Agent，会留在对话里。` : ''}`, 'notice')
+      } else if (kept) {
         reportAction(feedbackScope, `已中止。${returned ? `${returned} 条排队消息已放回输入框；` : ''}另有 ${kept} 条已经交给 Agent，会留在对话里。`, 'notice')
       } else if (returned) {
         reportAction(feedbackScope, `已中止，${returned} 条排队消息已放回输入框。`, 'notice')
       }
     } catch (cause) {
-      reportFailure(feedbackScope, cause)
+      if (presentFailure) {
+        // A panel owns only its own request's failure. If it has gone away, the
+        // native operation result remains available for that Work instead.
+        if (feedbackMatches(feedbackScope) && presentFailure(cause)) app.failureShown(cause)
+      } else reportFailure(feedbackScope, cause)
     } finally {
       pendingAborts.value.delete(feedbackScope.identity)
     }
@@ -154,15 +167,15 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     const capturedHost = app.connectionContext
     if (!isTauri || !capturedHost || !stopCanStart(work, workMutating.value) || !work) return false
     const feedbackScope = captureFeedback(false)
-    if (!await page.askConfirm(work.assistant ? `重启${work.displayName || '助手'}？` : '停止当前工作？', stopConfirmationText(work))) return false
+    if (!await page.askConfirm(isResidentAssistant(work) ? `重启${work.displayName || '助手'}？` : '停止当前工作？', stopConfirmationText(work))) return false
     if (!feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || !stopCanStart(selected.value, false)) return false
     pendingWorkActions.value.add(feedbackScope.identity)
-    reportAction(work.assistant ? captureFeedback() : feedbackScope, work.assistant ? `正在重启${work.displayName || '助手'}，对话和记忆保留。` : null, 'notice')
+    reportAction(isResidentAssistant(work) ? captureFeedback() : feedbackScope, isResidentAssistant(work) ? `正在重启${work.displayName || '助手'}，对话和记忆保留。` : null, 'notice')
     try {
       const result = await stopWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return false
       if (!stoppedResultIsCorrelated(result, work.id)) throw new Error('停止结果和这个 Work 对不上，请看一下它现在的状态。')
-      if (work.assistant) {
+      if (isResidentAssistant(work)) {
         // Stop retires her old process, not her Work. Main restarts her with the same conversation.
         observation.acceptWork(result.instance, capturedHost)
         void observation.refreshCurrent()
@@ -181,44 +194,76 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     }
   }
 
+  watch([feedbackIdentity, sessionIdentity], () => page.settleProjectTrust(null), { flush: 'sync' })
+
   async function reopenSelectedWork() {
     const work = selected.value
     if (!isTauri || !work || !work.reopenable || workMutating.value) return
     const capturedHost = requireConnectionContext(app)
-    const previousGeneration = work.runtimeGeneration
     const feedbackScope = captureFeedback(false)
-    pendingWorkActions.value.add(feedbackScope.identity)
+    const pendingIdentity = reopenIdentity.value
+    pendingWorkActions.value.add(pendingIdentity)
     reportAction(feedbackScope, null)
     try {
-      const continued = await reopenWork(work.id, app.captureOperationTarget(capturedHost, work.id))
-      if (!app.contextMatches(capturedHost)) return
-      // This Work was not followed while it was lost, so the Host's answer says
-      // it is active again; its own read and live events take over from there.
-      observation.acceptWork(continued, capturedHost)
-      void observation.load(work.id, true)
+      const unresolved = [...app.nativeOperations.values()].some(operation => operation.kind === 'reopen_work'
+        && operation.state === 'unknown' && operation.connectionId === capturedHost.connectionId && operation.instanceId === work.id
+        && operation.hostEpoch === app.payload?.host.hostEpoch && operation.runtimeGeneration === work.runtimeGeneration)
+      if (unresolved) {
+        if (await checkContinuedWork(work.id)) return
+        if (!feedbackMatches(feedbackScope) || !await page.askConfirm('上次继续还没有确认结果',
+          '暂时没有读到这个 Work 已恢复。它可能仍在启动，也可能没有成功。仍要请求继续同一个 Work 吗？不会另建 Work。')) return
+        if (!feedbackMatches(feedbackScope)) return
+      }
+      const target = app.captureOperationTarget(capturedHost, work.id)
+      let continuation: CreateWorkContinuation | undefined
+      for (;;) {
+        try {
+          const continued = await reopenWork(work.id, target, continuation)
+          if (!app.contextMatches(capturedHost)) return
+          // This Work was not followed while it was lost; the Host's answer opens it now.
+          observation.acceptWork(continued, capturedHost)
+          if (feedbackMatches(feedbackScope)) void observation.load(work.id, true)
+          return
+        } catch (cause) {
+          if (!feedbackMatches(feedbackScope)) return
+          const failure = cause as { code?: string; operationId?: string; details?: { operationId?: string; challengeId?: string; cwd?: string } }
+          if (failure?.code !== 'project_trust_required') throw cause
+          const operationId = failure.details?.operationId ?? failure.operationId
+          const trustChallengeId = failure.details?.challengeId
+          const cwd = failure.details?.cwd
+          if (!operationId || !trustChallengeId || !cwd || (failure.operationId && failure.operationId !== operationId)) throw cause
+          const decision = await page.askProjectTrust(cwd)
+          if (!decision || !feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost)
+            || selected.value?.runtimeGeneration !== target.expectedRuntimeGeneration) return
+          continuation = { operationId, trustChallengeId, projectTrustDecision: decision }
+        }
+      }
     } catch (cause) {
-      if (!feedbackMatches(feedbackScope)) return
-      // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
-      // the native known-failure result visible; never infer a trust decision.
-      reportFailure(feedbackScope, cause)
-      if (replyLost(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
+      // Native Continue already made one ordered read after losing its reply.
+      // The unknown result owns its state-read action; do not leave another error
+      // above the editor after that read confirms the Work has recovered.
+      if (!replyLost(cause)) {
+        reportFailure(feedbackScope, cause)
+        void app.refreshWorksQuietly()
+      }
     } finally {
-      pendingWorkActions.value.delete(feedbackScope.identity)
+      pendingWorkActions.value.delete(pendingIdentity)
     }
   }
 
-  /** If the lost Continue did take effect, show the continued Work without another message. */
-  async function followReopenedWork(workId: string, previousGeneration: number, context: ConnectionContext, feedbackScope: FeedbackScope) {
-    if (!await app.refreshWorksQuietly() || !app.contextMatches(context) || !feedbackMatches(feedbackScope)) return
+  /** An explicit read after an unresolved Continue. It never sends another Continue. */
+  async function checkContinuedWork(workId: string): Promise<boolean> {
+    const context = requireConnectionContext(app)
+    if (!await app.refreshWorksQuietly() || !app.contextMatches(context)) return false
     const current = app.works.find((work) => work.id === workId)
-    if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) return
-    observation.acceptWork(current, context)
-    void observation.load(workId, true)
+    if (!current || current.lifecycle !== 'active') return false
+    if (selected.value?.id === workId) void observation.load(workId, true)
+    return true
   }
 
   async function forgetSelectedWork() {
     const work = selected.value
-    if (!isTauri || !work || work.assistant || !['stopped', 'host_lost', 'runtime_error'].includes(work.lifecycle) || workMutating.value) return
+    if (!isTauri || !work || isResidentAssistant(work) || !['stopped', 'host_lost', 'runtime_error'].includes(work.lifecycle) || workMutating.value) return
     const capturedHost = requireConnectionContext(app)
     const feedbackScope = captureFeedback(false)
     if (!await page.askConfirm('从列表移除这条历史记录？')) return
@@ -321,17 +366,18 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   function workGroup(work: Work) {
     // A lifecycle only a newer Host knows is not history: it stays visible, without a 移除 that cannot act (#356).
-    if (work.assistant || work.lifecycle === 'active' || work.lifecycle === 'stopping' || work.lifecycle === 'unrecognized') return 'current'
+    if (isResidentAssistant(work) || work.lifecycle === 'active' || work.lifecycle === 'stopping' || work.lifecycle === 'unrecognized') return 'current'
     if (work.reopenable) return 'continue'
     return 'history'
   }
 
   const groupedWorks = computed(() => {
-    const groups: Record<'current' | 'continue' | 'history', Work[]> = { current: [], continue: [], history: [] }
-    const parents = app.works.filter(work => !work.parentId).sort((left, right) => Number(!!right.assistant) - Number(!!left.assistant))
+    const groups: Record<'assistant' | 'current' | 'continue' | 'history', Work[]> = { assistant: [], current: [], continue: [], history: [] }
+    const parents = app.works.filter(work => !work.parentId)
     for (const parent of parents) {
-      const group = groups[workGroup(parent)]
-      group.push(parent, ...app.works.filter(work => work.parentId === parent.id))
+      const group = groups[isResidentAssistant(parent) ? 'assistant' : workGroup(parent)]
+      if (!isResidentAssistant(parent)) group.push(parent)
+      group.push(...app.works.filter(work => work.parentId === parent.id))
     }
     // A failed cleanup must stay visible even after its parent retired.
     const parentIds = new Set(app.works.filter(work => !work.parentId).map(work => work.id))
@@ -413,6 +459,25 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     page.openAssistant()
   }
 
+  const assistantStatusError = ref('')
+  watch(() => app.activeConnectionId, () => { assistantStatusError.value = '' })
+
+  /** An explicit owner click navigates to her command center before any command is sent. */
+  function openAssistantStatus() {
+    assistantStatusError.value = ''
+    const assistant = app.works.find(isResidentAssistant)
+    if (!assistant) {
+      assistantStatusError.value = '助手暂未出现在工作列表中，请稍后重试。'
+      return
+    }
+    if (assistant.lifecycle !== 'active') {
+      assistantStatusError.value = '助手目前没有运行。请从工作列表打开她，选择继续后重试。'
+      return
+    }
+    app.selectWork(assistant.id)
+    page.openControlCenter('commands', { name: 'assistant-status', source: { kind: 'built-in' } })
+  }
+
   function acceptCreatedWork(work: Work) {
     page.directoryBusy = false
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
@@ -427,8 +492,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   return {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
-    abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction,
+    abortCurrentRun, stopSelectedWork, reopenSelectedWork, checkContinuedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, openAssistantStatus, assistantStatusError, acceptCreatedWork,
   }
 })

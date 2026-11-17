@@ -3,6 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { BookUser, Brain, Eye, NotebookPen, RefreshCw, Search, Settings2, Sparkles, X } from '@lucide/vue'
 import { assistantTime, memoryResidentLabel } from '../lib/assistant'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
@@ -22,7 +23,7 @@ const search = useAssistantSearchStore()
 const { preview, info } = storeToRefs(assistant)
 const surfaces = useSurfacesStore()
 const { assistantSection: section } = storeToRefs(surfaces)
-const assistantWork = computed(() => app.works.find(work => work.assistant))
+const assistantWork = computed(() => app.works.find(isResidentAssistant))
 function openConversation() {
   if (!assistantWork.value) return
   app.selectWork(assistantWork.value.id)
@@ -56,7 +57,6 @@ watch([section, () => app.connectionContext?.connectionId, () => app.connectionC
   } else if (current === 'settings') {
     void memory.loadSettings()
     void memory.loadModels()
-    void memory.refreshHandoffStatus()
   }
 }, { immediate: true })
 
@@ -76,7 +76,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
     <div class="assistant-heading">
       <span class="assistant-mark"><Sparkles :size="20" /></span>
       <div>
-        <h2 id="assistant-title">助手</h2>
+        <h2 id="assistant-title">{{ assistantWork?.displayName || '助手' }}</h2>
         <p>助手一直住在 Main，对话、人设和记忆都留在这里</p>
       </div>
     </div>
@@ -87,7 +87,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
     <nav class="assistant-nav" aria-label="助手分区">
       <button v-for="item in sections" :key="item.id" type="button" class="assistant-nav-item" :class="{ 'is-active': section === item.id }" :aria-current="section === item.id ? 'page' : undefined" @click="section = item.id">
         <component :is="item.icon" :size="16" /><span>{{ item.label }}</span>
-        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts) || (item.id === 'search' && search.hasDrafts)" class="assistant-nav-dot" aria-label="有未保存的改动" />
+        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts) || (item.id === 'search' && search.hasDrafts) || (item.id === 'settings' && (memory.hasSettingsDrafts || (assistant.identity.draft !== null && assistant.identity.draft !== assistant.identity.current)))" class="assistant-nav-dot" aria-label="有未保存的改动" />
       </button>
     </nav>
 
@@ -155,7 +155,8 @@ onUnmounted(surfaces.onAssistantBack(() => {
 .assistant-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: var(--alu-surface); }
 .assistant-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
 .assistant-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-accent-border); border-radius: 10px; background: var(--alu-accent-bg); color: var(--alu-accent); place-items: center; }
-.assistant-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
+.assistant-heading > div { min-width: 0; }
+.assistant-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
 .assistant-heading p { margin: 3px 0 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .assistant-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .assistant-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }

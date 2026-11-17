@@ -25,6 +25,7 @@ import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 import { ptyUserEnvironment } from "./support/pty-user-environment.js";
+import { waitFor } from "./support/plan-goal-provider.js";
 
 interface Harness {
   directory: string;
@@ -2277,6 +2278,218 @@ test("a runtime-driven post-compaction continuation starts while every client is
   assert.ok(replay.initial.page.events.some((event) => event.type === "tool.started" && event.data.toolCallId === "offline-tool"));
   replay.close();
   await replay.done;
+});
+
+test("a slow status save does not report a Work idle before its run finishes", { timeout: 10_000 }, async (context) => {
+  const catalog = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(catalog);
+  let releaseCatalog = () => {};
+  context.after(async () => { releaseCatalog(); await cleanupHarness(harness); });
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "compaction-event-order");
+  const runtime = harness.sessions.get(created.id)!;
+  const run = runtime.prompt("runtime-owned continuation");
+  const initial = await client.read(created.id, undefined, "event_log");
+  assert.equal(initial.instance.execution, "running");
+  assert.equal(initial.instance.activeCommandId, undefined);
+
+  const gate = catalog.gateAt(catalog.calls.length + 1);
+  releaseCatalog = gate.release;
+  runtime.isCompacting = true;
+  runtime.emit({ type: "compaction_start", reason: "threshold" });
+  await gate.entered;
+  runtime.isCompacting = false;
+  runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+  // The Worker advances while catalog publication is blocked. Re-reading its
+  // current state when applying compaction_end would wrongly publish idle.
+  runtime.settle("actually finished after compaction");
+  await run;
+  assert.equal(runtime.isStreaming, false);
+  gate.release();
+
+  const observed = await client.read(created.id, undefined, "event_log");
+  const completed = observed.page.events.find((event) => event.type === "instance.state_changed" && event.data.reason === "compaction_completed");
+  assert.ok(completed?.type === "instance.state_changed");
+  assert.equal(completed.data.execution, "running");
+  assert.equal(completed.data.compacting, false);
+  assert.equal(observed.instance.execution, "idle");
+  assert.ok(observed.page.events.some((event) => event.type === "run.settled" && event.sequence > completed.sequence));
+});
+
+// Pre-prompt visibility fix: a pending input must not claim or hide an older autonomous run.
+test("an older run's compaction and finish stay visible while the next message is still being prepared", { timeout: 20_000 }, async (context) => {
+  const catalog = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(catalog);
+  let releaseInput = (): void => {};
+  // The deliberately broken implementation can fail before releasing the gate.
+  // Release it before Host cleanup, or the red run itself waits indefinitely.
+  context.after(async () => { releaseInput(); await cleanupHarness(harness); });
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pending-input-old-run");
+  const runtime = harness.sessions.get(created.id)!;
+  const oldRun = runtime.prompt("autonomous old run");
+  const input = runtime.blockNextPromptBeforePreflight();
+  releaseInput = input.release;
+  const submitted = client.prompt(created.id, "next message", "auto", "new-input-waiting");
+  void submitted.catch(() => {});
+  await input.entered;
+  runtime.emit({ type: "queue_update", steering: [], followUp: [] });
+  runtime.isCompacting = true;
+  runtime.emit({ type: "compaction_start", reason: "threshold" });
+  const during = await client.read(created.id, undefined, "event_log");
+  assert.equal(during.instance.compacting, true);
+  const started = during.page.events.find((event) => event.type === "compaction.started");
+  assert.ok(started?.type === "compaction.started");
+  assert.equal(started.data.operationId, undefined);
+  runtime.isCompacting = false;
+  runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+  runtime.settle("old run finished");
+  await oldRun;
+  const finished = await client.read(created.id, undefined, "event_log");
+  assert.equal(finished.instance.execution, "idle");
+  const settled = finished.page.events.findLast((event) => event.type === "run.settled");
+  assert.ok(settled?.type === "run.settled");
+  assert.notEqual(settled.data.operationId, "new-input-waiting");
+  assert.ok(started.sequence < settled.sequence);
+  input.release();
+  assert.equal((await submitted).receipt.delivery, "prompt");
+  const current = await client.read(created.id, undefined, "event_log");
+  assert.equal(current.instance.activeCommandId, "new-input-waiting");
+  assert.equal(current.instance.execution, "running");
+  const freshStart = current.page.events.findLast((event) => event.type === "run.started");
+  assert.ok(freshStart && freshStart.sequence > settled.sequence);
+  runtime.settle("next message finished");
+  await harness.registry.get(created.id).waitForIdle();
+});
+
+// Pi _startRun clears busy and rejects when _prepareRun throws, without agent_settled.
+// This Worker-boundary peer supplies that sequence; real SDK summary HTTP errors
+// are tested separately because Pi normally catches them and continues the prompt.
+test("a message rejected after preparation leaves the Work available for the next message", { timeout: 20_000 }, async (context) => {
+  for (const withWaitingMessage of [false, true]) {
+    const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+    let releasePreparation!: () => void, preparationEntered!: () => void;
+    const gate = new Promise<void>(resolve => { releasePreparation = resolve; });
+    const entered = new Promise<void>(resolve => { preparationEntered = resolve; });
+    context.after(async () => { releasePreparation(); await cleanupHarness(harness); });
+    const client = new DockClient({ socketPath: harness.socketPath });
+    const created = await client.create(harness.directory, "failed-preparation");
+    const runtime = harness.sessions.get(created.id)!;
+    const normalPrompt = runtime.prompt.bind(runtime);
+    runtime.prompt = async (text, options, operationId) => {
+      if (text !== "prepare then fail") return normalPrompt(text, options, operationId);
+      runtime.isStreaming = true;
+      runtime.isCompacting = true;
+      runtime.emit({ type: "compaction_start", reason: "threshold" });
+      preparationEntered();
+      await gate;
+      runtime.isCompacting = false;
+      runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+      runtime.isStreaming = false;
+      options?.preflightResult?.(false);
+      throw new Error("Fixture preparation failed");
+    };
+    const rejected = assert.rejects(client.prompt(created.id, "prepare then fail", "auto", "failed-prepare"));
+    await entered;
+    let queueItemId: string | undefined;
+    if (withWaitingMessage) {
+      assert.equal((await client.prompt(created.id, "try again", "auto", "after-prepare-error")).receipt.queued, true);
+      queueItemId = (await client.read(created.id)).pendingMessages.find(item => item.operationId === "after-prepare-error")?.queueItemId;
+      assert.ok(queueItemId);
+    }
+    releasePreparation();
+    await rejected;
+    if (withWaitingMessage) {
+      await waitFor(async () => (await client.status(created.id)).activeCommandId === "after-prepare-error", "The accepted waiting message did not resume after preparation failed");
+    }
+    const failed = await client.read(created.id, undefined, "event_log");
+    assert.equal(failed.instance.compacting, false);
+    assert.ok(failed.page.events.some(event => event.type === "command.rejected" && event.data.operationId === "failed-prepare"));
+    assert.equal(failed.page.events.some(event => (event.type === "command.accepted" || event.type === "message.submitted") && event.data.operationId === "failed-prepare"), false);
+    if (withWaitingMessage) {
+      const consumed = failed.page.events.filter(event => event.type === "message.submitted" && event.data.operationId === "after-prepare-error");
+      assert.equal(consumed.length, 1);
+      assert.equal(consumed[0]?.type === "message.submitted" ? consumed[0].data.queueItemId : undefined, queueItemId);
+      assert.equal(failed.pendingMessages.length, 0);
+    } else {
+      assert.equal(failed.instance.execution, "idle");
+      assert.equal(failed.instance.activeCommandId, undefined);
+      assert.equal((await client.prompt(created.id, "try again", "auto", "after-prepare-error")).receipt.delivery, "prompt");
+    }
+    runtime.settle("next message finished");
+    await harness.registry.get(created.id).waitForIdle();
+  }
+});
+
+test("taking the Queue back includes a message whose Host hand-off was already underway", { timeout: 20_000 }, async (context) => {
+  for (const abort of [true, false]) {
+    const catalog = new ScriptedCatalogCommitPort();
+    const harness = await createTransactionHarness(catalog);
+    let releaseInput!: () => void, inputEntered!: () => void, releaseAbort!: () => void;
+    let releaseAdmission = (): void => {};
+    const inputGate = new Promise<void>(resolve => { releaseInput = resolve; });
+    const entered = new Promise<void>(resolve => { inputEntered = resolve; });
+    const abortGate = new Promise<void>(resolve => { releaseAbort = resolve; });
+    context.after(async () => { releaseAdmission(); releaseInput(); releaseAbort(); await cleanupHarness(harness); });
+    const client = new DockClient({ socketPath: harness.socketPath });
+    const created = await client.create(harness.directory, "queue-handoff-before-stop");
+    const runtime = harness.sessions.get(created.id)!;
+    const oldRun = runtime.prompt("original run");
+    await client.read(created.id);
+    // On Abort, compaction starts only after this input acquired its lease.
+    const admission = abort ? catalog.gateAt(catalog.calls.length + 1) : undefined;
+    if (admission) releaseAdmission = admission.release;
+    else {
+      runtime.isCompacting = true;
+      runtime.emit({ type: "compaction_start", reason: "threshold" });
+    }
+    const invoke = runtime.invoke.bind(runtime);
+    runtime.invoke = async (request, options) => {
+      if (request.type === "command.submit" && options?.context?.type === "defer_to_host") {
+        inputEntered(); await inputGate;
+      }
+      const result = await invoke(request, options);
+      if (request.type === "command.abort_restore_queue") {
+        runtime.settle("original run cancelled", "aborted");
+        await abortGate;
+      }
+      return result;
+    };
+    const queued = client.prompt(created.id, "waiting message", "auto", "waiting-before-restore");
+    void queued.catch(() => {});
+    if (admission) {
+      await admission.entered;
+      runtime.isCompacting = true;
+      runtime.emit({ type: "compaction_start", reason: "threshold" });
+      releaseAdmission();
+    }
+    await entered;
+    await client.read(created.id);
+    const managed = harness.registry.get(created.id);
+    // Invoke the public Host instance control directly to fix dispatch order;
+    // only the Worker transport round trips are held by the peer above.
+    const taking = abort ? managed.abortRestoreQueue("take-back") : managed.dequeue("take-back");
+    void taking.catch(() => {});
+    await new Promise<void>(resolve => setImmediate(resolve));
+    releaseInput();
+    assert.equal((await queued).receipt.queued, true);
+    releaseAbort();
+    const result = await taking;
+    assert.deepEqual(result.restored.map(item => ({ operationId: item.operationId, text: item.text })), [
+      { operationId: "waiting-before-restore", text: "waiting message" },
+    ]);
+    const after = await client.read(created.id);
+    assert.equal(after.pendingMessages.length, 0);
+    assert.equal(after.instance.pending.total, 0);
+    if (runtime.isCompacting) {
+      runtime.isCompacting = false;
+      runtime.emit({ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false });
+    }
+    runtime.settle("original run cancelled", "aborted");
+    await oldRun;
+    await managed.waitForIdle();
+    assert.equal(runtime.promptMessages.filter(text => text === "waiting message").length, 0);
+  }
 });
 
 test("stop preempts a manual compaction even before its start event is projected", async (context) => {

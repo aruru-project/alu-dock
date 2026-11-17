@@ -18,8 +18,8 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const surfaces = useSurfacesStore()
-const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsDirty, assistantOpen, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
-const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
+const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsDirty, assistantOpen, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
+const { settleConfirm, settleProjectTrust, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const { refreshCurrent } = useObservationStore()
 const workActions = useWorkActionsStore()
@@ -120,6 +120,24 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   </Transition>
 
   <Transition name="fade">
+    <div v-if="projectTrustDialog" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+      <section :ref="element => bindSurface('project-trust', element)" class="ui-dialog-box" role="dialog" aria-modal="true" tabindex="-1" aria-label="继续 Work 前确认信任" @wheel="handleModalWheel">
+        <header class="ui-dialog-header"><div class="ui-dialog-title">继续 Work 前确认信任</div></header>
+        <div class="reopen-trust-body">
+          <p>继续原来的 Work 需要载入这个目录里的项目配置和扩展；其中的代码可以在运行 Work 的机器上执行。只信任你了解的目录。</p>
+          <p class="reopen-trust-path">{{ projectTrustDialog.cwd }}</p>
+          <p>取消会让 Work 保持停止。“信任并继续”会记住这个目录的选择。</p>
+        </div>
+        <div class="ui-dialog-form-footer reopen-trust-actions">
+          <button class="ui-dialog-btn" data-modal-initial @click="settleProjectTrust(null)">取消</button>
+          <button class="ui-dialog-btn" @click="settleProjectTrust('trust_once')">仅本次信任</button>
+          <button class="ui-dialog-btn ui-dialog-btn-primary" @click="settleProjectTrust('trust_and_remember')">信任并继续</button>
+        </div>
+      </section>
+    </div>
+  </Transition>
+
+  <Transition name="fade">
     <div v-if="confirmDialog" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
       <section :ref="element => bindSurface('confirm', element)" class="ui-dialog-box ui-dialog-box-confirm" role="dialog" aria-modal="true" tabindex="-1" :aria-label="confirmDialog.title" @wheel="handleModalWheel">
         <header class="ui-dialog-header"><div class="ui-dialog-title">{{ confirmDialog.title }}</div><div v-if="confirmDialog.body" class="ui-dialog-body">{{ confirmDialog.body }}</div></header>
@@ -131,6 +149,9 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 </template>
 
 <style scoped>
+.reopen-trust-body { min-height: 0; overflow-y: auto; padding: 0 20px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
+.reopen-trust-path { color: var(--alu-text); overflow-wrap: anywhere; }
+.reopen-trust-actions { flex-wrap: wrap; }
 /* Narrower screens use the shared wide-dialog height from styles/dialog.css. */
 @media (min-width: 1001px) {
   .message-text-dialog { height: min(78vh, 720px); height: min(78dvh, 720px); }

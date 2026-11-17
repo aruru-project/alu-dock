@@ -191,6 +191,12 @@ import { classifyControlRequest, type ResourceContentResult, type SessionTreeRes
 import type { ObservationNotification } from "./instance-observation.js";
 import type { WorkMessage } from "./dock-tools.js";
 
+/** Worker facts captured synchronously with an event, before admission/commit queues can yield. */
+interface AgentEventReceipt {
+  event: AgentEvent;
+  streamingAtCompactionEnd?: boolean;
+}
+
 interface AgentEventTransition {
   kind: string;
   durable: boolean;
@@ -274,6 +280,7 @@ interface WorkingCheckpoint {
   key: string | undefined;
   name: string | undefined;
   cwd: string;
+  projectTrusted: boolean | undefined;
   executor: ExecutorIdentity;
   runtimeGeneration: number;
   agentStartCount: number;
@@ -361,6 +368,8 @@ export class ManagedInstance {
   private readonly extensionUi: ExtensionUiBroker;
   private keyValue: string | undefined;
   private nameValue: string | undefined;
+  /** Main owns this label in assistant settings, not in the session or catalog. */
+  private assistantDisplayName: string | undefined;
   private cwdValue: string;
   private gitBranchValue: string | undefined;
   private readonly executorIdentity: ExecutorIdentity;
@@ -374,13 +383,15 @@ export class ManagedInstance {
   private catalogPort: InstanceCatalogMutationPort | undefined;
   private committedSnapshotValue: InstanceSnapshot | undefined;
   private catalogAdmissionOperationId: string | undefined;
-  private readonly admissionBufferedEvents: AgentEvent[] = [];
+  private readonly admissionBufferedEvents: AgentEventReceipt[] = [];
   private modelConfigurationActive = false;
   private deferredModelObservation: AgentModelStateObservation | undefined;
   private admissionBufferOverflow = false;
   private receiptBoundaryOperationId: string | undefined;
   private sessionNameOperationId: string | undefined;
   private readonly receiptBoundaryTasks: Promise<void>[] = [];
+  /** Input delivery can finish during an interrupt; neither receipt may close the other's boundary. */
+  private readonly inputReceiptBoundaries = new Set<Promise<void>[]>();
   private replacementIntent: CatalogInstanceRecord["replacement"];
   private durableSessionFileValue: string | undefined;
   private recoverySessionFile: string | undefined;
@@ -395,7 +406,7 @@ export class ManagedInstance {
   get modelSpeed(): ModelSpeedSelection | undefined { return this.modelSpeedValue && { ...this.modelSpeedValue }; }
   readonly parentId: string | undefined;
   readonly assistant: boolean;
-  // Runtime-only: trust_once must never become a persisted permission grant.
+  // Retained only for this Work and its canonical cwd, never written to Pi's directory trust store.
   private projectTrustedValue: boolean | undefined;
   private readonly deliverables = new InstanceDeliverables();
   private executionChangedAtValue!: string;
@@ -496,6 +507,7 @@ export class ManagedInstance {
       runtimeGeneration: this.runtimeGenerationValue,
       executionRunning: this.state.execution === "running",
       runtimeStreaming: this.agentState().isStreaming,
+      runtimePreparing: this.agentState().isPreparing === true,
       compactionActive: this.compactionActive,
       pendingQueueMessages: this.pendingQueueMessages.length,
       inFlightQueueMessages: this.inFlightQueueMessages.length,
@@ -589,6 +601,7 @@ export class ManagedInstance {
       ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
       ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
       cwd: snapshot.cwd,
+      ...(this.projectTrustedValue === undefined ? {} : { projectTrusted: this.projectTrustedValue }),
       lifecycle: snapshot.lifecycle,
       execution: snapshot.execution,
       lastRun: snapshot.lastRun,
@@ -813,7 +826,15 @@ export class ManagedInstance {
     await this.disposeRuntimeOnce();
   }
 
+  setAssistantDisplayName(name: string): void {
+    if (!this.assistant || this.executorIdentity.kind !== "dock-assistant" || this.assistantDisplayName === name) return;
+    this.assistantDisplayName = name;
+    if (this.committedSnapshotValue) this.committedSnapshotValue = { ...this.committedSnapshotValue, displayName: name };
+    this.appendEvent("session.info_changed", { name: this.name, displayName: name });
+  }
+
   private projectedDisplayName(): string {
+    if (this.assistantDisplayName !== undefined) return this.assistantDisplayName;
     return projectInstanceDisplayName({
       name: this.name,
       key: this.key,
@@ -1195,13 +1216,11 @@ export class ManagedInstance {
     sessionFile: string,
     trust: AgentProjectTrust,
   ): Promise<AgentReplacementResult> {
-    return this.replaceRuntime("switching session", operationId, "switch", { requestedSessionFile: sessionFile }, async () => {
-      const result = await this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
-        context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
-      });
-      if (!result.cancelled) this.projectTrustedValue = trust.projectTrusted;
-      return result;
-    });
+    return this.replaceRuntime("switching session", operationId, "switch", {
+      requestedSessionFile: sessionFile, requestedProjectTrust: trust,
+    }, () => this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
+      context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
+    }));
   }
 
   async forkSession(operationId: string, entryId: string): Promise<AgentForkResult> {
@@ -1354,7 +1373,7 @@ export class ManagedInstance {
     attachments?: readonly AttachmentDto[],
   ): Promise<CommandReceipt> {
     const inputLease = this.requireCommandStart(
-      this.commandScheduler.admit({ class: "input" }),
+      this.commandScheduler.admit({ class: "input", deferToHost: this.runtimeCompactionInProgress() }),
       "submitting input",
     );
     let inputImages: ImagePathDto[];
@@ -1384,7 +1403,13 @@ export class ManagedInstance {
     const agentSettlesBeforeCommand = this.agentSettledCount;
     const parentRunning = this.state.execution === "running" || this.agentState().isStreaming;
 
-    this.catalogAdmissionOperationId = commandId;
+    // A later message may take short Host custody while the original submission
+    // waits for Pi. It has its own lease and receipt, not the original's event barrier.
+    const ownsAdmission = this.catalogAdmissionOperationId === undefined;
+    const clearAdmission = (): void => {
+      if (this.catalogAdmissionOperationId === commandId) this.catalogAdmissionOperationId = undefined;
+    };
+    if (ownsAdmission) this.catalogAdmissionOperationId = commandId;
     try {
       const admissionCommit = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.admission", effect: "pre_effect", operationId: commandId, instanceId: this.id },
@@ -1392,7 +1417,7 @@ export class ManagedInstance {
       ));
       if (this.catalogPort) await admissionCommit;
     } catch (error) {
-      this.catalogAdmissionOperationId = undefined;
+      clearAdmission();
       inputLease.release();
       throw error;
     }
@@ -1406,18 +1431,32 @@ export class ManagedInstance {
       rejectReceipt = reject;
     });
 
-    const release = (): void => inputLease.release();
+    const release = (): void => {
+      inputLease.release();
+      // A definite rejection also releases preparation. Unlike a run, it may
+      // have no agent_settled event to resume messages already held by the Host.
+      if (preflightStatus !== "pending") this.scheduleCompactionQueueDrain(false);
+    };
 
     let preflightTransition: Promise<void> | undefined;
     const rejectBeforeRun = async (error: unknown, reason: string): Promise<void> => {
       if (preflightStatus === "accepted" || (preflightStatus === "rejected" && receiptSettled)) return;
       preflightStatus = "rejected";
       const messageText = safeWireText(errorMessage(error), 2_048);
+      const rejectedState = this.agentState();
+      const runtimeBusyAtRejection = rejectedState.isStreaming || rejectedState.isCompacting;
       try {
         const transition = this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.rejected", effect: "post_effect", operationId: commandId, instanceId: this.id },
           () => {
-            this.catalogAdmissionOperationId = undefined;
+            clearAdmission();
+            // Preparation can publish compaction before there is an accepted run.
+            // If it then rejects without agent_settled, retire only that progress;
+            // a different accepted run (or still-busy runtime) keeps its state.
+            if (ownsAdmission && !runtimeBusyAtRejection && this.state.lifecycle === "active"
+              && this.state.execution === "running" && !this.state.compacting && this.state.activeCommandId === undefined) {
+              this.state.execution = this.state.lastRun === "failed" ? "failed" : "idle";
+            }
             this.state.lastError = messageText;
             this.touch();
           },
@@ -1426,7 +1465,7 @@ export class ManagedInstance {
             this.appendStateEvent("command_rejected");
           },
         ));
-        this.catalogAdmissionOperationId = undefined;
+        clearAdmission();
         const bufferedEvents = this.flushAdmissionAgentEvents();
         await Promise.all([transition, bufferedEvents]);
       } catch (commitError) {
@@ -1476,7 +1515,7 @@ export class ManagedInstance {
             resolveReceipt(receipt);
           }
         }, async (error: unknown) => {
-          this.catalogAdmissionOperationId = undefined;
+          clearAdmission();
           await this.flushAdmissionAgentEvents().catch(() => {});
           if (!receiptSettled) {
             receiptSettled = true;
@@ -1496,7 +1535,7 @@ export class ManagedInstance {
         let receiptQueued = actualDelivery !== "prompt";
         let receiptDelivery = actualDelivery;
         const handledAt = this.timestamp();
-        this.catalogAdmissionOperationId = undefined;
+        clearAdmission();
         const precedingAgentEvents = this.flushAdmissionAgentEvents();
         const handledTransition = this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
@@ -1537,15 +1576,8 @@ export class ManagedInstance {
         });
         return;
       }
-      let precedingAgentEvents = Promise.resolve();
-      if (!actuallyQueued) {
-        // Events buffered while asynchronous input hooks were running belong
-        // to the run that just settled. Commit them before assigning the fresh
-        // prompt's operation ID so the old settlement cannot clear the new run.
-        this.catalogAdmissionOperationId = undefined;
-        precedingAgentEvents = this.flushAdmissionAgentEvents();
-      }
-
+      // Independent old-run events have already kept their producer position.
+      // The remaining suffix needs this input's receipt/Queue identity first.
       const acceptedAt = this.timestamp();
       const pendingMessage: PendingQueueMessage | undefined = actuallyQueued
         ? {
@@ -1571,7 +1603,7 @@ export class ManagedInstance {
       const acceptedTransition = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
         () => {
-          this.catalogAdmissionOperationId = undefined;
+          clearAdmission();
           this.state.lastError = undefined;
           if (actualInputKind === "prompt" && !actuallyQueued) {
             this.state.execution = "running";
@@ -1590,17 +1622,17 @@ export class ManagedInstance {
           this.appendStateEvent(actualInputKind === "extension_command" ? "extension_command_accepted" : "command_accepted", acceptedAt);
         },
       ));
-      preflightTransition = Promise.all([precedingAgentEvents, acceptedTransition]).then(() => {});
-      this.catalogAdmissionOperationId = undefined;
-      this.receiptBoundaryOperationId = commandId;
+      preflightTransition = acceptedTransition;
+      clearAdmission();
+      const receiptTasks: Promise<void>[] = [];
+      this.inputReceiptBoundaries.add(receiptTasks);
       const bufferedEvents = this.flushAdmissionAgentEvents();
       preflightTransition = Promise.all([preflightTransition, bufferedEvents]).then(async () => {
         // Pi may emit queue/agent_start synchronously immediately after the
         // callback returns. Include those ordered transitions in the receipt boundary.
         await Promise.resolve();
-        const followupTasks = this.receiptBoundaryTasks.splice(0);
-        this.receiptBoundaryOperationId = undefined;
-        try { await Promise.all(followupTasks); }
+        this.inputReceiptBoundaries.delete(receiptTasks);
+        try { await Promise.all(receiptTasks); }
         catch (error) {
           if (!receiptSettled) {
             receiptSettled = true;
@@ -1623,8 +1655,7 @@ export class ManagedInstance {
         }
         release();
       }, (error: unknown) => {
-        this.receiptBoundaryOperationId = undefined;
-        this.receiptBoundaryTasks.length = 0;
+        this.inputReceiptBoundaries.delete(receiptTasks);
         if (!receiptSettled) {
           receiptSettled = true;
           rejectReceipt(error);
@@ -1636,6 +1667,9 @@ export class ManagedInstance {
     const shouldDeferToHost = deferToHost
       || this.runtimeCompactionInProgress()
       || this.hostQueueCustodyActive();
+    // The choice can change while the admission is saved. Controls must see
+    // the context actually sent to the Worker, not just the earlier snapshot.
+    if (shouldDeferToHost) inputLease.markHostInputAdmission();
     let runtimePromise: Promise<void>;
     try {
       runtimePromise = this.invokeAgent<void>("command.submit", {
@@ -1723,7 +1757,7 @@ export class ManagedInstance {
           error = new QueueCapacityError();
         }
         if (error instanceof AgentMutationEffectUnknownError) {
-          this.catalogAdmissionOperationId = undefined;
+          clearAdmission();
           await this.flushAdmissionAgentEvents().catch(() => {});
           if (!receiptSettled) { receiptSettled = true; rejectReceipt(new RuntimeEffectUnknownError(commandId, error)); }
           release();
@@ -1829,7 +1863,7 @@ export class ManagedInstance {
       { kind: "command.accepted", effect: "pre_effect", operationId, instanceId: this.id },
       () => {
         this.assertActive();
-        this.catalogAdmissionOperationId = undefined;
+        if (this.catalogAdmissionOperationId === operationId) this.catalogAdmissionOperationId = undefined;
         this.state.lastError = undefined;
         if (pendingMessage.delivery === "steer") this.state.pendingSteering += 1;
         else this.state.pendingFollowUp += 1;
@@ -1854,7 +1888,7 @@ export class ManagedInstance {
         this.appendStateEvent(reason, acceptedAt);
       },
     ));
-    this.catalogAdmissionOperationId = undefined;
+    if (this.catalogAdmissionOperationId === operationId) this.catalogAdmissionOperationId = undefined;
     await this.flushAdmissionAgentEvents();
     if (!this.runtimeCompactionInProgress() && !this.manualCompactionAdmissionActive()) {
       this.scheduleCompactionQueueDrain(false);
@@ -1876,6 +1910,7 @@ export class ManagedInstance {
       // The Agent hands back control with agent_settled; its transition resumes this drain.
       || this.hostQueueAwaitsSettleGeneration === this.runtimeGenerationValue
       || this.runtimeCompactionInProgress()
+      || this.commandScheduler.activeCommand("input") !== undefined
       || this.manualCompactionAdmissionActive()
       || this.commandScheduler.activeCommand("control", "queue") !== undefined
       || this.commandScheduler.activeCommand("interrupt", "restore_queue") !== undefined
@@ -2154,6 +2189,10 @@ export class ManagedInstance {
       kind: "queue",
     }), "restoring queued messages");
     try {
+      // Finish earlier admission writes so their actual delivery context is
+      // known, then include only the short Host hand-off, never SDK preparation.
+      await this.transitionTail;
+      await this.commandScheduler.hostInputAdmissionCompletion();
       await this.transitionTail;
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
@@ -2267,6 +2306,10 @@ export class ManagedInstance {
     try {
       if (decision.kind === "wait") await decision.forCompletion;
       await this.transitionTail;
+      if (restoreQueue) {
+        await this.commandScheduler.hostInputAdmissionCompletion();
+        await this.transitionTail;
+      }
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
       this.assertActive();
@@ -2469,6 +2512,13 @@ export class ManagedInstance {
       ? exclusive.effectStarted
       : undefined;
     return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect);
+  }
+
+  async recordReopenFailure(message: string, operationId: string): Promise<void> {
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "instance.reopen.failed", effect: "rollback_contained", operationId, instanceId: this.id },
+      () => { this.state.lastError = safeWireText(message, 2_048); this.touch(); this.appendStateEvent("reopen_failed"); },
+    ));
   }
 
   recordExtensionError(error: unknown): void {
@@ -2682,6 +2732,7 @@ export class ManagedInstance {
       key: this.keyValue,
       name: this.nameValue,
       cwd: this.cwdValue,
+      projectTrusted: this.projectTrustedValue,
       executor: cloneJson(this.executorIdentity),
       runtimeGeneration: this.runtimeGenerationValue,
       agentStartCount: this.agentStartCount,
@@ -2710,6 +2761,7 @@ export class ManagedInstance {
     this.keyValue = checkpoint.key;
     this.nameValue = checkpoint.name;
     this.cwdValue = checkpoint.cwd;
+    this.projectTrustedValue = checkpoint.projectTrusted;
     Object.assign(this.executorIdentity, checkpoint.executor);
     for (const key of Object.keys(this.executorIdentity) as Array<keyof ExecutorIdentity>) {
       if (!(key in checkpoint.executor)) delete this.executorIdentity[key];
@@ -2848,7 +2900,7 @@ export class ManagedInstance {
     action: string,
     operationId: string,
     kind: "new" | "switch" | "fork" | "clone" | "reload",
-    target: { requestedSessionFile?: string; requestedEntryId?: string },
+    target: Pick<NonNullable<CatalogInstanceRecord["replacement"]>, "requestedSessionFile" | "requestedEntryId" | "requestedProjectTrust">,
     replace: () => Promise<T>,
     validateTarget?: () => void | Promise<void>,
   ): Promise<T> {
@@ -2875,6 +2927,7 @@ export class ManagedInstance {
             kind,
             ...(previousRecoverySessionFile === undefined ? {} : { previousSessionFile: previousRecoverySessionFile }),
             ...(target.requestedSessionFile === undefined ? {} : { requestedSessionFile: target.requestedSessionFile }),
+            ...(target.requestedProjectTrust === undefined ? {} : { requestedProjectTrust: { ...target.requestedProjectTrust } }),
             ...(target.requestedEntryId === undefined ? {} : { requestedEntryId: target.requestedEntryId }),
             startedAt,
           };
@@ -3006,17 +3059,34 @@ export class ManagedInstance {
         boundary.resolve();
       }
     }
-    if (this.catalogAdmissionOperationId !== undefined) {
+    // WorkerConnection applies this event's state before notifying us. Keep the
+    // matching fact, not whatever state a later catalog commit happens to see.
+    const received: AgentEventReceipt = {
+      event,
+      ...(event.type === "compaction_end" ? { streamingAtCompactionEnd: this.agentState().isStreaming } : {}),
+    };
+    // Only facts that need the pending input's receipt/Queue identity wait for
+    // admission. Once one waits, keep its entire suffix in producer order.
+    const pendingInput = this.catalogAdmissionOperationId;
+    const frame = event.type === "dock_conversation_frame" ? event.frame as ConversationFrame : undefined;
+    // queue_update is a runtime count/text snapshot: its hashes can be linked
+    // when preflight arrives. Only consumption and the input's run/message need
+    // the receipt first; an old run's queue changes must not hide compaction.
+    const needsInputIdentity = pendingInput !== undefined && (
+      ((event.type === "agent_start" || event.type === "agent_settled" || event.type === "dock_queue_consumed") && event.operationId === pendingInput)
+      || (frame?.type === "message.submitted" && frame.data.operationId === pendingInput)
+    );
+    if (pendingInput !== undefined && (this.admissionBufferedEvents.length > 0 || needsInputIdentity)) {
       if (this.admissionBufferedEvents.length >= 1_000) {
         this.admissionBufferedEvents.shift();
         this.admissionBufferOverflow = true;
       }
-      this.admissionBufferedEvents.push(event);
+      this.admissionBufferedEvents.push(received);
       return;
     }
     if (!this.catalogPort) {
       try {
-        this.handleAgentEvent(event);
+        this.handleAgentEvent(received);
         if (event.type === "conversation_checkpoint") this.installConversationCheckpoint(event);
         if (refreshesMetrics(event)) this.refreshMetrics();
         if (refreshesHistory(event)) {
@@ -3027,16 +3097,18 @@ export class ManagedInstance {
       } catch (error) { this.appendProjectionError(event, error); }
       return;
     }
-    const task = this.enqueueCatalogAgentEvent(event);
+    const task = this.enqueueCatalogAgentEvent(received);
     if (event.type === "conversation_checkpoint" || refreshesHistory(event)) this.trackHistoryRefresh(task);
     void task.catch(() => {});
     if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
+    for (const boundary of this.inputReceiptBoundaries) boundary.push(task);
   }
 
-  private enqueueCatalogAgentEvent(event: AgentEvent): Promise<void> {
+  private enqueueCatalogAgentEvent(received: AgentEventReceipt): Promise<void> {
+    const { event } = received;
     return this.enqueueTransition(async () => {
       try {
-        await this.handleCatalogAgentEvent(event);
+        await this.handleCatalogAgentEvent(received);
         if (event.type === "conversation_checkpoint") {
           this.installConversationCheckpoint(event);
         } else if (refreshesHistory(event)) {
@@ -3056,16 +3128,18 @@ export class ManagedInstance {
   }
 
   private flushAdmissionAgentEvents(): Promise<void> {
+    if (this.catalogAdmissionOperationId !== undefined) return Promise.resolve();
     const events = this.admissionBufferedEvents.splice(0);
     const overflow = this.admissionBufferOverflow;
     this.admissionBufferOverflow = false;
-    const tasks = events.map((event) => {
-      const task = this.enqueueCatalogAgentEvent(event);
+    const tasks = events.map((received) => {
+      const { event } = received;
+      const task = this.enqueueCatalogAgentEvent(received);
       if (refreshesHistory(event)) this.trackHistoryRefresh(task);
       return task;
     });
     if (overflow) {
-      tasks.push(this.enqueueCatalogAgentEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" }));
+      tasks.push(this.enqueueCatalogAgentEvent({ event: { type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" } }));
       const refresh = this.enqueueTransition(async () => { await this.refreshHistory(); this.refreshMetrics(); });
       this.trackHistoryRefresh(refresh);
       tasks.push(refresh);
@@ -3103,7 +3177,8 @@ export class ManagedInstance {
     });
   }
 
-  private async handleCatalogAgentEvent(event: AgentEvent): Promise<void> {
+  private async handleCatalogAgentEvent(received: AgentEventReceipt): Promise<void> {
+    const { event } = received;
     this.catalogPort?.assertWritable();
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
@@ -3114,7 +3189,7 @@ export class ManagedInstance {
       const needsPendingCommit = consumed !== undefined
         && (consumed.queued.phase === "fresh_in_flight" || consumed.queued.phase === "effect_unknown");
       if (!needsPendingCommit || consumed === undefined) {
-        this.handleAgentEvent(event);
+        this.handleAgentEvent(received);
         return;
       }
       await this.commitCatalogTransition(this.agentEventCatalogContext(event, "queue.consumed"), () => {
@@ -3136,9 +3211,9 @@ export class ManagedInstance {
       this.scheduleCompactionQueueDrain(false);
       return;
     }
-    const transition = this.agentEventTransition(event);
+    const transition = this.agentEventTransition(received);
     if (transition === undefined) {
-      this.handleAgentEvent(event);
+      this.handleAgentEvent(received);
       return;
     }
     transition.before?.();
@@ -3157,8 +3232,15 @@ export class ManagedInstance {
     transition.settle?.();
   }
 
-  private handleAgentEvent(event: AgentEvent): void {
+  private handleAgentEvent(received: AgentEventReceipt): void {
+    const { event } = received;
     if (this.state.lifecycle === "stopped") return;
+    if (event.type === "settings.changed") {
+      const data = event.data as SettingsChangedData;
+      // Support changed in the Worker; the user's saved scope/selection still belongs to Host.
+      this.appendEvent("settings.changed", data.key === "modelSpeed" ? { ...data, value: this.modelSpeedValue ?? null } : data);
+      return;
+    }
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
       return;
@@ -3175,7 +3257,7 @@ export class ManagedInstance {
       this.handleWorkerQueueConsumed(event);
       return;
     }
-    const transition = this.agentEventTransition(event);
+    const transition = this.agentEventTransition(received);
     if (transition === undefined) return;
     transition.before?.();
     transition.mutate();
@@ -3191,7 +3273,7 @@ export class ManagedInstance {
    * wraps it in a commit while the in-memory path runs it directly. Never
    * fork per-mode copies of this logic again.
    */
-  private agentEventTransition(event: AgentEvent): AgentEventTransition | undefined {
+  private agentEventTransition({ event, streamingAtCompactionEnd }: AgentEventReceipt): AgentEventTransition | undefined {
     switch (event.type) {
       case "dock_model_state_observed": {
         const observation = event as AgentModelStateObservation;
@@ -3220,11 +3302,20 @@ export class ManagedInstance {
           : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
         const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
         const modelState = event.modelState as AgentModelState | undefined;
+        const operationId = this.resolveAgentEventOperationId(event);
+        const requestedTrust = this.replacementIntent?.operationId === operationId
+          ? this.replacementIntent?.requestedProjectTrust : undefined;
         return {
           kind: "session.replaced",
           durable: true,
-          operationId: this.resolveAgentEventOperationId(event),
+          operationId,
           mutate: () => {
+            // Publish the target cwd and its Host-approved decision in the same catalog commit.
+            if (requestedTrust && requestedTrust.canonicalCwd === cwd) {
+              this.projectTrustedValue = requestedTrust.projectTrusted;
+            } else if (cwd !== undefined && cwd !== this.cwdValue) {
+              this.projectTrustedValue = undefined;
+            }
             this.runtimeGenerationValue += 1;
             this.replacementIntent = undefined;
             this.recoverySessionFile = undefined;
@@ -3471,7 +3562,9 @@ export class ManagedInstance {
           durable: true,
           operationId,
           mutate: () => {
-            if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+            // A runtime-started run has no Dock commandId, and threshold compaction
+            // can finish between its tool turns without an overflow retry/new start.
+            if (!streamingAtCompactionEnd && this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
             this.state.compacting = false;
             this.touch();
           },
@@ -3505,8 +3598,12 @@ export class ManagedInstance {
 
   private resolveAgentEventOperationId(event: AgentEvent): string | undefined {
     const carriedOperationId = optionalRuntimeString(event.operationId, 128);
+    // Compaction is independently observable, including before Pi reports input
+    // delivery. An unrelated pending submission/interrupt is not its cause.
+    if (event.type === "compaction_start" || event.type === "compaction_end") {
+      return carriedOperationId ?? this.compactionOperationId ?? this.compactionRequestOperationId ?? this.state.activeCommandId;
+    }
     return carriedOperationId
-      ?? this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
       ?? this.compactionOperationId
       ?? this.compactionRequestOperationId

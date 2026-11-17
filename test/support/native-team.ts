@@ -11,6 +11,9 @@ import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
 import { ChildModelsStore } from "../../src/control/child-models.js";
+import { MainMachineState } from "../../src/control/machine-state.js";
+import { MainMachineController } from "../../src/control/machine-transport.js";
+import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "../../src/control/main-machine-dock-tools.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
 import { createAssistantInstance } from "../../src/assistant-agent/create-assistant-instance.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
@@ -29,6 +32,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   thinkingLevel?: string;
   /** Run Main's model service, as the installed Host does; its Workers then hold no providers. */
   modelService?: boolean;
+  /** Entry seam for a supervised model-service restart that has not become ready yet. */
+  modelServiceEntry?: string;
   /** Pi settings merged over the defaults below. */
   settings?: Record<string, unknown>;
   /** The providers' apiKey in models.json; `${NAME}` reads an environment variable. */
@@ -39,6 +44,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   environment?: Record<string, string>;
   /** Run Main's assistant service, so Works can be opened as the assistant (card #295). */
   assistant?: boolean;
+  /** Use Main's global Dock tools path, as the installed Host does. */
+  mainDockTools?: boolean;
   /** Real attachment storage, isolated under the team's temporary directory. */
   attachments?: boolean;
   /** Shorter waits for her memory passes. */
@@ -53,9 +60,9 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
     ...options.environment,
   });
-  const modelService = options.modelService ? new ModelServiceProcess({ agentDir, stateDirectory: root, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
-  const createAssistantService = () => options.assistant
-    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
+  const modelService = options.modelService ? new ModelServiceProcess({ agentDir, stateDirectory: root, entry: options.modelServiceEntry, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
+  const createAssistantService = (entry?: string, readyWaitMs?: number) => options.assistant
+    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: cwd, agentDir, environment, entry, readyWaitMs,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
     : undefined;
   let assistantService: AssistantServiceProcess | undefined;
@@ -70,15 +77,22 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     /** Runs after a child Work's Worker process started, before Dock lists the child Work. */
     holdNextChild: undefined as (() => Promise<void>) | undefined,
     onCleanup: undefined as (() => void) | undefined,
-    async startHost(): Promise<DockClient> {
+    async startHost(assistantProcess: { entry?: string; readyWaitMs?: number; background?: boolean } = {}): Promise<DockClient> {
       await modelService?.start();
       // A restarted Main gets a new service process, so persistence is read from disk rather than
       // from the previous Host's service. SupervisedService instances have one explicit lifecycle.
       await assistantService?.stop();
-      assistantService = createAssistantService();
-      await assistantService?.start();
+      assistantService = createAssistantService(assistantProcess.entry, assistantProcess.readyWaitMs);
+      const startingAssistant = assistantService?.start();
+      if (assistantProcess.background) void startingAssistant?.catch(() => {});
+      else await startingAssistant;
       const runningAssistant = assistantService;
-      const registry = new DockRegistry(async ({ child, assistant, ...input }) => {
+      let authority!: MainMachineDockToolsAuthority, controller!: MainMachineController;
+      const dockToolsHostPort = options.mainDockTools ? new MainMachineDockToolsPort({
+        local: () => registry, authority: () => authority,
+        mainHostId: async () => (await controller.machines()).find((machine) => machine.kind === "main")!.hostId,
+      }) : undefined;
+      const registry: DockRegistry = new DockRegistry(async ({ child, assistant, ...input }) => {
         const shared = {
           ...input, agentDir, sessionDir,
           onWorkerSpawn: (pid: number) => workerPids.push(pid),
@@ -100,14 +114,29 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
         ...(attachmentService === undefined ? {} : { attachmentHostPort: attachmentService }),
         ...(assistantService === undefined ? {} : { assistantWorkspace: cwd }),
+        ...(dockToolsHostPort === undefined ? {} : { dockToolsHostPort }),
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
+      if (options.mainDockTools) {
+        controller = new MainMachineController({
+          state: new MainMachineState(join(root, "machines"), "Main"),
+          mainHostEpoch: registry.hostEpoch, localSnapshots: () => registry.list(),
+        });
+        authority = new MainMachineDockToolsAuthority({
+          controller: () => controller, instances: () => team.host!.instanceDirectory(),
+          localClient: new DockClient({ socketPath: join(root, "dock.sock") }),
+          deliverLocalNotification: (id, notification) => registry.get(id).deliverObservation(notification),
+          isResidentAssistant: (id) => registry.isResidentAssistant(id),
+        });
+      }
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), ...(options.mainDockTools ? { remoteInstances: controller } : {}), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
       await team.host.start();
       team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
       if (assistantService !== undefined) await team.assistantWork();
       return team.client;
     },
+    /** Simulate a temporary memory-service outage without stopping the Host or Workers. */
+    async stopAssistantService(): Promise<void> { await assistantService?.stop(); },
     async assistantWork() {
       await waitFor(async () => (await team.client!.list()).some((work) => work.assistant && work.lifecycle === "active"), "Main did not open its resident assistant");
       return (await team.client!.list()).find((work) => work.assistant && work.lifecycle === "active")!;

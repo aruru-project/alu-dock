@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { THINKING_LEVELS, type ThinkingLevel } from "../core/agent-worker.js";
 import {
+  ASSISTANT_CHILD_THINKING_LEVEL,
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
   MAX_DOCK_TOOL_NAME_CHARS,
@@ -27,7 +28,7 @@ import { renderChildWait, renderDockToolsResult, type ModelFacts, type RenderCon
 export interface DockToolRuntime {
   /** Asks the Host. The Agent's bridge may do more around the call, such as noting which child Works now owe a result. */
   invoke(request: DockToolsRequest): Promise<DockToolsResult>;
-  /** The Agent's current thinking level, which a child Work started without one of its own keeps. */
+  /** The Agent's current thinking level; ordinary Works inherit it when delegating. */
   thinkingLevel(): ThinkingLevel;
   /** What the Agent's own model and the models it can run support, for dock_models. */
   modelFacts(): ModelFacts;
@@ -52,6 +53,8 @@ export interface DockToolDefinition {
 }
 
 export interface DockToolOptions {
+  /** Assistant-specific guidance and result wording only. The Host owns actual permissions and defaults. */
+  delegation?: "assistant" | "inherit";
   /**
    * false leaves out dock_spawn's `withContext` argument and the sentence of its description about it,
    * for an Agent whose conversation is never copied to a child Work. Default true.
@@ -186,16 +189,17 @@ function spawnSchema(conversationCopy: boolean): object {
 
 /** Every Dock tool of a top-level Work, in registration order. */
 export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefinition[] {
+  const assistantDelegation = options.delegation === "assistant";
   const conversationCopy = options.conversationCopy ?? true;
   const waitInTurn = options.waitInTurn ?? true;
   const describe = options.usageGuide === false ? (description: string): string => description : toolDescription;
   const tools: DockToolDefinition[] = [
     {
       name: "dock_spawn", label: "Start a child Work",
-      description: describe(`Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so.${conversationCopy ? " It starts with only the task unless withContext gives it a copy of your conversation." : " It starts with only the task, so put what it needs to know into the task."} It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them.${waitInTurn ? " If your turn must not end, as during a Dock Goal, use dock_wait." : ""} It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls.`),
+      description: describe(`Create a child Work for a task of yours and start it. ${assistantDelegation ? `Choose an available model and thinkingLevel suited to the task; use dock_models to see the user's listed models and their capabilities. Follow the user's explicit choices. Do not mechanically inherit your chat model or low thinking for engineering work. If model is omitted, the child uses the target's normal Pi default, not your chat model; omitted thinkingLevel defaults to ${ASSISTANT_CHILD_THINKING_LEVEL}.` : "It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked."} A model without that thinking level runs at the nearest one it has, and the result says so.${conversationCopy ? " It starts with only the task unless withContext gives it a copy of your conversation." : " It starts with only the task, so put what it needs to know into the task."} It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them.${waitInTurn ? " If your turn must not end, as during a Dock Goal, use dock_wait." : ""} It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls.`),
       parameters: spawnSchema(conversationCopy),
       execute: async (params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">, runtime) => {
-        const thinkingAsked = params.thinkingLevel ?? runtime.thinkingLevel();
+        const thinkingAsked = params.thinkingLevel ?? (assistantDelegation ? ASSISTANT_CHILD_THINKING_LEVEL : runtime.thinkingLevel());
         return dockToolOutput(await runtime.invoke({ ...params, type: "spawn", operationId: randomUUID() }), { thinkingAsked });
       },
     },
@@ -211,9 +215,11 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     },
     {
       name: "dock_models", label: "Models for child Works",
-      description: describe("Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
+      description: describe(assistantDelegation
+        ? "Show your current chat model and the models the user listed for child Works, with their thinking levels and capabilities. Choose a model and thinking level suited to the delegated task, respecting the user's explicit choices. Your chat model is not the child's default."
+        : "Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
       parameters: EMPTY_SCHEMA,
-      execute: async (_params, runtime) => dockToolOutput(await runtime.invoke({ type: "models" }), { facts: runtime.modelFacts() }),
+      execute: async (_params, runtime) => dockToolOutput(await runtime.invoke({ type: "models" }), { facts: runtime.modelFacts(), assistantDelegation }),
     },
     {
       name: "dock_speed", label: "Work model speed",
@@ -237,7 +243,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_list",
       label: "List Dock Works",
-      description: describe("List the Works you can see, without reading their conversations. Use scope='all' only when stopped or unavailable history is relevant."),
+      description: describe(`List the Works you can see, without reading their conversations.${assistantDelegation ? " As Main's resident assistant, you can discover other top-level Works and their children, with parent links and status; inspect only what the task needs." : ""} Use scope='all' only when stopped or unavailable history is relevant.`),
       parameters: LIST_SCHEMA,
       execute: async (params: { scope?: "live" | "all" }, runtime) => dockToolOutput(await runtime.invoke({
         type: "list",
@@ -254,7 +260,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_inspect",
       label: "Inspect a Work",
-      description: describe("Read a page of another Work’s conversation. Selected messages come whole; one too long for a page says so and continues on the next page. Source roles identify who said each message."),
+      description: describe(`Read a page of another Work’s conversation. Selected messages come whole; one too long for a page says so and continues on the next page. Source roles identify who said each message.${assistantDelegation ? " You can also inspect another top-level Work's children directly; types=['other'] includes tool calls and results as evidence. Read only what the task needs. This does not grant control of another Work's children or access to private excluded content." : ""}`),
       parameters: INSPECT_SCHEMA,
       execute: async (params: { target: string; limit?: number; types?: ObservationMessageType[]; cursor?: string }, runtime) => dockToolOutput(await runtime.invoke({
         type: "inspect",
@@ -295,7 +301,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_create",
       label: "Create Dock work",
-      description: describe("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. Main already keeps one resident assistant; this only creates ordinary Works, not another assistant. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
+      description: describe(`Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, ${assistantDelegation ? "chosen for its task while respecting the owner's explicit choice" : "as the owner names it"}; omit it for the target Machine's Pi default. An unavailable model fails creation. Main already keeps one resident assistant; this only creates ordinary Works, not another assistant. The new Work can collaborate immediately. For a task of your own use dock_spawn.`),
       parameters: CREATE_SCHEMA,
       execute: async (params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }, runtime) => dockToolOutput(await runtime.invoke({
         type: "create",

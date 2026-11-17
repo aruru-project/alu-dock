@@ -1388,7 +1388,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryUpdateParams(rest, "params")) } };
     }
     case "assistant.settings.set":
-      exact(params, ["operationId", "extractionModel", "extractionSpeed", "handoff", "extensions"], "invalid_request");
+      exact(params, ["operationId", "displayName", "extractionModel", "extractionSpeed", "handoff"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
     case "assistant.reorganize":
       exact(params, ["operationId", "extractionModel"], "invalid_request");
@@ -2007,13 +2007,12 @@ export function parseReopenResult(input: unknown): ReopenResult {
 export function parseAbortResult(input: unknown): AbortResult {
   const value = object(input, "abort result"); exact(value, ["instance"]);
   const instance = parseInstanceSnapshot(value.instance, "instance");
-  if (instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
+  // Abort acknowledges the runtime's cancellation request. Uninterruptible
+  // preparation may still be finishing; its real snapshot remains running.
   return { instance };
 }
 export function parseAbortRestoreQueueResult(input: unknown): AbortRestoreQueueResult {
-  const result = parseQueueDequeueResult(input);
-  if (result.instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
-  return result;
+  return parseQueueDequeueResult(input);
 }
 /** Worker-produced receipt body; the Host only adds the instance snapshot. */
 export function parseBashRunReceipt(input: unknown, field = "receipt"): BashRunReceipt {
@@ -2929,7 +2928,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "model.changed": exact(data, ["provider", "id", "thinkingLevel", "availableThinkingLevels"]); return { provider: text("provider", MAX_MODEL_PROVIDER_CHARS), id: text("id", MAX_MODEL_ID_CHARS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
     case "thinking.changed": exact(data, ["requested", "thinkingLevel", "availableThinkingLevels"]); return { requested: enumeration(data.requested, "requested", THINKING_LEVELS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
     case "resources.reloaded": exact(data, ["resources", "diagnostics"]); return { resources: array(data.resources, "resources", MAX_COLLECTION).map((item, index) => parseResource(item, `resources[${index}]`)), diagnostics: array(data.diagnostics, "diagnostics", MAX_COLLECTION).map((item, index) => parseDiagnostic(item, `diagnostics[${index}]`)) };
-    case "settings.changed": { exact(data, ["key", "value", "reloadRequired", "hostRestartRequired"]); const key=settingKey(data.key); return { key, value: parseSettingValue(key, data.value), reloadRequired: boolean(data.reloadRequired, "reloadRequired"), hostRestartRequired: boolean(data.hostRestartRequired, "hostRestartRequired") }; }
+    case "settings.changed": return parseSettingsChangedData(data);
     case "settings.write_failed": exact(data, ["key", "error"]); return { key: settingsWriteKey(data.key), error: text("error", MAX_MESSAGE) };
     case "interaction.requested": return parseDialogRequest(data, field);
     case "interaction.resolved": exact(data, ["interactionId", "method"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]) };
@@ -3220,8 +3219,8 @@ function extensionKey(input: unknown, field: string): string {
 
 function instanceDisplayName(input: unknown, field: string): string {
   const value = string(input, field, MAX_INSTANCE_DISPLAY_NAME_CHARS);
-  if (!/^[\p{L}\p{M}\p{N}_-]+(?: [\p{L}\p{M}\p{N}_-]+)*$/u.test(value)) {
-    throw validation("invalid_response", `${field} must be a canonical safe display name`);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    throw validation("invalid_response", `${field} must be terminal-safe`);
   }
   return value;
 }
@@ -3273,6 +3272,14 @@ function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const v
 function parseCommandReference(input: unknown, field: string, code = "invalid_response"): CommandReferenceDto { const value = object(input, field, code); exact(value, ["name", "source"], code); return { name: string(value.name, `${field}.name`, 256, code), source: parseSource(value.source, `${field}.source`, code) }; }
 function parseCommandArgumentCompletion(input: unknown, field: string): CommandArgumentCompletionDto { const value = object(input, field); exact(value, ["value", "label", "description"]); return { value: boundedString(value.value, `${field}.value`, MAX_COMMAND_ARGUMENT_PREFIX_CHARS), label: string(value.label, `${field}.label`, MAX_COMMAND_COMPLETION_TEXT_CHARS), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_COMMAND_COMPLETION_TEXT_CHARS) }) }; }
 function parseCommand(input: unknown, field: string): CommandDto { const value = object(input, field); exact(value, ["name", "description", "source", "argumentHint", "argumentCompletions", "contentAvailable"]); const contentAvailable=value.contentAvailable===undefined?undefined:boolean(value.contentAvailable,`${field}.contentAvailable`); if(contentAvailable===false)throw validation("invalid_response",`${field}.contentAvailable must be omitted unless true`); return { ...parseCommandReference(value, field), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_MESSAGE) }), ...(value.argumentHint === undefined ? {} : { argumentHint: boundedString(value.argumentHint, `${field}.argumentHint`, MAX_COMMAND_ARGUMENT_HINT_CHARS) }), argumentCompletions: boolean(value.argumentCompletions, `${field}.argumentCompletions`), ...(contentAvailable===true?{contentAvailable:true as const}:{}) }; }
+/** Shared by Worker setting notifications and the public settings.changed event. */
+export function parseSettingsChangedData(input: unknown): EventDataMap["settings.changed"] {
+  const data = object(input, "settings.changed");
+  exact(data, ["key", "value", "reloadRequired", "hostRestartRequired"]);
+  const key = settingKey(data.key);
+  return { key, value: parseSettingValue(key, data.value), reloadRequired: boolean(data.reloadRequired, "reloadRequired"), hostRestartRequired: boolean(data.hostRestartRequired, "hostRestartRequired") } as EventDataMap["settings.changed"];
+}
+
 export function parseSettingDto(input: unknown, field: string): SettingDto {
   const value = object(input, field); exact(value, ["key", "value", "source", "writable", "valueType", "allowedValues", "min", "max", "reloadRequired", "hostRestartRequired"]);
   const key = settingKey(value.key); const definition = SETTING_DEFINITIONS[key];

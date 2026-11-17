@@ -13,6 +13,7 @@ import {
 } from '../lib/bridge'
 import type { ExtensionControllerEmission, ExtensionControllerStatus, InteractionResponse, Work } from '../lib/types'
 import { genericExtensionStatus } from '../lib/dockTools'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { requireConnectionContext } from '../lib/hostResult'
 import { useExtensionUiStore, type ExtensionWidget } from '../stores/extension-ui'
@@ -328,7 +329,7 @@ function interactionMethodLabel(method: string) {
       </details>
     </div>
 
-    <div v-if="Object.keys(visibleStatus).length" class="alu-extension-status" aria-label="Extension 状态">
+    <div v-if="Object.keys(visibleStatus).length" class="alu-extension-status" :class="{ 'resident-status': isResidentAssistant(work) }" aria-label="Extension 状态">
       <span v-for="(text, key) in visibleStatus" :key="key">{{ key }}: {{ text }}</span>
     </div>
 
@@ -383,13 +384,15 @@ function interactionMethodLabel(method: string) {
 .alu-extension-status {
   display: flex;
   gap: 10px;
-  overflow-x: auto;
   padding: 6px 4px 0;
   color: var(--alu-warning-dim);
   font-size: var(--alu-meta-size);
 }
 .alu-extension-status[hidden] { display: none; }
-.alu-extension-status span { white-space: nowrap; }
+.alu-extension-status:not(.resident-status) { overflow-x: auto; }
+.alu-extension-status:not(.resident-status) span { white-space: nowrap; }
+.alu-extension-status.resident-status { flex-wrap: wrap; }
+.alu-extension-status.resident-status span { white-space: normal; overflow-wrap: anywhere; }
 .extension-ui-surface { width: 100%; min-width: 0; }
 .alu-input-section .extension-ui-surface { min-width: 0; }
 .extension-ui-surface { display: contents; }

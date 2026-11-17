@@ -63,33 +63,13 @@ pub struct AssistantExtractionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_model: Option<ModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_speed: Option<ModelSpeedTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<AssistantHandoffSettings>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<Vec<AssistantExtensionSettings>>,
-}
-
-/// User-trusted code on Main. Configuration is private to that extension, not model context.
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssistantExtensionSettings {
-    pub id: String,
-    pub module: String,
-    pub enabled: bool,
-    pub config: serde_json::Map<String, serde_json::Value>,
-}
-
-impl std::fmt::Debug for AssistantExtensionSettings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AssistantExtensionSettings")
-            .field("id", &self.id)
-            .field("module", &self.module)
-            .field("enabled", &self.enabled)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Token counts use null for automatic values. Main validates user-entered numbers.
@@ -105,6 +85,8 @@ pub struct AssistantHandoffSettings {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSettingsEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(
         default,
         deserialize_with = "present_model",
@@ -115,8 +97,6 @@ pub struct AssistantSettingsEdit {
     pub extraction_speed: Option<ModelSpeedTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<AssistantHandoffSettings>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<Vec<AssistantExtensionSettings>>,
 }
 
 fn present_model<'de, D: serde::Deserializer<'de>>(

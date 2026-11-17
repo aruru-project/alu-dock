@@ -1,5 +1,5 @@
 import type { InstanceExecution, InstanceLifecycle, LastRunResult } from "./managed-instance.js";
-import type { ThinkingLevel } from "./agent-worker.js";
+import type { AgentProjectTrust, ThinkingLevel } from "./agent-worker.js";
 import { isNativeAbsoluteLocalPath } from "./local-path.js";
 import type { JsonObject } from "./json-value.js";
 import { cloneWorkerConfig } from "./worker-config.js";
@@ -19,6 +19,7 @@ export interface CatalogReplacementIntent {
   kind: "new" | "switch" | "fork" | "clone" | "reload";
   previousSessionFile?: string;
   requestedSessionFile?: string;
+  requestedProjectTrust?: AgentProjectTrust;
   requestedEntryId?: string;
   startedAt: string;
 }
@@ -47,6 +48,8 @@ export interface CatalogInstanceRecord {
   key?: string;
   name?: string;
   cwd: string;
+  /** This Work's decision for this canonical cwd, not a directory-wide grant. Absent on legacy records. */
+  projectTrusted?: boolean;
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
   lastRun: LastRunResult;
@@ -171,6 +174,7 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   requiredBoundedText(record.creationOperationId, 128, "Catalog creation operation ID");
   if (record.key !== undefined) validateInstanceKey(record.key);
   absolutePath(record.cwd, "Catalog cwd");
+  if (record.projectTrusted !== undefined && typeof record.projectTrusted !== "boolean") throw new Error("Catalog project trust must be boolean");
   requiredBoundedText(record.piSessionId, 128, "Catalog Pi session ID");
   if (record.name !== undefined) requiredBoundedText(record.name, 256, "Catalog instance name");
   if (record.ownerHostEpoch !== undefined) requiredBoundedText(record.ownerHostEpoch, 128, "Catalog owner Host epoch");
@@ -209,6 +213,11 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
     if (record.replacement.previousSessionFile !== undefined) absolutePath(record.replacement.previousSessionFile, "Replacement previous session file");
     if (record.replacement.requestedSessionFile !== undefined) absolutePath(record.replacement.requestedSessionFile, "Replacement requested session file");
     if (record.replacement.requestedEntryId !== undefined) requiredBoundedText(record.replacement.requestedEntryId, 128, "Replacement requested entry ID");
+    if (record.replacement.requestedProjectTrust !== undefined) {
+      if (record.replacement.kind !== "switch") throw new Error("Only switch replacement may request project trust");
+      absolutePath(record.replacement.requestedProjectTrust.canonicalCwd, "Replacement project trust cwd");
+      if (typeof record.replacement.requestedProjectTrust.projectTrusted !== "boolean") throw new Error("Replacement project trust must be boolean");
+    }
     if (record.replacement.kind === "switch" && record.replacement.requestedSessionFile === undefined) throw new Error("Switch replacement requires a requested session file");
     if ((record.replacement.kind === "fork" || record.replacement.kind === "clone") && record.replacement.requestedEntryId === undefined) throw new Error("Fork/clone replacement requires a requested entry ID");
     if (record.replacement.kind !== "switch" && record.replacement.requestedSessionFile !== undefined) throw new Error("Only switch replacement may request a session file");

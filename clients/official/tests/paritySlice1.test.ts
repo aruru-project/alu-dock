@@ -1,6 +1,5 @@
 import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
-import { createPinia, setActivePinia } from 'pinia'
 import { nestedCallRows, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { conversationRows, conversationSections, partVisibleWhenCollapsed, rowVisibleWhenCollapsed } from '../src/lib/conversationPresentation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
@@ -8,34 +7,11 @@ import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, for
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
-import { useCommandConsoleStore } from '../src/stores/command-console.ts'
 
 const work = makeWork()
 let state: LiveProjectionState = { connectionId: 'host-a', selectionGeneration: 4, hostEpoch: 'epoch-a', instance: work, queue: [], sequence: 0 }
 
-setActivePinia(createPinia())
-const commandConsole = useCommandConsoleStore()
-commandConsole.bindContext('host-a', 4, work)
-commandConsole.beginOperation('command-operation', 'dock-tools', 'summary')
-assert.equal(commandConsole.handleDockEvent(event(1, 'extension.notification', { operationId: 'ordinary-operation', message: 'not this command' })).matched, false)
-assert.equal(commandConsole.handleDockEvent(event(2, 'extension.notification', { operationId: 'command-operation', message: '完整命令输出，不进入主要对话。' })).matched, true)
-commandConsole.handleDockEvent(event(3, 'command.handled', { operationId: 'command-operation' }))
-assert.equal(commandConsole.hasActiveOperation, false)
-assert.deepEqual(commandConsole.entries.map((entry) => entry.text), ['/dock-tools summary', '完整命令输出，不进入主要对话。'])
-commandConsole.bindContext('host-a', 4, work)
-assert.equal(commandConsole.entries.length, 2, 'closing and reopening Command Center in the same Work preserves command history')
-commandConsole.bindContext('host-a', 5, work)
-assert.equal(commandConsole.entries.length, 0, 'a Host-selection boundary cannot inherit another conversation command history')
-assert.equal(commandConsole.handleDockEvent(event(4, 'command.handled', { operationId: 'command-operation' })).matched, false, 'a Host-selection boundary also forgets earlier command success correlation')
-
-commandConsole.beginOperation('reload-success', 'dock-tools', 'on')
-commandConsole.handleDockEvent(event(4, 'command.handled', { operationId: 'reload-success' }))
-assert.equal(commandConsole.failOperation('reload-success', '操作没有完成'), false, 'observed command success wins over a late transport failure')
-assert.equal(commandConsole.entries.some((entry) => entry.level === 'error'), false)
-commandConsole.beginOperation('command-failure', 'dock-tools', 'off')
-assert.equal(commandConsole.failOperation('command-failure', '命令执行失败。'), true)
-assert.equal(commandConsole.failOperation('command-failure', '重复失败。'), false)
-assert.equal(commandConsole.entries.filter((entry) => entry.level === 'error').length, 1)
+// Command result ownership is exercised through the real App controls in appInteraction.test.mjs.
 
 assert.equal(dockToolsState({ 'Dock tools': 'on' }), 'on')
 assert.equal(dockToolsState({}), 'off')

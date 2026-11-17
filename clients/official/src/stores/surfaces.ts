@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, shallowReactive, watch } from 'vue'
 import { controlSectionAvailable, type ControlSection } from '../lib/localCommands'
+import { isResidentAssistant } from '../lib/uiBoundaries'
+import type { CommandInfo } from '../lib/types'
 import { useAppStore } from './app'
 import { useExtensionUiStore } from './extension-ui'
 export type ImagePreview =
@@ -35,10 +37,14 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const directoryOpen = ref(false)
   const commandOpen = ref(false)
   const controlSection = ref<ControlSection>('commands')
+  /** Navigation intent only; the command center resolves it against the real catalog. */
+  const requestedCommand = ref<{ workId: string; name: string; source: CommandInfo['source']['kind'] } | null>(null)
   const controlTitleOverride = ref('')
   const controlBodyOverride = ref('')
   const controlSizeOverride = ref<'default' | 'wide' | 'tree' | ''>('')
   const confirmDialog = ref<{ title: string; body: string; resolve: (confirmed: boolean) => void } | null>(null)
+  type TrustChoice = 'trust_once' | 'trust_and_remember'
+  const projectTrustDialog = ref<{ cwd: string; resolve: (choice: TrustChoice | null) => void } | null>(null)
   const appSettingsOpen = ref(false)
 
   const hostSettingsOpen = ref(false)
@@ -67,10 +73,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   const dockToolsTrigger = ref<HTMLButtonElement | null>(null)
   const dockToolsPopoverStyle = ref<Record<string, string>>({})
-  type Surface = 'image' | 'text' | 'expanded' | 'control' | 'app-settings' | 'machine-settings' | 'assistant' | 'directory-host' | 'confirm'
+  type Surface = 'image' | 'text' | 'expanded' | 'control' | 'app-settings' | 'machine-settings' | 'assistant' | 'directory-host' | 'confirm' | 'project-trust'
   const surfaceElements = shallowReactive(new Map<Surface, HTMLElement>())
   const modalSurface = computed(() => {
-    for (const key of ['confirm', 'machine-settings', 'assistant', 'directory-host', 'app-settings', 'control', 'expanded', 'text', 'image'] as const) {
+    for (const key of ['project-trust', 'confirm', 'machine-settings', 'assistant', 'directory-host', 'app-settings', 'control', 'expanded', 'text', 'image'] as const) {
       const element = surfaceElements.get(key)
       if (element) return element
     }
@@ -82,7 +88,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
   let modalTrigger: HTMLElement | null = null
 
-  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || machineSettingsOpen.value || assistantOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
+  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || machineSettingsOpen.value || assistantOpen.value || composerExpanded.value || !!confirmDialog.value || !!projectTrustDialog.value || !!imagePreview.value || !!messageTextView.value)
 
   /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
      每一层打开的浮层/抽屉各压入一个占位历史条目，返回键触发 popstate 时只关闭最上面
@@ -103,6 +109,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     image: () => !!imagePreview.value,
     text: () => !!messageTextView.value,
     confirm: () => !!confirmDialog.value,
+    'project-trust': () => !!projectTrustDialog.value,
   }
   type BackLayer = keyof typeof backLayers
   const openBackLayers = computed(() => (Object.keys(backLayers) as BackLayer[]).filter((layer) => backLayers[layer]()))
@@ -127,7 +134,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   watch(openBackLayers, syncBackHistory)
 
   function closeBackLayer(layer: BackLayer) {
-    if (layer === 'confirm') settleConfirm(false)
+    if (layer === 'project-trust') settleProjectTrust(null)
+    else if (layer === 'confirm') settleConfirm(false)
     else if (layer === 'drawer') app.workDrawerOpen = false
     else if (layer === 'workspace-browser') workspaceBrowserOpen.value = false
     else if (layer === 'delivery') deliveryOpen.value = false
@@ -220,6 +228,19 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     })
   }
 
+  function askProjectTrust(cwd: string): Promise<TrustChoice | null> {
+    rememberModalTrigger()
+    return new Promise(resolve => { projectTrustDialog.value = { cwd, resolve } })
+  }
+
+  function settleProjectTrust(choice: TrustChoice | null) {
+    const dialog = projectTrustDialog.value
+    if (!dialog) return
+    projectTrustDialog.value = null
+    dialog.resolve(choice)
+  }
+  onScopeDispose(() => settleProjectTrust(null))
+
   function rememberModalTrigger() {
     if (!modalOpen.value && document.activeElement instanceof HTMLElement) modalTrigger = document.activeElement
   }
@@ -234,6 +255,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function closeModal() {
+    if (projectTrustDialog.value) { settleProjectTrust(null); return }
     if (directoryOpen.value && directoryBusy.value) return
     if (machineSettingsOpen.value && machineSettingsDirty.value) {
       void closeMachineSettings()
@@ -324,7 +346,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function controlDialogTitle(section: ControlSection) {
-    if (app.selectedWork?.assistant) {
+    if (isResidentAssistant(app.selectedWork)) {
       if (section === 'reload-session') return '刷新助手（Reload）'
       if (section === 'tools') return '她能用的工具'
       if (section === 'resources') return '助手状态'
@@ -342,7 +364,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
       const model = app.selectedWork?.executor.model
       return `当前：${model ? `${model.provider}/${model.id}` : '—'}`
     }
-    if (app.selectedWork?.assistant) {
+    if (isResidentAssistant(app.selectedWork)) {
       if (section === 'reload-session') return '重新读入人设、手写设定和记忆，对话接着原来的。'
       if (section === 'tools') return '她可以读文件和附件、管理记忆和提醒；Dock 工具由顶栏的总开关控制。'
       if (section === 'resources') return '她的模型、对话用量和已提供的工具'
@@ -367,9 +389,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     return ['ui-dialog-box', size === 'tree' ? 'ui-dialog-size-tree' : size === 'wide' ? 'ui-dialog-size-wide' : '']
   }
 
-  function openControlCenter(section: ControlSection) {
-    if (!app.selectedWork || !controlSectionAvailable(section, app.selectedWork.assistant)) return
+  function openControlCenter(section: ControlSection, command?: Pick<CommandInfo, 'name' | 'source'>) {
+    if (!app.selectedWork || !controlSectionAvailable(section, isResidentAssistant(app.selectedWork))) return
     rememberModalTrigger()
+    requestedCommand.value = command ? { workId: app.selectedWork.id, name: command.name, source: command.source.kind } : null
     controlTitleOverride.value = ''
     controlBodyOverride.value = ''
     controlSizeOverride.value = ''
@@ -378,6 +401,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     directoryOpen.value = false
     appSettingsOpen.value = false
     hostSettingsOpen.value = false
+    assistantOpen.value = false
     app.workDrawerOpen = false
   }
 
@@ -474,5 +498,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, requestedCommand, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

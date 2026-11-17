@@ -14,7 +14,7 @@ import { waitFor } from "./support/plan-goal-provider.js";
 test("Work speed can be shared with children, overridden individually and extended through Main's support data", { timeout: 60_000 }, async context => {
   const team = await startNativeTeam(context, ["coordinator", "worker"], { prefix: "alu-model-speed-", modelService: true, assistant: true, settings: { compaction: { enabled: false, keepRecentTokens: 32, reserveTokens: 100 } } });
   const supportFile = join(team.root, "model-speed-support.json");
-  const support = { providers: { upstream: { fast: ["fixture"], ultrafast: [] as string[] } }, aliases: { coordinator: "upstream", worker: "upstream" } };
+  const support = { providers: { upstream: { fast: ["fixture"], ultrafast: [] as string[] } }, aliases: {} as Record<string, string> };
   await writeFile(supportFile, JSON.stringify(support));
   // This is Dock configuration: a conflicting file in Pi's directory must not own either Agent's speed.
   await writeFile(join(team.agentDir, "model-speed-support.json"), JSON.stringify({
@@ -29,14 +29,40 @@ test("Work speed can be shared with children, overridden individually and extend
     speedSupport: () => readModelSpeedSupport(team.root),
   });
   assert.deepEqual((await catalogReader.read()).models.find(model => model.provider === "worker" && model.id === "fixture")?.speedTiers,
-    ["standard", "fast"], "The background-model picker receives the same Dock-owned support data");
+    ["standard"], "An unregistered alias starts with standard speed only");
   const assistant = await team.assistantWork();
   const parent = await trustOnce(trust => client.create(team.cwd, "parent", "speed-parent", trust));
   const other = await trustOnce(trust => client.create(team.cwd, "independent", "speed-independent", trust));
   const { coordinator, worker } = team.providers;
   const tier = (request: { body: unknown }) => (request.body as { service_tier?: string }).service_tier;
   const setting = async (id: string) => (await client.settings(id)).settings.find(item => item.key === "modelSpeed")!;
+  const supportNotices: string[] = [];
+  const followers = await Promise.all([parent, assistant].map(item => client.streamEvents(item.id, { onEvent: event => {
+    if (event.type === "settings.changed" && event.data.key === "modelSpeed") supportNotices.push(item.id);
+  } })));
+  context.after(async () => { for (const follower of followers) follower.close(); await Promise.all(followers.map(follower => follower.done.catch(() => {}))); });
+  const expectSupport = async (id: string, expected: string[]) => {
+    const before = supportNotices.length;
+    const initial = await setting(id);
+    if (JSON.stringify(initial.allowedValues) !== JSON.stringify(expected)) {
+      await waitFor(() => supportNotices.slice(before).includes(id), "Updated support did not notify the open client");
+    }
+    assert.deepEqual((await setting(id)).allowedValues, expected);
+  };
   const idle = (id: string) => waitFor(async () => (await client.status(id)).execution === "idle", "Work did not settle");
+
+  // Field regression: adding Main's provider alias must reach already-open Works, not just
+  // the machine model picker. Read the same settings/model queries the speed UI uses.
+  assert.deepEqual((await setting(parent.id)).allowedValues, ["standard"]);
+  assert.deepEqual((await setting(assistant.id)).allowedValues, ["standard"]);
+  Object.assign(support.aliases, { coordinator: "upstream", worker: "upstream" });
+  await writeFile(supportFile, JSON.stringify(support));
+  assert.deepEqual((await catalogReader.read()).models.find(model => model.provider === "worker")?.speedTiers, ["standard", "fast"]);
+  await client.models(parent.id); // Also starts an optional support refresh.
+  await expectSupport(parent.id, ["standard", "fast"]);
+  await expectSupport(assistant.id, ["standard", "fast"]);
+  assert.deepEqual((await client.models(parent.id)).models.find(model => model.provider === "coordinator")?.speedTiers, ["standard", "fast"]);
+  assert.equal((await setting(parent.id)).value, null, "Refreshing support does not select a speed");
 
   // The Agent tool and client share the same Host settings action.
   await team.registry!.invokeDockTool(parent.id, { type: "speed", operationId: "speed-all", selection: { tier: "fast", scope: "all" } });
@@ -56,9 +82,11 @@ test("Work speed can be shared with children, overridden individually and extend
   const second = await worker.request(1);
   assert.equal(tier(second), "default", "Turning off shared speed reaches an already-running child at its next request");
 
-  // Add support as data, not a Dock or SDK update. New/reloaded runtimes receive it from Main.
+  // Extend support again while Pi is answering. No Work/session replacement is needed.
   support.providers.upstream.ultrafast.push("fixture");
   await writeFile(supportFile, JSON.stringify(support));
+  await expectSupport(parent.id, ["standard", "fast", "ultrafast"]);
+  await expectSupport(assistant.id, ["standard", "fast", "ultrafast"]);
   await client.updateSetting(child.instance.id, { key: "modelSpeed", value: { tier: "fast", scope: "work" } });
   await client.updateSetting(parent.id, { key: "modelSpeed", value: { tier: "ultrafast", scope: "all" } });
   second.tools({ id: "read-2", name: "read", arguments: { path: memo } });
@@ -75,10 +103,9 @@ test("Work speed can be shared with children, overridden individually and extend
   fourth.tools({ id: "done-later", name: "dock_send", arguments: { message: "Done too.", done: true } });
   await idle(later.instance.id);
   await client.updateSetting(child.instance.id, { key: "modelSpeed", value: null });
-  await client.reloadSession(child.instance.id);
   await client.prompt(child.instance.id, "Answer directly.");
   const following = await worker.request(4);
-  assert.equal(tier(following), "ultrafast", "Restoring inheritance uses the shared speed after Reload too");
+  assert.equal(tier(following), "ultrafast", "An existing child uses newly supported speed without Reload or a model/settings query");
   following.text("Ready.");
   await idle(child.instance.id);
 
@@ -105,7 +132,9 @@ test("Work speed can be shared with children, overridden individually and extend
   const parentNext = await coordinator.request(1);
   parentNext.text("Both reports received.");
   await idle(parent.id);
-  await client.reloadSession(assistant.id);
+  // An unfinished support-file edit must retain the last good table for both Agents.
+  await writeFile(supportFile, "{");
+  assert.deepEqual((await setting(parent.id)).allowedValues, ["standard", "fast", "ultrafast"]);
   assert.deepEqual((await setting(assistant.id)).allowedValues, ["standard", "fast", "ultrafast"]);
   await client.updateSetting(assistant.id, { key: "modelSpeed", value: { tier: "ultrafast", scope: "work" } });
   await client.setAssistantSettings({ extractionSpeed: "fast" });
@@ -115,6 +144,19 @@ test("Work speed can be shared with children, overridden individually and extend
   hers.text("你好。");
   await idle(assistant.id);
   assert.equal((await client.assistantSettings()).extractionSpeed, "fast", "Background memory has a separate selection");
+  for (const original of [parent, assistant]) {
+    const current = await client.status(original.id);
+    assert.equal(current.id, original.id);
+    assert.equal(current.runtimeGeneration, original.runtimeGeneration, "Speed support refresh retains the running Work");
+    assert.equal(current.executor.piSessionId, original.executor.piSessionId, "Speed support refresh retains the conversation");
+    assert.deepEqual(current.executor.model, original.executor.model, "Speed support refresh does not change the model");
+  }
+  // Losing Main's model service must not prevent reading other settings or erase known support.
+  await team.modelService!.stop();
+  const settings = await client.settings(parent.id);
+  assert.ok(settings.settings.some(item => item.key === "transport"));
+  assert.deepEqual(settings.settings.find(item => item.key === "modelSpeed")?.allowedValues, ["standard", "fast", "ultrafast"]);
+  assert.deepEqual((await setting(assistant.id)).allowedValues, ["standard", "fast", "ultrafast"]);
 
   const catalog = JSON.parse(await readFile(join(team.root, "catalog.json"), "utf8"));
   assert.deepEqual(catalog.instances.find((item: { id: string }) => item.id === parent.id).modelSpeed, { tier: "ultrafast", scope: "all" });

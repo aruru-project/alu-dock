@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { getAgentDir, getDefaultSystemPromptBody, parseDefaultSystemPromptBody, type SystemPromptSelection } from "@earendil-works/pi-coding-agent";
 import type { SystemSource, SystemTemplateProvider } from "../control/system-service.js";
 import type { JsonObject } from "../core/json-value.js";
+import { ResourceContentError } from "../core/resource-content.js";
 
 /** Discovery uses only Pi's resolved native directory; no sessions or extensions are loaded. */
 export function createPiSystemTemplateProvider(agentDir = getAgentDir()): SystemTemplateProvider {
@@ -25,7 +26,7 @@ export function createPiSystemTemplateProvider(agentDir = getAgentDir()): System
 export function piSystemPromptResolver(config: JsonObject | undefined, agentDir: string): (() => Promise<SystemPromptSelection>) | undefined {
   if (config?.systemSelection === undefined) return undefined;
   const input = config.systemSelection;
-  const failure = () => new Error("无法读取所选 system。请检查原文件内容和读取权限后重新打开 Work；不会改用另一份正文。");
+  const failure = () => new ResourceContentError(`无法读取所选 system 文件${input && typeof input === "object" && !Array.isArray(input) && typeof input.path === "string" ? `：${input.path}` : ""}。请在 Work 所在机器恢复这份文件或修正内容与读取权限，然后继续这个 Work；原会话保留，不会改用另一份正文。`);
   if (input === null || Array.isArray(input) || typeof input !== "object" || typeof input.path !== "string") throw failure();
   const path = input.path;
   // New selections always carry the Host source Home; old Work has no systemSelection.

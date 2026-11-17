@@ -23,11 +23,9 @@ assert.doesNotMatch(parsingFailure.message, /expected value|client_error|更改/
 const unrelatedFailure = userErrorPresentation({ code: 'host_unreachable', message: 'raw transport detail' })
 assert.equal(unrelatedFailure.diagnostic, undefined)
 
-// #313: a trust decision this client cannot answer here must not be told to "refresh and retry".
-const trustRequired = userErrorMessage({ code: 'project_trust_required', message: 'Project trust decision required', details: { challengeId: 'c', cwd: '/p' } })
-assert.doesNotMatch(trustRequired, /刷新|Project trust/u)
-assert.match(trustRequired, /信任.*目录/u)
-assert.match(trustRequired, /Alu Dock 终端/u)
+// PR review P1: a slow read ends only that read, not the Work or the Host connection.
+assert.equal(userErrorMessage({ code: 'query_timeout', message: 'private worker detail' }), '这次读取超时，Work 没有因此停止。请稍后重试。')
+assert.equal(userErrorMessage({ code: 'request_failed', message: 'private worker detail' }), '操作没有完成。请刷新状态后重试。')
 
 // Card 361: a typed directory path that does not exist, and a chosen model that is gone, say what to do next.
 assert.match(userErrorMessage({ code: 'workspace_not_found', message: '/x no longer exists.' }), /目录不存在.*路径/u)

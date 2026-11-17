@@ -29,8 +29,8 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
   // With Main's model service the Work takes its model configuration and credentials from Main and
   // reads none of this machine's; it still sends and handles its own requests. There is no local fallback.
   // Each session gets its own runtime, so providers one session's extensions registered do not outlive it.
-  const modelSpeed = new ModelSpeedRuntime();
   const modelOwner = host.models ? mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) : undefined;
+  const modelSpeed = new ModelSpeedRuntime(modelOwner ? () => modelOwner.readConfiguration() : undefined);
   const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
   const dockToolsBridge: DockToolsBridge = new DockToolsBridge(host.dockToolsEnabled(), {
     configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),

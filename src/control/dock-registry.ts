@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_ASSISTANT_DISPLAY_NAME } from "../core/assistant.js";
 import type { SystemService } from "./system-service.js";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -9,6 +10,8 @@ import {
   type CatalogStore,
   validateInstanceKey,
 } from "../core/catalog.js";
+import { AgentModelNotFoundError, AgentStartupTimeoutError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
+import { ResourceContentError } from "../core/resource-content.js";
 import type { ObservationDeliverySink } from "../core/instance-observation.js";
 import {
   type DockChildSelection,
@@ -169,7 +172,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly childStarts = new WeakMap<ManagedInstance, Set<Promise<unknown>>>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
-  private readonly reopenInFlight = new Map<string, string>();
+  private readonly reopenInFlight = new Map<string, Promise<unknown>>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private readonly keyEnsureTails = new Map<string, Promise<void>>();
   private readonly speedChangeTails = new Map<string, Promise<void>>();
@@ -189,6 +192,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
   /** Only Main supplies her workspace. Clients cannot create another assistant. */
   private readonly assistantWorkspace: string | undefined;
   private assistantRecoveryEnabled = false;
+  private assistantDisplayName = DEFAULT_ASSISTANT_DISPLAY_NAME;
+  private assistantNameRevision = 0;
   private assistantRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private assistantRecovery: Promise<void> | undefined;
   private assistantRecoveryDelay = 1_000;
@@ -245,6 +250,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
         });
       },
       sourceAuthorized: (instanceId) => this.dockToolsEnabled(instanceId),
+      isResidentAssistant: (instanceId) => this.isResidentAssistant(instanceId),
     });
     this.workMessages = new WorkMessages({
       live: () => this.instances.values(),
@@ -532,12 +538,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.assertCatalogReady();
     this.catalog.assertWritable();
     if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
-    this.reopenInFlight.set(input.instanceId, input.operationId);
-    try {
-      return await this.performReopen(input);
-    } finally {
-      if (this.reopenInFlight.get(input.instanceId) === input.operationId) this.reopenInFlight.delete(input.instanceId);
-    }
+    return this.trackReopen(input.instanceId, () => this.performReopen(input));
+  }
+
+  private async trackReopen<T>(instanceId: string, open: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(open);
+    this.reopenInFlight.set(instanceId, pending);
+    try { return await pending; }
+    finally { if (this.reopenInFlight.get(instanceId) === pending) this.reopenInFlight.delete(instanceId); }
+  }
+
+  /** Observation after an admitted reopen reads its committed runtime, not the old
+   * unavailable one. Host-only status/list never wait for Worker startup. */
+  async getForObservation(instanceId: string): Promise<ManagedInstance> {
+    await this.reopenInFlight.get(instanceId);
+    return this.get(instanceId);
   }
 
   private async performReopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
@@ -562,12 +577,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
     sessionFile: string,
   ): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     const target = await this.reopenTargetResolver!.resolve(sessionFile);
-    const trust = record.assistant && this.assistantWorkspace !== undefined
-      ? { canonicalCwd: await canonicalDirectory(this.assistantWorkspace), projectTrusted: false }
-      : await this.resolveProjectTrust({
-        operationType: "instance.reopen", operationId: input.operationId, cwd: target.cwd, name: sessionFile,
-        trustChallengeId: input.trustChallengeId, projectTrustDecision: input.projectTrustDecision,
-      });
+    let trust: ProjectTrustResolution;
+    if (record.assistant && this.assistantWorkspace !== undefined) {
+      trust = { canonicalCwd: await canonicalDirectory(this.assistantWorkspace), projectTrusted: false };
+    } else {
+      const canonicalCwd = await canonicalDirectory(target.cwd);
+      // Compare to the saved scope verbatim: resolving the old path again could move
+      // this Work's permission to a different project after a symlink is retargeted.
+      trust = record.projectTrusted !== undefined && canonicalCwd === record.cwd
+        && input.trustChallengeId === undefined && input.projectTrustDecision === undefined
+        ? { canonicalCwd, projectTrusted: record.projectTrusted }
+        : await this.resolveProjectTrust({
+          operationType: "instance.reopen", operationId: input.operationId, cwd: canonicalCwd, name: sessionFile,
+          trustChallengeId: input.trustChallengeId, projectTrustDecision: input.projectTrustDecision,
+        });
+    }
     return { instance: await this.openRecord(input.operationId, record, trust, sessionFile, previousLifecycle), previousLifecycle };
   }
 
@@ -594,6 +618,23 @@ export class DockRegistry implements LocalDockToolsHostPort {
       ...(record.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration") }),
       ...(record.modelSpeed === undefined ? {} : { modelSpeed: record.modelSpeed }),
       ...(record.assistant ? { assistant: true as const } : {}),
+    }).catch(async (error: unknown) => {
+      // Only producer-owned diagnoses enter the catalog. Extension errors can
+      // contain credentials or configuration; their original stays in local logs.
+      const known = error instanceof AgentModelNotFoundError || error instanceof ResourceContentError || error instanceof AgentStartupTimeoutError;
+      if (!known) {
+        try { process.stderr.write(`Alu Dock: Work ${record.id} failed to reopen: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); }
+        catch { /* A closed log sink must not keep the failed startup occupied. */ }
+      }
+      const message = error instanceof AgentModelNotFoundError
+        ? `模型 ${error.provider}/${error.modelId} 现在不可用。请在 Main 上恢复这个模型的配置或登录，再继续这个 Work；原会话保留。`
+        : known ? (error as Error).message
+          : "Work 没有启动成功。请在 Work 所在机器查看 Dock 日志，检查扩展和配置后继续；原会话保留。";
+      const previous = this.instances.get(record.id);
+      if (previous) await previous.recordReopenFailure(message, operationId);
+      else await this.catalog.forInstance(record.id).commit({ ...record, lastError: message, updatedAt: new Date().toISOString() },
+        { kind: "instance.reopen.failed", effect: "rollback_contained", operationId, instanceId: record.id });
+      throw known ? error : new AgentUnavailableBeforeEffectError(message);
     });
     if (
       candidate.id !== record.id
@@ -644,6 +685,20 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.scheduleAssistantRecovery(0);
   }
 
+  /** A ready memory service can update the label independently of starting the chat Worker. */
+  async refreshAssistantDisplayName(readName: () => Promise<string | undefined>): Promise<void> {
+    const revision = this.assistantNameRevision;
+    const name = await readName();
+    if (name !== undefined && revision === this.assistantNameRevision) this.setAssistantDisplayName(name);
+  }
+
+  /** Publish Main's saved identity without changing the Work, session title, or conversation. */
+  setAssistantDisplayName(name: string): void {
+    this.assistantDisplayName = name;
+    this.assistantNameRevision++;
+    for (const instance of this.instances.values()) instance.setAssistantDisplayName(name);
+  }
+
   /** Shutdown cancels her restart timer before waiting for admitted operations and stopping Workers. */
   async stopAssistantRecovery(): Promise<void> {
     this.assistantRecoveryEnabled = false;
@@ -685,7 +740,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (!this.assistantRecoveryEnabled) return;
     const record = this.catalog.current().instances.find((work) => work.assistant);
     if (!record) {
-      await this.startNew({ operationId: randomUUID(), cwd: workspace, name: "助手" }, undefined, undefined, () => true, true);
+      await this.startNew({ operationId: randomUUID(), cwd: workspace }, undefined, undefined, () => true, true);
       return;
     }
     if (record.lifecycle === "active") return;
@@ -700,19 +755,17 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const operationId = randomUUID();
     const sessionFile = record.lifecycle === "stopped" ? record.sessionFile : catalogReopenSessionFile(record);
     const release = sessionFile === undefined ? () => {} : this.claimSessionFile(record.id, operationId, sessionFile);
-    this.reopenInFlight.set(record.id, operationId);
     try {
-      if (sessionFile !== undefined) {
-        if (!this.reopenTargetResolver) throw new InstanceNotReopenableError(record.id);
-        await this.reopenTargetResolver.resolve(sessionFile);
-      }
-      if (!this.assistantRecoveryEnabled) return;
-      await this.openRecord(operationId, record, { canonicalCwd: await canonicalDirectory(workspace), projectTrusted: false }, sessionFile,
-        record.lifecycle === "host_lost" || record.lifecycle === "runtime_error" ? record.lifecycle : undefined);
-    } finally {
-      release();
-      this.reopenInFlight.delete(record.id);
-    }
+      await this.trackReopen(record.id, async () => {
+        if (sessionFile !== undefined) {
+          if (!this.reopenTargetResolver) throw new InstanceNotReopenableError(record.id);
+          await this.reopenTargetResolver.resolve(sessionFile);
+        }
+        if (!this.assistantRecoveryEnabled) return;
+        await this.openRecord(operationId, record, { canonicalCwd: await canonicalDirectory(workspace), projectTrusted: false }, sessionFile,
+          record.lifecycle === "host_lost" || record.lifecycle === "runtime_error" ? record.lifecycle : undefined);
+      });
+    } finally { release(); }
   }
 
   bindDockToolsMutationPort(port: DockToolsMutationPort): void {
@@ -720,6 +773,15 @@ export class DockRegistry implements LocalDockToolsHostPort {
     // Registry. The first Host owns the application boundary; a later socket
     // contender must not replace it before admission decides which Host runs.
     this.dockToolsMutationPort ??= port;
+  }
+
+  /** Main's catalog chooses the one resident; an assistant flag on a Pi Work grants nothing. */
+  isResidentAssistant(instanceId: string): boolean {
+    if (this.assistantWorkspace === undefined) return false;
+    const resident = this.catalog.current().instances.find((record) => record.assistant && record.parentId === undefined);
+    if (resident?.id !== instanceId) return false;
+    const snapshot = this.instances.get(instanceId)?.snapshot();
+    return snapshot?.lifecycle === "active" && snapshot.parentId === undefined && snapshot.executor.kind === "dock-assistant";
   }
 
   dockToolsEnabled(sourceInstanceId: string): boolean {
@@ -782,7 +844,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     // The list belongs to this Host's machine, where the source's child Works run.
     if (request.type === "models") return { type: "models", ...await mutations.childModels() };
-    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) });
+    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) }, this.isResidentAssistant(sourceInstanceId));
     if (request.type === "interrupt" || request.type === "stop") {
       if (child) {
         // The parent takes back the work it handed out, so nothing is owed for it any more.
@@ -817,6 +879,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   private trackInstanceForObservation(instance: ManagedInstance): void {
+    if (this.assistantWorkspace !== undefined) instance.setAssistantDisplayName(this.assistantDisplayName);
     this.instanceObservationSubscriptions.get(instance.id)?.();
     this.instanceObservationSinkDetachments.get(instance.id)?.();
     // Through the Host's Dock tools port: a SubHost Work's watches live on Main.
@@ -934,7 +997,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
       try { return live.snapshot(); }
       catch { /* bounded catalog fallback below */ }
     }
-    return catalogSnapshotFromRecord(record, this.hostEpoch);
+    const snapshot = catalogSnapshotFromRecord(record, this.hostEpoch);
+    if (this.assistantWorkspace !== undefined && record.assistant) snapshot.displayName = this.assistantDisplayName;
+    return snapshot;
   }
 
   listPage(input: {

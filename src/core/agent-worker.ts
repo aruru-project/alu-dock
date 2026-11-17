@@ -191,9 +191,25 @@ export class AgentQueueEffectUnknownError extends Error {
   }
 }
 
+/** One read exceeded its deadline; this alone does not end the Worker's work. */
+export class AgentQueryTimeoutError extends Error {
+  constructor() {
+    super("这次读取超时，Work 没有因此停止。请稍后重试。");
+    this.name = "AgentQueryTimeoutError";
+  }
+}
+
 /** Worker transport failed before the child acknowledged effectful custody. */
 export class AgentUnavailableBeforeEffectError extends Error {
   constructor(message: string) { super(message); this.name = "AgentUnavailableBeforeEffectError"; }
+}
+
+/** A startup deadline is a known failure; the supervisor releases the process before reporting it. */
+export class AgentStartupTimeoutError extends AgentUnavailableBeforeEffectError {
+  constructor() {
+    super("Work 启动超时，已停止本次启动。请在 Work 所在机器检查启动扩展和配置，处理后继续这个 Work；原会话保留。");
+    this.name = "AgentStartupTimeoutError";
+  }
 }
 
 /** Worker acknowledged an effectful call before transport/runtime loss. */

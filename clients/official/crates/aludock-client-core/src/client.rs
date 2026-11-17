@@ -713,9 +713,20 @@ pub(crate) fn response_result<R: DeserializeOwned>(
 // Keep these request classes aligned with alu_dock/src/control/dock-client.ts.
 fn response_timeout_for(request_type: &str) -> Duration {
     match request_type {
-        "instance.create" | "instance.ensure" | "instance.adopt" | "instance.reopen"
-        | "instance.stop" | "command.abort" | "session.switch" | "session.new"
-        | "session.compact" | "session.reload" | "session.navigate" | "session.fork"
+        "instance.create"
+        | "instance.ensure"
+        | "instance.adopt"
+        | "instance.reopen"
+        | "instance.stop"
+        | "command.submit"
+        | "command.abort"
+        | "command.abort_restore_queue"
+        | "session.switch"
+        | "session.new"
+        | "session.compact"
+        | "session.reload"
+        | "session.navigate"
+        | "session.fork"
         | "session.clone" => LONG_MUTATION_RESPONSE_TIMEOUT,
         _ => CONTROL_RESPONSE_TIMEOUT,
     }
@@ -1052,6 +1063,15 @@ mod tests {
         );
         assert_eq!(
             response_timeout_for("instance.reopen"),
+            Duration::from_secs(600)
+        );
+        // Preparing a first prompt can include the same compaction as session.compact.
+        assert_eq!(
+            response_timeout_for("command.submit"),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            response_timeout_for("command.abort_restore_queue"),
             Duration::from_secs(600)
         );
     }

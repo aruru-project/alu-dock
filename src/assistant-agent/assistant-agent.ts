@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 
 import { Agent, type AgentEvent as LoopEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
@@ -38,13 +39,16 @@ import {
   type ClearedAgentQueue,
   type ThinkingLevel,
 } from "../core/agent-worker.js";
-import { compareToolDtos, type CommandDto } from "../core/config-projection.js";
+import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
+import { compareCommandDtos, compareToolDtos, type CommandDto, type ResourceDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { projectJsonObject, type JsonObject } from "../core/json-value.js";
 import { localMinute } from "../core/local-time.js";
 import { mainModelOwner } from "../model-service/owner.js";
 import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
+import { AgentSkills, bundledDockSkillPath } from "../worker/agent-skills.js";
+import { projectResources, resolveResourceFile } from "../worker/resource-files.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import { appendDockAttachmentContext } from "../pi/dock-attachment-context.js";
 import {
@@ -120,12 +124,13 @@ interface QueuedInput {
   text: string;
 }
 
-/** `/dock-tools`, alone or with what to do. */
-const DOCK_TOOLS_INPUT = new RegExp(`^\\s*/${DOCK_TOOLS_COMMAND}(?:\\s+(.*))?$`, "su");
-const DOCK_TOOLS_SWITCH: CommandDto = {
+/** The catalog and the extension loader share the same built-in command owners. */
+const BUILTIN_COMMANDS: readonly CommandDto[] = [{
   name: DOCK_TOOLS_COMMAND, source: { kind: "built-in" }, description: "开启、关闭或查看助手的 Dock tools（派 Work、联系别的 Work）",
   argumentHint: "on|off|status", argumentCompletions: false,
-};
+}, {
+  name: "assistant-status", source: { kind: "built-in" }, description: "查看助手运行详情", argumentCompletions: false,
+}];
 const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开会话、不切换或分叉。你可以直接继续说；要载入刚改过的人设和记忆，请用 Reload，重启也会保留这段对话。";
 
 /**
@@ -142,9 +147,10 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
   const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
   // Her model calls use Pi's proxy and network settings, as every Work's do.
   configurePiNetwork(settings);
-  const modelSpeed = new ModelSpeedRuntime();
-  const models = host.models
-    ? await ModelRuntime.create({ owner: mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) })
+  const modelOwner = host.models ? mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) : undefined;
+  const modelSpeed = new ModelSpeedRuntime(modelOwner ? () => modelOwner.readConfiguration() : undefined);
+  const models = modelOwner
+    ? await ModelRuntime.create({ owner: modelOwner })
     : await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
   const sessionDir = init.sessionDir === undefined ? undefined : resolve(init.sessionDir);
   const session = init.sessionFile === undefined
@@ -155,6 +161,7 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
   const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins, modelSpeed);
   await her.chooseStartingModel(init.workerConfig?.model, init.sessionFile === undefined);
   await her.loadExtensions();
+  her.refreshSkills();
   return her;
 }
 
@@ -171,6 +178,7 @@ class AssistantAgent implements WorkerAgent {
   private tools: AgentTool[];
   private readonly builtInTools: AgentTool[];
   private readonly extensions: AssistantToolExtensions;
+  private readonly skills: AgentSkills;
   private readonly workTools: AgentTool[];
   private model: Model<Api> | undefined;
   private thinkingLevel: ThinkingLevel = "off";
@@ -215,6 +223,7 @@ class AssistantAgent implements WorkerAgent {
   private lastUsageTokens: number | undefined;
   private onDisk = false;
   private disposed: Promise<AgentCleanupResult> | undefined;
+  private readonly unsubscribeSpeedSupport: () => void;
 
   constructor(
     private readonly cwd: string,
@@ -227,18 +236,20 @@ class AssistantAgent implements WorkerAgent {
     builtins: AssistantBuiltinExtensions,
     private readonly modelSpeed: ModelSpeedRuntime,
   ) {
+    this.unsubscribeSpeedSupport = modelSpeed.onSupportChanged(data => this.publish({ type: "settings.changed", data }));
+    this.skills = new AgentSkills(cwd);
     this.extensions = new AssistantToolExtensions(cwd, builtins, {
-      notify: (message, level) => this.tell(message, level),
-      confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message }, signal) === true,
+      notify: (message, level, operationId) => this.tell(message, level, operationId),
+      confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message, optionsMeta: { signalAborted: signal.aborted } }, signal) === true,
       status: (key, text) => { void host.call("ui.setStatus", { key, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
-    });
+    }, models);
     this.conversation = new PiSessionConversation({ attachmentContextKey, publishedFiles: this.publishedFiles });
     this.shown = new RecentConversation(session);
     this.handoff = new Handoff({
       branch: () => this.session.getBranch(),
       contextWindow: () => this.model?.contextWindow ?? 0,
       settings: async () => (await port.call({ op: "settings_get" })).handoff,
-      status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, text }).catch(() => {}); },
+      status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
       rememberResult: (text) => this.saveState(HANDOFF_STATE_TYPE, text),
       complete: (system, prompt, maxTokens, signal) => this.complete(system, prompt, maxTokens, signal),
       forgotten: () => this.forgottenEntries(),
@@ -313,14 +324,33 @@ class AssistantAgent implements WorkerAgent {
 
   async loadExtensions(): Promise<void> {
     try {
-      const { extensions = [] } = await this.port.call({ op: "settings_get" });
-      this.tools = [...this.builtInTools, ...await this.extensions.load(extensions, this.builtInTools)];
-      this.agent.state.tools = this.tools;
+      let missing = false;
+      try { await lstat(join(this.cwd, ASSISTANT_EXTENSIONS_FILE)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        missing = true;
+      }
+      // An existing file is independent of the memory service. Only absence needs confirmation:
+      // Main may still be migrating the former SQLite settings before its service becomes ready.
+      if (missing) await this.port.call({ op: "info" });
     } catch {
-      // A settings outage must not take away chat or the tools that already worked.
-      this.tell("暂时读不到助手扩展设置，现有工具没有改变。请稍后 Reload 重试。", "warning");
+      this.tell("暂时无法确认助手扩展配置，现有工具没有改变。请检查 Main 的配置文件和助手服务日志后 Reload。", "warning");
+      return;
     }
+    // Re-read after the service is ready; only a still-missing file means shipped defaults.
+    this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools, BUILTIN_COMMANDS)];
+    this.agent.state.tools = this.tools;
   }
+
+  refreshSkills(): void {
+    const changed = this.skills.refresh(this.extensions.skillDeclarations, this.host.attachments === undefined ? [] : [
+      { path: bundledDockSkillPath("dock-attachments"), source: { kind: "built-in" } },
+    ]);
+    if (changed) this.contextReady = false;
+  }
+
+  /** The same current list authorizes resource.content. Other local context snapshots may join it. */
+  private getDocumentResources(): ResourceDto[] { return [...this.skills.resources]; }
 
   // ---- What the Host asks -------------------------------------------------------------------
 
@@ -342,7 +372,7 @@ class AssistantAgent implements WorkerAgent {
       isCompacting: false,
       modelState: this.modelState(),
       metrics: this.metrics(),
-      extensionCommands: [DOCK_TOOLS_COMMAND],
+      extensionCommands: [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog].map(command => command.name).sort(),
     };
   }
 
@@ -378,16 +408,19 @@ class AssistantAgent implements WorkerAgent {
         })).sort(compareToolDtos);
         return { tools, total: tools.length, truncated: false };
       }
-      case "settings.get": return [this.modelSpeed.setting(this.model)];
+      case "settings.get":
+        this.modelSpeed.refresh();
+        return [this.modelSpeed.setting(this.model)];
       case "settings.update":
         if (request.params.update.key !== "modelSpeed") throw this.notHers("助手在这里可以调整模型速度；其他设置请到助手设置中修改。");
+        this.modelSpeed.refresh();
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
-      // She has none of these: clients open her Work and show them empty.
-      case "resource.get": return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
-      // The one command she takes: her owner's switch for her Dock tools, as every Work has it.
+      case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);
+      // Commands run directly for her owner; no model turn is involved.
       case "command.catalog": {
-        const commands = [DOCK_TOOLS_SWITCH].filter((command) => command.name.startsWith(request.params.prefix ?? ""));
+        const commands = [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog]
+          .filter((command) => command.name.startsWith(request.params.prefix ?? "")).sort(compareCommandDtos);
         return { commands, total: commands.length, truncated: false };
       }
       case "session.list": return { sessions: [], total: 0, truncated: false };
@@ -427,6 +460,7 @@ class AssistantAgent implements WorkerAgent {
     this.opening.refresh();
     await this.models.refresh({ allowNetwork: false });
     await this.loadExtensions();
+    this.refreshSkills();
     await this.dropForgotten().catch(() => {});
     this.contextReady = false;
     const sessionFile = this.session.getSessionFile();
@@ -441,16 +475,16 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** Her owner's switch for collaboration. Reading files and attachments stays available. */
-  private async switchDockTools(action: string): Promise<void> {
+  private async switchDockTools(action: string, operationId: string): Promise<void> {
     if (!isDockToolsAction(action)) {
-      this.tell("用法：/dock-tools on、/dock-tools off 或 /dock-tools status。", "warning");
+      this.tell("用法：/dock-tools on、/dock-tools off 或 /dock-tools status。", "warning", operationId);
       return;
     }
     const enabled = action === "status" ? this.host.dockToolsEnabled() : await this.host.configureDockTools(action === "on");
     this.showDockTools();
     this.tell(enabled
       ? "助手的 Dock tools 开着：她可以派 Work 干活、联系别的 Work。"
-      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work；仍能聊天、用记忆、读取文件和附件。要恢复派活，用 /dock-tools on。");
+      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work；仍能聊天、用记忆、读取文件和附件。要恢复派活，用 /dock-tools on。", "info", operationId);
   }
 
   /** Session replacement clears client status; restore all of her current facts together. */
@@ -466,8 +500,8 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** Says something to the owner outside the conversation, in whichever client is open. */
-  private tell(message: string, level: "info" | "warning" = "info"): void {
-    void this.host.call("ui.notify", { message, level }).catch(() => {});
+  private tell(message: string, level: "info" | "warning" | "error" = "info", operationId?: string): void {
+    void this.host.call("ui.notify", { message, level, ...(operationId === undefined ? {} : { operationId }) }).catch(() => {});
   }
 
   /** What this kind of Work does not have: the owner is told why, and the request fails. */
@@ -489,7 +523,7 @@ class AssistantAgent implements WorkerAgent {
       }
       case "wait_for_idle": await this.running; return null;
       case "resolve_file_source": {
-        if (control.kind !== "published") throw new Error("The assistant has no project resources");
+        if (control.kind !== "published") return resolveResourceFile(this.getDocumentResources(), control.ref);
         const { dto: file, source } = this.publishedFiles.resolve(control.ref);
         return { kind: "published", file, source };
       }
@@ -505,6 +539,7 @@ class AssistantAgent implements WorkerAgent {
   dispose(): Promise<AgentCleanupResult> {
     this.disposed ??= (async () => {
       const cleanupErrors: string[] = [];
+      this.unsubscribeSpeedSupport();
       this.reminders.stop();
       this.handoff.stop();
       try { await this.abort(); } catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
@@ -525,10 +560,19 @@ class AssistantAgent implements WorkerAgent {
     preflight: (result: AgentCommandPreflightResult) => void,
   ): Promise<null> {
     const { operationId, message, images, delivery: requested } = params;
-    const dockTools = DOCK_TOOLS_INPUT.exec(message);
-    if (dockTools) {
+    const input = /^\s*\/([^\s/]+)(?:\s+([\s\S]*))?$/u.exec(message);
+    const builtin = input && BUILTIN_COMMANDS.find(command => command.name === input[1]);
+    const command = this.extensions.matchCommand(message);
+    if (builtin || command) {
+      // These handlers accept free text only, so attached files must not be silently discarded.
+      if ((images?.length ?? 0) > 0 || (params.attachments?.length ?? 0) > 0) {
+        preflight({ success: false });
+        throw this.notHers("这条命令只接收文字参数，附件没有发送。请移除附件后再执行命令，或用普通消息发送文件。");
+      }
       preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
-      await this.switchDockTools(dockTools[1]?.trim() || "status");
+      if (builtin?.name === DOCK_TOOLS_COMMAND) await this.switchDockTools(input![2]?.trim() || "status", operationId);
+      else if (builtin) this.tell(`滚动整理\n${this.handoff.details()}\n\n工具扩展\n${this.extensions.details()}`, "info", operationId);
+      else await this.extensions.executeCommand(command!.name, command!.args, operationId);
       return null;
     }
     if (this.model === undefined) {
@@ -696,7 +740,7 @@ class AssistantAgent implements WorkerAgent {
         describe: (ref) => { const model = this.models.getModel(ref.provider, ref.id); return model ? describe(model) : undefined; },
       }),
     };
-    return topLevelDockTools({ conversationCopy: false, waitInTurn: false, usageGuide: false })
+    return topLevelDockTools({ delegation: "assistant", conversationCopy: false, waitInTurn: false, usageGuide: false })
       .map((tool) => ({
         name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
         execute: async (_id: string, params: unknown, signal?: AbortSignal) => {
@@ -765,6 +809,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   private async abort(): Promise<void> {
+    this.extensions.abortCommands();
     if (this.running === undefined) return;
     this.stopRequested = true;
     this.retryWait?.abort();
@@ -992,9 +1037,12 @@ class AssistantAgent implements WorkerAgent {
 
   /** Her opening leads what the model is given; the conversation follows as the session holds it. */
   private async leadWithOpening(): Promise<void> {
+    // A new reply sees new manuals without a prerequisite Reload or a file watcher. Unchanged
+    // metadata keeps the same leading context; full manuals enter only through the read tool.
+    this.refreshSkills();
     const { text, changed } = await this.opening.text();
     if (!changed && this.contextReady) return;
-    const opening = createInitialSystemMessage(text, this.tools.map(toToolDeclaration));
+    const opening = createInitialSystemMessage(text + this.skills.prompt, this.tools.map(toToolDeclaration));
     const conversation = this.session.buildSessionContext().messages.filter((message) => message.role !== "system");
     this.agent.state.messages = opening === undefined ? conversation : [opening, ...conversation];
     this.contextReady = true;

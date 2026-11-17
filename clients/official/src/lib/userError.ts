@@ -51,10 +51,9 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'protocol_error') return '收到的数据无法识别。请刷新当前内容后重试。'
     if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '连接中断，没收到结果。请稍后再试。'
+    if (code === 'query_timeout') return '这次读取超时，Work 没有因此停止。请稍后重试。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
-    // The trust question is answered where the flow shows it; a caller without
-    // that UI (Reopen, see #304) must not tell the user to refresh.
-    if (code === 'project_trust_required') return '这项操作需要先确认信任对应的目录，这个客户端还不能在这里确认。请在电脑上的 Alu Dock 终端里完成。'
+    if (code === 'project_trust_required') return '这项操作需要你确认是否信任项目目录。请从原入口重试，并在信任提示里选择或取消。'
     if (code === 'interaction_expired' || code === 'interaction_not_found') return '这个问题已经在其他窗口回答，或已经结束，不需要再处理。'
     if (code === 'invalid_tree_target') return '这个节点已不在当前 Session 中。请重新打开 Session Tree 后再选择。'
     // Directory picker (`workspace.list`) outcomes; the Host phrases them for its log, not the user.
@@ -81,6 +80,20 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     return fallback
   }
   return fallback
+}
+
+/** Continue cannot offer the inactive Work's model picker or Reload as a repair. */
+export function continueErrorMessage(cause: unknown) {
+  const code = errorCode(cause)
+  const failure = cause as { outcomeUnknown?: boolean; message?: string } | null
+  if (failure?.outcomeUnknown || code === 'effect_unknown') return '没能确认这个 Work 是否已继续。请先查看当前状态；不要直接重复继续。原 Work 和会话保留。'
+  if (code === 'model_not_found') return '这个模型现在不可用。请在 Main 上恢复这个模型的配置或登录，再继续这个 Work；原会话保留。'
+  // Reopen returns producer-owned startup diagnoses under this code, not an
+  // arbitrary extension exception (those remain in the machine's Dock log).
+  if (code === 'runtime_unavailable' && failure?.message) return failure.message
+  if (code === 'request_failed') return 'Work 没有启动成功。请在 Work 所在机器查看 Dock 日志，检查扩展和配置后继续；原会话保留。'
+  if (code === 'instance_busy') return '这个 Work 还在处理前一次操作。请查看当前状态，不需要另建 Work。'
+  return userErrorMessage(cause, '这个 Work 还没有恢复。请查看当前状态和下方详情，处理后继续同一个 Work。')
 }
 
 export function userErrorPresentation(

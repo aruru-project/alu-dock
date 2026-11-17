@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +28,23 @@ async function assistantWithSmallWindow(context: test.TestContext, prefix: strin
 
 const records = async (client: DockClient, id: string) => (await client.history(id)).entries.filter((entry) => entry.kind === "compaction_summary");
 
+/** The owner asks for full details through the same command center notification path. */
+async function runtimeDetails(client: DockClient, id: string): Promise<string> {
+  const operationId = randomUUID();
+  let details: string | undefined;
+  const follower = await client.streamEvents(id, { onEvent: event => {
+    if (event.type === "extension.notification" && event.data.operationId === operationId) details = event.data.message;
+  } });
+  try {
+    await client.prompt(id, "/assistant-status", "auto", operationId);
+    await waitFor(() => details !== undefined, "The assistant's runtime details did not arrive");
+    return details!;
+  } finally {
+    follower.close();
+    await follower.done.catch(() => {});
+  }
+}
+
 // Card #667: her conversation never starts over. When it grows long, the older part is written into a
 // hand-over record in the background while she goes on answering (compacting in place made the
 // Minecraft companion this follows deaf for 90 to 194 seconds), and the record takes its place later.
@@ -48,10 +66,10 @@ test("saved hand-over settings guide background writing while she answers, and s
   // The record is being written: the model is asked for it and has not answered.
   const writing = await coordinator.request(2);
   assert.equal(writing.body.messages?.find((message) => message.role === "system" || message.role === "developer")?.content, handoff.prompt, "The entire saved instruction replaces the factory role and writing rules");
-  await waitFor(async () => {
-    const status = (await client.status(alu.id)).extensionStatus["滚动整理"] ?? "";
-    return status.includes("正在后台整理") && status.includes("55000 token") && status.includes("1200 token");
-  }, "The Work did not show its effective hand-over settings");
+  // #671: routine background work is available on demand, not presented as a chat warning.
+  assert.equal((await client.status(alu.id)).extensionStatus["滚动整理"], undefined);
+  const details = await runtimeDetails(client, alu.id);
+  assert.ok(details.includes("正在后台整理") && details.includes("55000 token") && details.includes("1200 token"), "Requested details show the effective hand-over settings");
   assert.ok(given(writing).includes("交接记录") && given(writing).includes("周末去爬山，到时候记得提醒我带水壶。"), "The older part of the conversation is given to the model to write the record from");
   // She answers her owner meanwhile, from the whole conversation.
   await client.prompt(alu.id, "在吗？", "auto", "alu-there");
@@ -83,7 +101,8 @@ test("saved hand-over settings guide background writing while she answers, and s
   const reopened = await team.startHost();
   assert.deepEqual((await reopened.assistantSettings()).handoff, handoff, "Main keeps the saved parameters and full instruction after restarting");
   const resident = await team.assistantWork();
-  await waitFor(async () => (await reopened.status(resident.id)).extensionStatus["滚动整理"]?.includes("上次整理成功") === true, "The reopened Work did not restore its latest hand-over result");
+  assert.ok((await runtimeDetails(reopened, resident.id)).includes("上次整理成功"), "Requested details restore the latest hand-over result after reopening");
+  assert.equal((await reopened.status(resident.id)).extensionStatus["滚动整理"], undefined, "A healthy idle assistant leaves the chat status bar clear");
 });
 
 // Card #667: what she is told to forget is no longer in front of her either: not where it was said

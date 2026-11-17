@@ -3,6 +3,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DockClient } from "../src/control/dock-client.js";
+import type { DockEvent } from "../src/core/instance-dto.js";
 import type { CatalogProjection } from "../src/core/catalog.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
@@ -15,8 +17,22 @@ test("Main keeps one editable assistant: name and persona survive restart, and a
   let client = await team.startHost();
   const alu = await team.assistantWork();
   assert.equal((await client.list()).filter((work) => work.assistant).length, 1);
-  assert.equal(alu.name, "助手");
-  await client.nameSession(alu.id, "小满");
+  assert.equal(alu.displayName, "alu");
+  assert.equal((await client.assistantSettings()).displayName, "alu");
+  const other = new DockClient({ socketPath: join(team.root, "dock.sock") });
+  context.after(() => other.closeActiveConnections());
+  const events: DockEvent[] = [];
+  const followed = await other.streamEvents(alu.id, { onEvent: event => events.push(event) });
+  context.after(async () => { followed.close(); await followed.done.catch(() => {}); });
+  await client.setAssistantSettings({ displayName: "小满 · 星" });
+  await waitFor(() => events.some(event => event.type === "session.info_changed" && event.data.displayName === "小满 · 星"), "The other connected client did not receive the new name");
+  assert.equal((await other.assistantSettings()).displayName, "小满 · 星");
+  const renamed = (await other.list()).find(work => work.id === alu.id)!;
+  assert.equal(renamed.displayName, "小满 · 星");
+  assert.equal(renamed.executor.piSessionId, alu.executor.piSessionId);
+  assert.equal(renamed.name, alu.name, "A global display name leaves the session title alone");
+  await client.nameSession(alu.id, "早晨的对话");
+  assert.equal((await client.status(alu.id)).displayName, "小满 · 星");
   const persona = await client.assistantDocument("persona");
   const customPrompt = "你叫小满，用平实的语气交谈，不称呼我为主人。";
   await client.setAssistantDocument("persona", customPrompt, persona.revision);
@@ -36,16 +52,21 @@ test("Main keeps one editable assistant: name and persona survive restart, and a
   assert.equal(stopped.instance.lifecycle, "stopped", "The existing stop receipt describes the Worker that stopped");
   const restarted = await client.status(alu.id);
   assert.equal(restarted.lifecycle, "active");
-  assert.equal(restarted.name, "小满");
+  assert.equal(restarted.name, "早晨的对话");
+  assert.equal(restarted.displayName, "小满 · 星");
   assert.equal(restarted.runtimeGeneration, alu.runtimeGeneration + 1);
   assert.ok(JSON.stringify(await client.history(alu.id)).includes("明天要去图书馆"));
   assert.equal((await client.list()).filter((work) => work.assistant).length, 1);
 
+  followed.close();
+  await followed.done.catch(() => {});
   await team.host!.stop();
   client.closeActiveConnections();
   client = await team.startHost();
   assert.equal((await team.assistantWork()).id, alu.id);
-  assert.equal((await client.status(alu.id)).name, "小满");
+  assert.equal((await client.status(alu.id)).name, "早晨的对话");
+  assert.equal((await client.assistantSettings()).displayName, "小满 · 星");
+  assert.equal((await client.status(alu.id)).displayName, "小满 · 星");
   assert.equal((await client.assistantDocument("persona")).text, customPrompt);
   assert.ok(JSON.stringify(await client.history(alu.id)).includes("明天要去图书馆"));
 
@@ -68,6 +89,7 @@ test("Main keeps one editable assistant: name and persona survive restart, and a
   const chosen = await team.assistantWork();
   assert.equal(chosen.id, newer.id);
   assert.equal(chosen.name, "后来那段对话");
+  assert.equal(chosen.displayName, "小满 · 星");
   assert.equal((await client.status(alu.id)).assistant, undefined);
   assert.ok(JSON.stringify(await client.history(chosen.id)).includes("在白塔门口碰面"));
 });

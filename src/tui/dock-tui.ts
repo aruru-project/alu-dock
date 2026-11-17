@@ -66,8 +66,10 @@ import {
 } from "./settings-controls.js";
 import { editorTheme, paint } from "./theme.js";
 import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
+import localControlCommandNames from "../shared/local-control-command-names.json" with { type: "json" };
 
 const SUBMITTING_FEEDBACK_DELAY_MS = 200;
+const localCommands = Object.fromEntries(Object.entries(localControlCommandNames).map(([key, name]) => [key, `/${name}`])) as Record<keyof typeof localControlCommandNames, string>;
 
 export function pickerContentRowBudget(terminalRows: number): number {
   const rows = Number.isFinite(terminalRows) ? Math.max(1, Math.floor(terminalRows)) : 24;
@@ -524,43 +526,45 @@ export async function runDockTui(
   };
 
   async function handleInput(text: string): Promise<void> {
-    if (text === "/detach" || text === "/quit" || text === "/exit") {
+    // Usage guards own complete local names, not extension names such as /new-echo.
+    const command = text.split(/\s/u, 1)[0];
+    if (text === localCommands.detach || text === localCommands.quit || text === localCommands.exit) {
       finish("detached");
       return;
     }
-    if (text === "/help") {
+    if (text === localCommands.help) {
       conversation.addNotice(workHelpText());
       tui.requestRender();
       return;
     }
-    if (text === "/settings") {
+    if (text === localCommands.settings) {
       await chooseSetting();
       return;
     }
-    const settingTarget = commandMessage(text, "/settings");
+    const settingTarget = commandMessage(text, localCommands.settings);
     if (settingTarget !== undefined) {
       await updateSettingFromCommand(settingTarget);
       return;
     }
-    if (text.startsWith("/settings")) {
+    if (command === localCommands.settings) {
       conversation.addNotice("Usage: /settings KEY VALUE", true);
       tui.requestRender();
       return;
     }
-    if (text === "/tools") {
+    if (text === localCommands.tools) {
       await chooseTools();
       return;
     }
-    const toolsTarget = commandMessage(text, "/tools");
+    const toolsTarget = commandMessage(text, localCommands.tools);
     if (toolsTarget !== undefined) {
       await setToolsFromCommand(toolsTarget);
       return;
     }
-    if (text === "/model") {
+    if (text === localCommands.model) {
       await chooseModel();
       return;
     }
-    const modelTarget = commandMessage(text, "/model");
+    const modelTarget = commandMessage(text, localCommands.model);
     if (modelTarget !== undefined) {
       const parsed = parseModelTarget(modelTarget);
       if (!parsed) {
@@ -571,20 +575,20 @@ export async function runDockTui(
       await switchModel(parsed.provider, parsed.id);
       return;
     }
-    if (text === "/speed") {
+    if (text === localCommands.speed) {
       await chooseSetting("modelSpeed");
       return;
     }
-    const speedTarget = commandMessage(text, "/speed");
+    const speedTarget = commandMessage(text, localCommands.speed);
     if (speedTarget !== undefined) {
       await updateSettingFromCommand(`modelSpeed ${speedTarget}`);
       return;
     }
-    if (text === "/thinking") {
+    if (text === localCommands.thinking) {
       await chooseThinking();
       return;
     }
-    const thinkingTarget = commandMessage(text, "/thinking");
+    const thinkingTarget = commandMessage(text, localCommands.thinking);
     if (thinkingTarget !== undefined) {
       if (!isThinkingLevel(thinkingTarget)) {
         conversation.addNotice("Thinking level must be off, minimal, low, medium, high, xhigh, or max", true);
@@ -594,89 +598,89 @@ export async function runDockTui(
       await switchThinking(thinkingTarget);
       return;
     }
-    if (text === "/tree") {
+    if (text === localCommands.tree) {
       await chooseTreeNavigation();
       return;
     }
-    if (text.startsWith("/tree")) {
+    if (command === localCommands.tree) {
       conversation.addNotice("Run /tree, then search for and choose a conversation point.", true);
       tui.requestRender();
       return;
     }
-    if (text === "/fork") {
+    if (text === localCommands.fork) {
       await chooseForkTarget();
       return;
     }
-    if (text.startsWith("/fork")) {
+    if (command === localCommands.fork) {
       conversation.addNotice("Run /fork, then search for and choose an earlier prompt.", true);
       tui.requestRender();
       return;
     }
-    if (text === "/clone") {
+    if (text === localCommands.clone) {
       await cloneSession();
       return;
     }
-    if (text.startsWith("/clone")) {
+    if (command === localCommands.clone) {
       conversation.addNotice("Usage: /clone", true);
       tui.requestRender();
       return;
     }
-    if (text === "/new") {
+    if (text === localCommands.session_new) {
       await createNewSession();
       return;
     }
-    if (text.startsWith("/new")) {
+    if (command === localCommands.session_new) {
       conversation.addNotice("Usage: /new", true);
       tui.requestRender();
       return;
     }
-    if (text === "/resume") {
+    if (text === localCommands.resume) {
       await chooseSession();
       return;
     }
-    if (text.startsWith("/resume")) {
+    if (command === localCommands.resume) {
       conversation.addNotice("Run /resume, then search for and choose saved Pi work.", true);
       tui.requestRender();
       return;
     }
-    if (text === "/name") {
+    if (text === localCommands.name) {
       conversation.addNotice(instance.name
         ? `Current session name: ${terminalSafe(instance.name)}. Usage: /name NAME; use /name - to clear.`
         : "Name this session with /name NAME.");
       tui.requestRender();
       return;
     }
-    const nameTarget = commandMessage(text, "/name");
+    const nameTarget = commandMessage(text, localCommands.name);
     if (nameTarget !== undefined) {
       await nameSession(nameTarget === "-" ? "" : nameTarget);
       return;
     }
-    if (text === "/compact" || text.startsWith("/compact ")) {
-      await compactSession(commandMessage(text, "/compact"));
+    if (text === localCommands.compact || text.startsWith(`${localCommands.compact} `)) {
+      await compactSession(commandMessage(text, localCommands.compact));
       return;
     }
-    if (text === "/reload") {
+    if (text === localCommands.reload) {
       await reloadSession();
       return;
     }
-    if (text === "/resources") {
+    if (text === localCommands.resources) {
       await showResources();
       return;
     }
-    if (text === "/context-changes") {
+    if (text === localCommands.context_changes) {
       await showContextChanges();
       return;
     }
-    if (["/install", "/config", "/login"].some((command) => text === command || text.startsWith(`${command} `))) {
+    if ([localCommands.install, localCommands.config, localCommands.login].some((name) => text === name || text.startsWith(`${name} `))) {
       conversation.addNotice(`Open another shell and run \`pi ${text.slice(1)}\` there.`);
       tui.requestRender();
       return;
     }
-    if (text === "/status") {
+    if (text === localCommands.status) {
       await refreshStatus();
       return;
     }
-    if (text === "/attachments" || text === "/attachments clear") {
+    if (text === localCommands.attachments || text === `${localCommands.attachments} clear`) {
       if (text.endsWith(" clear")) {
         draftAttachmentIds = [];
         conversation.addNotice("Attachments removed from the editor draft.");
@@ -688,11 +692,11 @@ export async function runDockTui(
       tui.requestRender();
       return;
     }
-    if (text === "/abort") {
+    if (text === localCommands.abort) {
       await abortRun();
       return;
     }
-    if (text === "/abort-shell") {
+    if (text === localCommands.abort_shell) {
       await abortShell();
       return;
     }
@@ -706,7 +710,7 @@ export async function runDockTui(
       await runShell(shell.command, shell.excludeFromContext);
       return;
     }
-    if (text === "/stop") {
+    if (text === localCommands.stop) {
       blockEditorSubmit();
       runActivity = { phase: "aborting", label: "stopping" };
       activity.setActivity(runActivity);
@@ -723,14 +727,14 @@ export async function runDockTui(
       return;
     }
 
-    const follow = commandMessage(text, "/follow");
-    const steer = commandMessage(text, "/steer");
-    if (text.startsWith("/follow") && follow === undefined) {
+    const follow = commandMessage(text, localCommands.follow);
+    const steer = commandMessage(text, localCommands.steer);
+    if (command === localCommands.follow && follow === undefined) {
       conversation.addNotice("Usage: /follow MESSAGE", true);
       tui.requestRender();
       return;
     }
-    if (text.startsWith("/steer") && steer === undefined) {
+    if (command === localCommands.steer && steer === undefined) {
       conversation.addNotice("Usage: /steer MESSAGE", true);
       tui.requestRender();
       return;
@@ -869,6 +873,7 @@ export async function runDockTui(
       }
       runActivity = activityFromSnapshot(instance);
       activity.setActivity(runActivity);
+      if (result.instance.execution === "running") showStatus("Stop requested");
     } catch (error) {
       showError(error);
     } finally {
@@ -2607,31 +2612,31 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     });
   }
   const dockCommands = [
-    { name: "abort", description: "stop the current response; keep the work open" },
-    { name: "clone", description: "clone the current conversation point into a new Pi session" },
-    { name: "compact", description: "shorten conversation context", argumentHint: "INSTRUCTIONS" },
-    { name: "config", description: "show the separate Pi CLI command" },
-    { name: "context-changes", description: "read system prompt and model context changes" },
-    { name: "detach", description: "leave Work while the work keeps running" },
-    { name: "follow", description: "send a message after the current response", argumentHint: "MESSAGE" },
-    { name: "fork", description: "choose an earlier prompt and return it to the editor" },
-    { name: "help", description: "show Work commands" },
-    { name: "install", description: "show the separate Pi CLI command" },
-    { name: "login", description: "show the separate Pi CLI command" },
-    { name: "model", description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
-    { name: "name", description: "set or clear the Pi session name", argumentHint: "NAME" },
-    { name: "new", description: "start a new Pi session" },
-    { name: "reload", description: "reload Pi files and commands" },
-    { name: "resources", description: "inspect loaded Pi files and warnings" },
-    { name: "resume", description: "search for and choose a saved Pi session" },
-    { name: "settings", description: "inspect or update Work settings", argumentHint: "KEY VALUE" },
-    { name: "status", description: "refresh work status" },
-    { name: "steer", description: "redirect the current response", argumentHint: "MESSAGE" },
-    { name: "stop", description: "end this work and remove it from Dock" },
-    { name: "thinking", description: "choose or set thinking level", argumentHint: "LEVEL" },
-    { name: "speed", description: "choose request speed and scope; inherit follows the parent", argumentHint: "standard|fast|ultrafast [all] | inherit" },
-    { name: "tools", description: "choose active tools", argumentHint: "NAME…" },
-    { name: "tree", description: "browse and choose a point in the current Pi session tree" },
+    { name: localControlCommandNames.abort, description: "stop the current response; keep the work open" },
+    { name: localControlCommandNames.clone, description: "clone the current conversation point into a new Pi session" },
+    { name: localControlCommandNames.compact, description: "shorten conversation context", argumentHint: "INSTRUCTIONS" },
+    { name: localControlCommandNames.config, description: "show the separate Pi CLI command" },
+    { name: localControlCommandNames.context_changes, description: "read system prompt and model context changes" },
+    { name: localControlCommandNames.detach, description: "leave Work while the work keeps running" },
+    { name: localControlCommandNames.follow, description: "send a message after the current response", argumentHint: "MESSAGE" },
+    { name: localControlCommandNames.fork, description: "choose an earlier prompt and return it to the editor" },
+    { name: localControlCommandNames.help, description: "show Work commands" },
+    { name: localControlCommandNames.install, description: "show the separate Pi CLI command" },
+    { name: localControlCommandNames.login, description: "show the separate Pi CLI command" },
+    { name: localControlCommandNames.model, description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
+    { name: localControlCommandNames.name, description: "set or clear the Pi session name", argumentHint: "NAME" },
+    { name: localControlCommandNames.session_new, description: "start a new Pi session" },
+    { name: localControlCommandNames.reload, description: "reload Pi files and commands" },
+    { name: localControlCommandNames.resources, description: "inspect loaded Pi files and warnings" },
+    { name: localControlCommandNames.resume, description: "search for and choose a saved Pi session" },
+    { name: localControlCommandNames.settings, description: "inspect or update Work settings", argumentHint: "KEY VALUE" },
+    { name: localControlCommandNames.status, description: "refresh work status" },
+    { name: localControlCommandNames.steer, description: "redirect the current response", argumentHint: "MESSAGE" },
+    { name: localControlCommandNames.stop, description: "end this work and remove it from Dock" },
+    { name: localControlCommandNames.thinking, description: "choose or set thinking level", argumentHint: "LEVEL" },
+    { name: localControlCommandNames.speed, description: "choose request speed and scope; inherit follows the parent", argumentHint: "standard|fast|ultrafast [all] | inherit" },
+    { name: localControlCommandNames.tools, description: "choose active tools", argumentHint: "NAME…" },
+    { name: localControlCommandNames.tree, description: "browse and choose a point in the current Pi session tree" },
   ];
   for (const command of dockCommands) catalog.set(command.name, command);
   return [...catalog.values()].sort((left, right) => left.name.localeCompare(right.name));

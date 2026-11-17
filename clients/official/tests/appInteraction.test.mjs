@@ -40,7 +40,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
 let startPairingNative, cancelPairingNative, downloadNative
-let abortNative, compactNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
+let abortNative, compactNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, runCatalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
@@ -103,11 +103,17 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'set_extension_widget_viewport' || command === 'set_shared_widget_viewport') return
   if (command === 'respond_shared_interaction') return sharedRespondNative(args)
-  if (command === 'command_catalog') return catalogNative ? catalogNative() : { commands: [], diagnostics: [], total: 0, truncated: false }
+  if (command === 'command_catalog') return catalogNative ? catalogNative(args) : { commands: [], diagnostics: [], total: 0, truncated: false }
+  if (command === 'run_catalog_command') return runCatalogNative(args)
   if (command === 'list_tools') {
     if (toolsNative) return toolsNative()
     throw { code: 'connection_failed', message: '工具暂时没有读到，请重试。' }
   }
+  if (command === 'set_active_tools') return { tools: [{ name: 'read', description: '读取文件', active: false }], total: 1, truncated: false }
+  if (command === 'workspace_entries') return { instanceId: args.instanceId, path: args.path, revision: '1', entries: [], total: 0, truncated: false, hostEpoch: 'epoch' }
+  if (command === 'clear_workspace_file_state') return
+  if (command === 'run_shell_command') return { receipt: { operationId: args.operationId, instanceId: args.instanceId, startedAt: '2026-11-13T10:00:00Z' }, instance: atHost(work) }
+  if (command === 'new_session') throw { code: 'busy', message: '这次没有新建 Session，请稍后重试。' }
   if (command === 'get_resources') return { resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
   if (command === 'get_settings') return settingsNative ? settingsNative(args) : { settings: [] }
   if (command === 'update_setting') return updateSettingNative(args)
@@ -283,7 +289,7 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
 let mounted
 try {
-  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
+  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations', 'work-actions'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
   await build({ root, configFile: false, logLevel: 'silent', build: { outDir: directory, emptyOutDir: false, minify: false,
     lib: { entry: join(directory, 'entry.ts'), formats: ['es'], fileName: () => 'app.mjs' }, rolldownOptions: { external: ['vue', 'pinia'] } },
     plugins: [{ name: 'native-boundary', enforce: 'pre', resolveId(id) {
@@ -871,6 +877,9 @@ try {
     for (const eventType of ['compaction.started', 'compaction.completed']) {
       observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType, data: { reason: 'manual', aborted: false, willRetry: false } } })
     }
+    // The real Host follows the completion notice with its authoritative state.
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'instance.state_changed',
+      data: { reason: 'compaction_completed', lifecycle: 'active', execution: 'idle', compacting: false, lastRun: 'succeeded', pending: { steering: 0, followUp: 0, total: 0 } } } })
     await settle()
     remoteSequence += 10
   }
@@ -880,10 +889,19 @@ try {
   {
     assert.equal(app.selectedWork.execution === 'running', false)
     assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'an idle Work shows no abort control')
-    const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', pending: { steering: 0, followUp: 2, total: 2 } }
+    // 2026-11-17: a reconnect during pre-prompt auto-compaction has only the
+    // current snapshot, not the earlier compaction.started conversation notice.
+    const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', compacting: true, pending: { steering: 0, followUp: 2, total: 2 } }
     const restored = [{ ...queueItem('abort-1'), text: 'queued a' }, { ...queueItem('abort-2'), text: 'queued b' }]
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
     observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
+    compact.props['onUpdate:modelValue']('original send waiting for compaction')
+    let originalArgs, resolveOriginalSend
+    submitNative = args => { originalArgs = args; return new Promise(resolve => { resolveOriginalSend = resolve }) }
+    const originalSending = find(container, item => item.type === 'form' && String(item.props.class).includes('alu-input-wrap')).props.onSubmit({ preventDefault() {} })
+    await settle()
+    const preparingSend = { ...base, operationId: originalArgs.operationId, kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: originalArgs.operationEditor, state: 'pending' }
+    nativeResults.set(preparingSend.operationId, preparingSend); emit('aludock://operation', preparingSend)
     compact.props['onUpdate:modelValue']('editor at abort')
     // A lost compaction reply leaves no refresh-to-confirm action, and Abort stays usable.
     const unconfirmedCompaction = { ...base, operationId: 'unconfirmed-compaction', kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '压缩结果尚未确认。', outcomeUnknown: true } }
@@ -891,7 +909,8 @@ try {
     await settle()
     assertSameReference(find(container, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined, 'no refresh-to-confirm action')
     const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
-    assert.equal(abortButton.props.disabled, false, 'a lost reply elsewhere does not disable Abort')
+    assert.equal(abortButton.props.disabled, false, 'a pending send or lost reply elsewhere does not disable Abort')
+    assert.equal(text(abortButton).includes('压缩中'), true, 'the current compaction is visible after reconnect without its earlier start event')
     const dequeues = calls.filter(call => call.command === 'dequeue_messages').length
     let resolveAbort, abortArgs
     abortNative = args => { abortArgs = args; return new Promise(resolve => { resolveAbort = resolve }) }
@@ -900,15 +919,26 @@ try {
     // The Host publishes what Abort did on the Work's live events, then replies.
     observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'queue.cleared',
       data: { reason: 'dequeued', queueItemIds: restored.map(item => item.queueItemId), steering: 0, followUp: 2, total: 2 } } })
-    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'run.settled', data: { result: 'aborted' } } })
-    const result = { instance: atHost({ ...abortWork, execution: 'idle', pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored, inFlight: [] } }
+    // Pi can record cancellation while a preparation extension still finishes.
+    // A successful stop request must not pretend that this ongoing step is idle.
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'compaction.completed', data: { reason: 'threshold', aborted: true, willRetry: false } } })
+    const result = { instance: atHost({ ...abortWork, execution: 'running', compacting: false, pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored, inFlight: [] } }
     const receipt = { ...base, operationId: abortArgs.operationId, kind: 'abort_run', runtimeGeneration: 2, sessionId: '', editor: null, state: 'succeeded', result }
     nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt)
     resolveAbort(result); await pendingAbort; await settle()
     assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'returned messages precede the editor text')
     assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues, 'Abort needs no separate Queue retrieval')
-    assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves with the run')
-    assert.ok(text(container).includes('已中止，2 条排队消息已放回输入框'))
+    assert.equal(app.selectedWork.execution, 'running', 'an acknowledgement does not invent an idle runtime')
+    assert.equal(text(container).includes('中止请求已送达'), true, 'the control reports requested cancellation while preparation remains active')
+    assert.equal(text(container).includes('2 条排队消息已放回输入框'), true)
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'run.settled', data: { result: 'aborted' } } }); await settle()
+    assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves only when the run actually settles')
+    // Follow can deliver settlement before the original send's successful reply.
+    const originalAccepted = { ...preparingSend, state: 'succeeded', result: { receipt: { queued: false, delivery: 'prompt' }, instance: result.instance } }
+    nativeResults.set(originalAccepted.operationId, originalAccepted); emit('aludock://operation', originalAccepted)
+    resolveOriginalSend(originalAccepted.result); await originalSending; await settle()
+    assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'a late original send receipt cannot erase the new draft or returned Queue')
+    assertSameReference(find(container, item => String(item.props.class).includes('alu-agent-activity-spinner')), undefined, 'a late send acknowledgement does not restart a settled turn')
     emit('aludock://operation', { ...unconfirmedCompaction, state: 'succeeded', error: undefined, result: { instance: result.instance } })
     compact.props['onUpdate:modelValue']('later input')
     remoteSequence += 10
@@ -1423,16 +1453,17 @@ try {
         : { session, entries: [entryAt('e1', 'assistant', '早上好'), entryAt('e2', 'user', '今天天气怎么样？'), entryAt('e3', 'assistant', '今天上午有雨。', { toolCalls: [{ name: 'bash', arguments: '{"command":"weather"}' }] }), entryAt('e4', 'tool_result', '小雨', { toolName: 'bash', truncated: true })], hasBefore: true, hasAfter: true }
       throw new Error(`Unexpected assistant call: ${command}`)
     }
-    // A Work opened as the assistant carries a small mark in the list and the top bar.
+    // An old assistant:true Pi Work remains an ordinary Work, not the resident identity.
     extraListed = [{ ...otherWork, id: 'helper', displayName: 'Helper Work', assistant: true }]
     await app.refreshWorksQuietly(); await settle()
     const helperRow = find(container, item => String(item.props.class ?? '').includes('alu-instance-row') && text(item).includes('Helper Work'))
-    assert.ok(find(helperRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag') && text(item) === '助手'), 'her Work is marked in the list')
+    assert.ok(!!helperRow, 'the old Pi Work stays in the ordinary list')
+    assert.ok(!!find(helperRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag') && text(item) === '助手'), 'the old Pi Work keeps its existing assistant identity mark')
     const plainRow = all(container, item => String(item.props.class ?? '').split(' ').includes('alu-instance-row')).find(row => row !== helperRow)
     assertSameReference(find(plainRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag')), undefined, 'other Works carry no mark')
     const original = JSON.parse(JSON.stringify(app.selectedWork))
     app.applyWorkSnapshot({ ...original, assistant: true }); await settle()
-    assert.ok(find(container, item => String(item.props.class ?? '').includes('alu-nav-assistant-tag')), 'and in the top bar')
+    assert.equal(!!find(container, item => item.props['aria-label'] === '助手设置'), false, 'the legacy role does not turn a Pi conversation into the resident')
     app.applyWorkSnapshot(original); extraListed = []; await app.refreshWorksQuietly(); await settle()
 
     // An older Main has no assistant, so there is no entry; Main with her has one.
@@ -1462,7 +1493,6 @@ try {
     assert.equal(editor().value, '她说话简短，先给结论。', 'switching sections keeps the draft')
     await click(page(), '关闭')
     assertSameReference(page(), undefined, 'closing asks nothing: the draft is kept')
-    assert.ok(text(entry()).includes('有改动还没有保存'), 'the sidebar says a draft is waiting')
     await click(container, '助手')
     assert.equal(editor().value, '她说话简短，先给结论。', 'reopening shows the draft')
 
@@ -1794,9 +1824,9 @@ try {
     ]
     // Main does a change once per operation; the same operation sent again gets its answer again.
     const answered = new Map()
-    let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings
+    let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings, holdSettingsRead
     let handoff = { startTokens: null, keepRecentTokens: null, prompt: 'Main 提供的完整交接要求。' }
-    let extensions = [{ id: 'local', module: '/home/owner/tools.mjs', enabled: true, config: {} }]
+    let extractionSpeed = 'standard', refuseNextSpeed = false
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
       if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: !model ? { state: 'off', waitingSessions: 1 }
@@ -1832,16 +1862,20 @@ try {
         if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
         return structuredClone(changed)
       }
-      if (command === 'assistant_settings') return { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
+      if (command === 'assistant_settings') {
+        const result = { ...(model ? { extractionModel: model } : {}), extractionSpeed, handoff: structuredClone(handoff) }
+        return holdSettingsRead ? new Promise(resolve => holdSettingsRead(() => resolve(result))) : result
+      }
       if (command === 'set_assistant_settings' || command === 'reorganize_assistant') {
         const done = () => {
           if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
           const edit = command === 'reorganize_assistant' ? args : args.settings
+          if (edit.extractionSpeed && refuseNextSpeed) { refuseNextSpeed = false; throw { code: 'busy', message: '速度设置暂时无法保存，请稍后重试。' } }
           if ('extractionModel' in edit) model = edit.extractionModel ?? undefined
+          if (edit.extractionSpeed) extractionSpeed = edit.extractionSpeed
           if (edit.handoff) handoff = structuredClone(edit.handoff)
-          if (edit.extensions) extensions = structuredClone(edit.extensions)
           if (command === 'reorganize_assistant') startedOver++
-          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
+          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), extractionSpeed, handoff: structuredClone(handoff) }
           answered.set(args.operationId, structuredClone(result))
           if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
           return result
@@ -1854,7 +1888,7 @@ try {
       return fallback(command, args)
     }
     modelVisibilityNative = async () => ({
-      models: [{ provider: 'openai', id: 'gpt-mini', name: 'GPT mini', reasoning: false }, { provider: 'openai', id: 'gpt-nano', name: 'GPT nano', reasoning: false }, { provider: 'openai', id: 'set-aside', name: 'Set aside', reasoning: false }],
+      models: [{ provider: 'openai', id: 'gpt-mini', name: 'GPT mini', reasoning: false, speedTiers: ['standard', 'fast', 'ultrafast'] }, { provider: 'openai', id: 'gpt-nano', name: 'GPT nano', reasoning: false, speedTiers: ['standard', 'fast', 'ultrafast'] }, { provider: 'openai', id: 'set-aside', name: 'Set aside', reasoning: false }],
       total: 3, truncated: false, hidden: [{ provider: 'openai', id: 'set-aside' }],
     })
 
@@ -2028,29 +2062,35 @@ try {
     await type('开始整理的 token 数', '55000')
     await type('保留最近原话的 token 数', '12000')
     await type('交接记录提示词', '请以小满的口吻交接，只写尚待完成的事。')
-    await click(page(), '保存滚动整理设置')
+    await click(page(), '保存整理设置')
     assert.deepEqual(sent('set_assistant_settings').settings, { handoff: { startTokens: 55000, keepRecentTokens: 12000, prompt: '请以小满的口吻交接，只写尚待完成的事。' } })
     assert.deepEqual(model, { provider: 'openai', id: 'gpt-mini' }, 'editing the hand-over does not change the memory model')
     await click(page(), '恢复自动值')
-    await click(page(), '保存滚动整理设置')
+    await click(page(), '保存整理设置')
     assert.deepEqual(sent('set_assistant_settings').settings.handoff, { startTokens: null, keepRecentTokens: null, prompt: '请以小满的口吻交接，只写尚待完成的事。' })
-    // #670: edit only one extension's JSON and switch, through the real settings controls and bridge.
-    assert.equal(labelled('扩展模块 1').props.value, '/home/owner/tools.mjs')
-    await type('扩展 JSON 配置 1', '{"token":"PRIVATE_UI_CONFIG"}')
-    labelled('启用扩展 1').props.onChange({ target: { checked: false } }); await settle()
-    await click(page(), '保存扩展设置')
-    assert.deepEqual(sent('set_assistant_settings').settings, { extensions: [{ id: 'local', module: '/home/owner/tools.mjs', enabled: false, config: { token: 'PRIVATE_UI_CONFIG' } }] })
-    assert.ok(text(page()).includes('Reload'))
-    assert.equal(extensions[0].enabled, false)
-    labelled('启用扩展 1').props.onChange({ target: { checked: true } }); await settle()
-    await click(page(), '保存扩展设置')
-    assert.equal(sent('set_assistant_settings').settings.extensions[0].enabled, true)
-    await click(page(), '添加扩展')
-    await type('扩展标识 2', 'other')
-    await type('扩展模块 2', '/home/owner/other.mjs')
-    await type('扩展 JSON 配置 2', '{}')
-    await click(page(), '保存扩展设置')
-    assert.equal(sent('set_assistant_settings').settings.extensions[1].module, '/home/owner/other.mjs')
+    // #671 / RC6 review: a late settings read replaced a hand-over saved while the read was in flight.
+    {
+      let finishRead
+      holdSettingsRead = release => { finishRead = release }
+      await click(page(), '关闭'); await click(container, '助手')
+      holdSettingsRead = undefined
+      assert.equal(typeof finishRead, 'function')
+      await type('交接记录提示词', '保存的新交接要求。')
+      await click(page(), '保存整理设置')
+      finishRead(); await settle()
+      assert.equal(labelled('交接记录提示词').props.value, '保存的新交接要求。', 'an older read does not replace the confirmed hand-over')
+      const handoffSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
+      await type('交接记录提示词', '保存期间仍在编辑。')
+      assert.equal(text(handoffSection()).includes('已保存，下一次整理生效'), false, 'a new draft is not labelled saved')
+      let finishSave
+      holdSettings = release => { finishSave = release }
+      await click(page(), '保存整理设置')
+      await type('交接记录提示词', '这份后写的草稿要留下。')
+      holdSettings = undefined; finishSave(); await settle()
+      assert.equal(labelled('交接记录提示词').props.value, '这份后写的草稿要留下。')
+      assert.ok(text(handoffSection()).includes('新的修改未保存'))
+      await click(page(), '保存整理设置')
+    }
     // How making memories goes: the parts it could not read, why the last try failed and when it tries again.
     const extractionSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status')
     troubled = true
@@ -2137,6 +2177,18 @@ try {
         assert.ok(text(page()).includes('已开始从头整理'))
       }
       holdSettings = undefined
+      // #671 / RC7: the new speed action lost its failure when its Host was not being viewed.
+      let finishSpeed
+      delaySettings = release => { finishSpeed = release }
+      refuseNextSpeed = true
+      await click(page(), '整理记忆的速度')
+      await click(find(page(), item => item.props.role === 'listbox'), 'Fast')
+      await app.switchHost('spare'); await settle()
+      delaySettings = undefined; finishSpeed(); await settle()
+      assert.equal(text(page() ?? element('none')).includes('速度设置暂时无法保存'), false, 'the other Host does not receive this outcome')
+      await app.switchHost('host'); await settle(); app.selectWork('work'); await settle()
+      if (!page()) await click(container, '助手')
+      assert.ok(text(page()).includes('速度设置暂时无法保存'), 'the speed outcome remains available on its original Host')
       failCatalog = catalogFailed
       Object.assign(context, contextBefore)
       app.catalog = { ...app.catalog, selectionGeneration: contextBefore.selectionGeneration }
@@ -2961,6 +3013,125 @@ try {
   }
   console.log('PASS: Continue opens the Work from the Host answer without waiting for the list')
 
+  // Reopen's missing trust UI (#304): answer on the original Work, or cancel without reopening it.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    const lost = { ...otherWork, id: 'trust-work', displayName: 'Trust Work', cwd: '/original', lifecycle: 'host_lost', execution: 'unavailable', reopenable: true, ownerHostEpoch: undefined }
+    extraListed = [lost]
+    const pinia = createPinia(), trustApp = useAppStore(pinia), view = element('trust-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(view); await settle()
+    trustApp.selectWork(lost.id); await settle()
+    const dialog = () => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '继续 Work 前确认信任')
+    const button = label => find(dialog(), item => item.type === 'button' && text(item) === label)
+    const start = async () => {
+      const entry = find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary')
+      assert.ok(!!entry); entry.props.onClick(); await settle()
+      assert.ok(!!dialog(), 'Continue opens its trust choice instead of sending the user to a terminal')
+      assert.ok(text(dialog()).includes('/canonical/project'), 'the directory to be trusted comes from the challenge')
+    }
+    reopenNative = args => { throw { code: 'project_trust_required', operationId: args.operationId, details: { operationId: args.operationId, challengeId: 'reopen-challenge', cwd: '/canonical/project' } } }
+    await start()
+    const firstCount = calls.filter(call => call.command === 'reopen_work').length
+    button('取消').props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'reopen_work').length, firstCount, 'cancelling sends no trust decision')
+    assert.equal(trustApp.selectedWork.lifecycle, 'host_lost')
+    for (const dismiss of [
+      () => { for (const handler of windowEvents.get('keydown') ?? []) handler({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} }) },
+      firePopstate,
+    ]) {
+      await start()
+      const count = calls.filter(call => call.command === 'reopen_work').length
+      dismiss(); await settle()
+      assert.equal(!!dialog(), false, 'Escape and Back cancel the trust choice')
+      assert.equal(calls.filter(call => call.command === 'reopen_work').length, count)
+    }
+    await start()
+    const staleCount = calls.filter(call => call.command === 'reopen_work').length
+    const staleChoice = button('仅本次信任')
+    trustApp.selectWork('other'); await settle()
+    assert.equal(!!dialog(), false, 'switching Work dismisses the old trust question')
+    staleChoice.props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'reopen_work').length, staleCount, 'an old choice cannot authorize a different page')
+    for (const [label, decision] of [['仅本次信任', 'trust_once'], ['信任并继续', 'trust_and_remember']]) {
+      const target = { ...lost, id: `trust-${decision}` }
+      extraListed.push(target); await trustApp.refreshWorksQuietly(); trustApp.selectWork(target.id); await settle()
+      await start()
+      const original = calls.findLast(call => call.command === 'reopen_work').args
+      reopenNative = args => atHost({ ...target, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })
+      button(label).props.onClick(); await settle()
+      const continued = calls.findLast(call => call.command === 'reopen_work').args
+      assert.deepEqual([continued.instanceId, continued.operationId, continued.trustChallengeId, continued.projectTrustDecision], [target.id, original.operationId, 'reopen-challenge', decision])
+      assert.deepEqual([continued.connectionId, continued.selectionGeneration, continued.expectedHostEpoch, continued.expectedRuntimeGeneration], [original.connectionId, original.selectionGeneration, original.expectedHostEpoch, original.expectedRuntimeGeneration], 'trust continues the frozen original target')
+      assert.equal(trustApp.selectedWork.lifecycle, 'active')
+      assert.equal(!!dialog(), false)
+      reopenNative = args => { throw { code: 'project_trust_required', operationId: args.operationId, details: { operationId: args.operationId, challengeId: 'reopen-challenge', cwd: '/canonical/project' } } }
+    }
+    extraListed = []; reopenNative = undefined
+    console.log('PASS: Continue trust: directory shown, cancel and Work switch leave it stopped, both explicit choices reuse the original operation and target')
+  }
+
+  // RC67 Continue: native observation can finish after leaving the page. A second
+  // disconnect ends pending and the result offers a read, not another mutation.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    const lost = { ...otherWork, id: 'late-continue', displayName: 'Late Work', lifecycle: 'host_lost', execution: 'unavailable', reopenable: true, ownerHostEpoch: undefined }
+    extraListed = [lost]
+    const pinia = createPinia(), app = useAppStore(pinia), view = element('late-continue-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia); mounted.mount(view); await settle()
+    app.selectWork(lost.id); await settle()
+    let finish, operation
+    const publish = value => { nativeResults.set(value.operationId, value); emit('aludock://operation', value) }
+    reopenNative = args => new Promise(resolve => {
+      operation = { operationId: args.operationId, kind: 'reopen_work', connectionId: 'host', instanceId: args.instanceId, hostEpoch: 'epoch',
+        runtimeGeneration: 1, sessionId: '', editor: null, state: 'pending' }
+      publish(operation); finish = resolve
+    })
+    find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.onClick(); await settle()
+    assert.ok(text(view).includes('你可以离开此页'), 'Continue explains that waiting does not require staying on this page')
+    assert.equal(find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.disabled, true)
+    const continued = atHost({ ...lost, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })
+    extraListed = [continued]; await app.refreshWorksQuietly(); await settle()
+    // Another entrance has already observed recovery, while this native operation
+    // and its original button Promise are both still pending.
+    find(view, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+    find(view, item => item.type === 'button' && text(item).includes('Stop Work')).props.onClick(); await settle()
+    const stopDialog = find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？')
+    assert.ok(!!stopDialog, 'an old Continue does not prevent stopping the newly active Work')
+    find(stopDialog, item => item.type === 'button' && text(item) === '取消').props.onClick(); await settle()
+    app.selectWork('other'); await settle()
+    const editor = find(view, item => item.props['aria-label'] === '消息编辑器')
+    assert.ok(!!editor)
+    publish({ ...operation, state: 'succeeded', result: continued }); finish(continued); await settle()
+    assert.equal(app.selectedWork.id, 'other', 'late Continue does not take the page from another Work')
+    assertSameReference(find(view, item => item.props['aria-label'] === '消息编辑器'), editor, 'another Work keeps its editor')
+    app.selectWork(lost.id); await settle()
+    assert.equal(app.selectedWork.lifecycle, 'active', 'returning opens the same continued Work')
+    assert.equal(calls.findLast(call => call.command === 'start_conversation_follow').args.instanceId, lost.id)
+
+    const unknown = { ...lost, id: 'unknown-continue' }
+    extraListed.push(unknown); await app.refreshWorksQuietly(); app.selectWork(unknown.id); await settle()
+    reopenNative = args => {
+      const error = { code: 'effect_unknown', outcomeUnknown: true, operationId: args.operationId }
+      publish({ ...operation, operationId: args.operationId, instanceId: unknown.id, state: 'unknown', error })
+      throw error
+    }
+    await find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.onClick(); await settle()
+    assert.equal(find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.disabled, false, 'another disconnection ends waiting')
+    assert.ok(text(view).includes('不要直接重复继续'))
+    const count = calls.filter(call => call.command === 'reopen_work').length
+    extraListed = [continued, atHost({ ...unknown, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })]
+    await find(view, item => item.type === 'button' && text(item) === '查看当前状态').props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'reopen_work').length, count, 'checking the result does not send Continue again')
+    assert.equal(app.selectedWork.id, unknown.id)
+    assert.equal(app.selectedWork.lifecycle, 'active')
+    assert.equal(!!find(view, item => item.props.class === 'alu-composer-error'), false, 'confirmed recovery must not keep presenting the lost Continue as a new failure')
+    extraListed = []; reopenNative = undefined
+    console.log('PASS: Continue survives leaving the page; second disconnection ends waiting and checking current state opens the same Work without replay')
+  }
+
   // #359: quick buttons in the input card. Real App, Pinia, palette and editor; only native IPC is a fixture.
   {
     storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear(); pickedJobs = []
@@ -3085,6 +3256,91 @@ try {
     console.log('PASS: quick buttons: defaults run local controls; pinned command takes an argument; send keeps draft/attachments; restart keeps buttons; insert fills without sending; overflow runs from palette; order decides the row')
   }
 
+  // RC6/7 speed controls: edits survive remote settings/model updates; replies stay with their Work.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear()
+    const speed = { key: 'modelSpeed', value: null, source: 'effective', writable: true, valueType: 'object', allowedValues: ['standard', 'fast', 'ultrafast'], reloadRequired: false, hostRestartRequired: false }
+    settingsNative = () => ({ settings: [structuredClone(speed), { ...speed, key: 'compactionReserveTokens', valueType: 'integer', value: 1000, allowedValues: undefined }] })
+    const pinia = createPinia(), speedApp = useAppStore(pinia), view = element('speed-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(view); await settle(); speedApp.selectWork('work'); await settle(); contentSnapshot(); await settle()
+    const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
+    const click = async (root, label) => { const target = button(root, label); assert.ok(!!target, `button exists: ${label}`); target.props.onClick(); await settle() }
+    const dialog = label => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === label)
+    await click(view, '设置模型速度')
+    await click(dialog('模型速度'), '模型速度档位'); await click(dialog('模型速度'), 'Ultrafast')
+    await click(dialog('模型速度'), '速度作用范围'); await click(dialog('模型速度'), '当前及子 Work')
+    speed.value = { tier: 'fast', scope: 'work' }
+    observation({ kind: 'event', event: { ...nextCursor(), occurredAt: 'now', eventType: 'settings.changed', data: { key: 'modelSpeed', value: structuredClone(speed.value) } } }); await settle()
+    assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'a remote speed change does not overwrite the tier being edited')
+    assert.ok(text(button(dialog('模型速度'), '速度作用范围')).includes('当前及子 Work'), 'a remote speed change does not overwrite the scope being edited')
+    assert.ok(text(dialog('模型速度')).includes('已选：Fast'), 'the latest remote selection remains visible beside the draft')
+    // PR review P1: a settings read now returns known support immediately. Its later support
+    // notification must refresh this open panel, even when the saved selection is unchanged.
+    speed.allowedValues = ['standard', 'fast']
+    observation({ kind: 'event', event: { ...nextCursor(), occurredAt: 'now', eventType: 'settings.changed', data: { key: 'modelSpeed', value: structuredClone(speed.value) } } }); await settle()
+    assert.ok(text(dialog('模型速度')).includes('当前模型列出的档位：标准、Fast。'), 'background support arrives without reopening the panel')
+    assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'support notification keeps the unsaved tier')
+    assert.ok(text(button(dialog('模型速度'), '速度作用范围')).includes('当前及子 Work'), 'support notification keeps the unsaved scope')
+    speed.allowedValues = ['standard', 'ultrafast']
+    const newModel = { ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'next' } } }
+    speedApp.applyWorkSnapshot(newModel); await settle()
+    assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'changing the model keeps the speed draft')
+    assert.ok(text(dialog('模型速度')).includes('当前模型列出的档位：标准、Ultrafast。'), 'model support updates independently')
+    await click(dialog('模型速度'), '关闭')
+
+    await click(view, '打开命令中心')
+    const settingsEntry = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Settings'))
+    settingsEntry.props.onClick(); await settle()
+    find(dialog('设置'), item => item.type === 'button' && text(item).includes('Compaction 预留 Token')).props.onClick(); await settle()
+    const editor = find(dialog('设置'), item => item.type === 'input')
+    editor.props['onUpdate:modelValue']('4321'); await settle()
+    speedApp.applyWorkSnapshot({ ...newModel, executor: { ...newModel.executor, model: { provider: 'fixture', id: 'third' } } }); await settle()
+    assertSameReference(find(dialog('设置'), item => item.type === 'input'), editor, 'speed probing leaves the existing settings editor mounted')
+    assert.equal(editor.value, '4321')
+    await click(dialog('设置'), '关闭')
+
+    settingsNative = () => { throw { code: 'connection_failed' } }
+    speedApp.applyWorkSnapshot({ ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'temporary-failure' } } }); await settle()
+    assert.ok(!!button(view, '设置模型速度'), 'a temporary read failure keeps the known speed entry')
+    await click(view, '设置模型速度')
+    assert.ok(!!button(dialog('模型速度'), '重试'), 'speed read failure offers retry in place')
+    settingsNative = () => ({ settings: [structuredClone(speed)] })
+    await click(dialog('模型速度'), '重试')
+    assert.ok(!!button(dialog('模型速度'), '模型速度档位'))
+    await click(dialog('模型速度'), '关闭')
+
+    let finishSave
+    updateSettingNative = args => new Promise(resolve => { finishSave = () => resolve({ setting: { ...speed, value: args.update.value }, instance: atHost(work), reloadRequired: false, hostRestartRequired: false }) })
+    await click(view, '设置模型速度')
+    await click(dialog('模型速度'), '模型速度档位'); await click(dialog('模型速度'), 'Ultrafast')
+    await click(dialog('模型速度'), '保存速度设置')
+    speed.value = { tier: 'standard', scope: 'work' }
+    speedApp.selectWork('other'); await settle()
+    await click(view, '设置模型速度')
+    finishSave(); await settle()
+    assert.ok(!!dialog('模型速度'), 'an old save reply does not close another Work speed page')
+    assert.ok(text(dialog('模型速度')).includes('已选：标准'), 'an old save reply does not change another Work speed')
+    await click(dialog('模型速度'), '关闭')
+
+    settingsNative = () => { throw { code: 'connection_failed' } }
+    speedApp.selectWork('work'); await settle()
+    assert.ok(!!button(view, '设置模型速度'), 'unknown support remains reachable for a retry')
+    await click(view, '设置模型速度')
+    assert.ok(!!button(dialog('模型速度'), '重试'))
+    settingsNative = () => ({ settings: [] })
+    await click(dialog('模型速度'), '重试')
+    await click(dialog('模型速度'), '关闭')
+    assert.equal(!!button(view, '设置模型速度'), false, 'a successful read without modelSpeed hides the entry')
+    settingsNative = () => { throw { code: 'connection_failed' } }
+    speedApp.applyWorkSnapshot({ ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'unknown-support' } } }); await settle()
+    assert.ok(!!button(view, '设置模型速度'), 'another model is unknown, not still unsupported because the previous model was')
+    settingsNative = undefined; updateSettingNative = undefined
+    console.log('PASS: speed drafts, current selection and model support update separately; read failures retry locally; slow saves stay with their Work')
+  }
+
   // #670: the owner chose one permanent assistant: open her existing conversation, keep her
   // first with her children, and offer restart rather than the Pi-only conversation controls.
   {
@@ -3095,16 +3351,23 @@ try {
       { id: 'fork', name: '自选 Fork', text: '/fork old-entry', mode: 'insert' },
       { id: 'compact', name: '压缩', text: '/compact', mode: 'send' },
       { id: 'hello', name: '问候', text: '早上好', mode: 'insert' },
+      { id: 'explain', name: '说明', text: '/compact explain this', mode: 'send' },
+      { id: 'insert-resume', name: '填入恢复', text: '/resume', mode: 'insert' },
     ]))
-    const her = { ...otherWork, id: 'resident-assistant', displayName: '小满', name: '小满', assistant: true, runtimeGeneration: 1 }
-    const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
+    const her = { ...otherWork, id: 'resident-assistant', displayName: 'alu', name: '早晨的对话', assistant: true, runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
+    const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id, execution: 'running' }
     extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
     const savedAssistant = assistantNative, savedTools = toolsNative, savedModelVisibility = modelVisibilityNative
     modelVisibilityNative = () => ({ models: [{ provider: 'openai', id: 'gpt-mini', name: 'Memory model', reasoning: true, speedTiers: ['standard', 'fast'] }], total: 1, truncated: false, hidden: [] })
+    let finishName
+    let nameReply = '小满'
     assistantNative = (command, args) => {
       if (command === 'assistant_preview') return { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' }
-      if (command === 'assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'standard' }
-      if (command === 'set_assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'fast' }
+      if (command === 'assistant_settings') return { displayName: her.displayName, extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'standard' }
+      if (command === 'set_assistant_settings' && args.settings.displayName !== undefined) return new Promise(resolve => {
+        finishName = () => { her.displayName = nameReply; resolve({ displayName: nameReply, extractionSpeed: 'standard' }) }
+      })
+      if (command === 'set_assistant_settings') return { displayName: '小满', extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'fast' }
       return savedAssistant(command, args)
     }
     toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'built-in' } }, { name: 'local_schedule', description: 'Read a local schedule.', active: true, source: { kind: 'extension', package: 'local' } }], total: 2, truncated: false })
@@ -3118,10 +3381,56 @@ try {
       target.props.onClick(); await settle()
     }
     const dialog = label => find(assistantView, item => item.props.role === 'dialog' && item.props['aria-label'] === label)
-    const rowNames = () => all(assistantView, item => String(item.props.class).split(' ').includes('alu-instance-name')).map(visibleText)
-    assert.deepEqual(rowNames().slice(0, 4), ['助手小满', '她的子 Work', 'Work', '普通子 Work'], 'pinning her keeps each parent and its children together')
-    await click(assistantView, '助手')
+    const rowNames = (root = assistantView) => all(root, item => String(item.props.class).split(' ').includes('alu-instance-name')).map(visibleText)
+    const group = label => find(assistantView, item => item.type === 'section' && item.props['aria-label'] === label)
+    const groupCount = root => text(find(root, item => item.props.class === 'alu-instance-group-title')).match(/\d+$/)?.[0]
+    assert.ok(!!group('alu的子工作'), 'moving the assistant out of the ordinary list must keep a visible parent for her children')
+    assert.deepEqual(rowNames(group('alu的子工作')), ['她的子 Work'])
+    assert.equal(groupCount(group('alu的子工作')), '1')
+    assert.deepEqual(rowNames(group('当前工作')), ['Work', '普通子 Work', 'Work'], 'ordinary parent/child trees stay together, separate from the assistant children')
+    assert.equal(groupCount(group('当前工作')), '3')
+    assert.deepEqual(rowNames().slice(0, 3), ['她的子 Work', 'Work', '普通子 Work'])
+    await click(assistantView, '打开alu的对话')
+    assert.equal(assistantApp.selectedWorkId, 'resident-assistant')
+    await click(assistantView, '助手设置')
     await click(assistantView, '设置')
+    const nameInput = () => find(assistantView, item => item.props.id === 'assistant-name-input')
+    const editName = async name => { nameInput().props.onInput({ target: { value: name } }); await settle() }
+    await editName('小满')
+    find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { displayName: '小满' })
+    await editName('下一版名字')
+    finishName(); await settle()
+    assert.equal(nameInput().props.value, '下一版名字', 'typing while the save is pending keeps the newer draft')
+    assert.equal(assistantApp.selectedWork.displayName, '小满')
+    assert.equal(assistantApp.selectedWork.name, '早晨的对话')
+    assert.equal(assistantApp.selectedWork.executor.piSessionId, her.executor.piSessionId)
+    assert.equal(text(find(assistantView, item => item.props.id === 'assistant-title')), '小满')
+    assert.ok(!!button(assistantView, '打开小满的对话'), 'the identity navigation uses the same saved name')
+    assert.deepEqual(rowNames(group('小满的子工作')), ['她的子 Work'], 'the child group follows her global name, not a second identity')
+    child.execution = 'idle'; child.lastRun = 'succeeded'
+    assistantApp.applyWorkSnapshot(atHost(child)); await settle()
+    assert.deepEqual(rowNames(group('小满的子工作')), ['她的子 Work'], 'a finished child stays with its parent until it is stopped')
+    assert.ok(!!find(assistantView, item => item.props.role === 'status' && text(item).includes('新的修改未保存')), 'the newer draft is not described as saved')
+    await editName('小满')
+    assert.equal(!!find(assistantView, item => item.props['aria-label'] === '有未保存的改动'), false, 'restoring the saved name clears its draft marker')
+    // The save belongs to Main where it began, even if another connection is being viewed.
+    nameReply = '远处的小满'
+    await editName('远处的小满')
+    find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    await editName('回家后继续写')
+    await assistantApp.switchHost('spare'); await settle()
+    finishName(); await settle()
+    assert.equal(assistantApp.works.some(work => work.displayName === '远处的小满'), false, 'the late save never renames a Work on the other Main')
+    await assistantApp.switchHost('host'); await settle()
+    assistantApp.selectWork(her.id); await settle()
+    await click(assistantView, '助手设置'); await click(assistantView, '设置')
+    assert.equal(nameInput().props.value, '回家后继续写', 'the original Main keeps the new draft across switching connections')
+    assert.equal(assistantApp.selectedWork.displayName, '远处的小满')
+    nameReply = '小满'
+    await editName('小满')
+    find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    finishName(); await settle()
     await click(assistantView, '整理记忆的速度')
     await click(assistantView, 'Fast')
     assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { extractionSpeed: 'fast' }, 'memory speed changes independently, leaving its model and chat speed alone')
@@ -3167,7 +3476,17 @@ try {
     assert.equal(!!button(assistantView, '设置模型速度'), false, 'a model without acceleration tiers does not show the speed entry')
     settingsNative = undefined; updateSettingNative = undefined
     const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
-    assert.deepEqual(quickNames(), ['问候'], 'saved Pi-only buttons stay out of her input row')
+    assert.deepEqual(quickNames(), ['自选 Fork', '问候', '说明', '填入恢复'], 'only exactly executed Pi controls are hidden; custom text and insert buttons remain')
+    const beforeInsert = calls.filter(call => call.command === 'submit_message').length
+    await click(assistantView, '填入恢复')
+    assert.equal(assistantApp.currentDraft, '/resume')
+    assert.equal(calls.filter(call => call.command === 'submit_message').length, beforeInsert, 'insert only edits the draft')
+    const savedSubmit = submitNative
+    submitNative = () => ({ receipt: { queued: false } })
+    await click(assistantView, '说明')
+    assert.equal(calls.findLast(call => call.command === 'submit_message').args.message, '/compact explain this', 'arguments keep ordinary text submission semantics')
+    assert.equal(assistantApp.currentDraft, '/resume', 'ordinary quick text does not claim the draft')
+    submitNative = savedSubmit
     const composer = () => find(assistantView, item => item.type === 'textarea' && item.props.placeholder === '输入消息…')
     composer().props['onUpdate:modelValue']('/res'); await settle()
     const suggestions = all(assistantView, item => item.props.role === 'option').map(text).join(' ')
@@ -3175,10 +3494,10 @@ try {
     composer().props['onUpdate:modelValue']('还没发完的话'); await settle()
     await click(assistantView, '打开命令中心')
     const paletteLabels = () => all(dialog('命令中心'), item => String(item.props.class).split(' ').includes('cmd-palette-item-label')).map(text)
-    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '自选 Fork', '压缩']) {
+    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '压缩']) {
       assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
     }
-    assert.ok(paletteLabels().includes('Rename Session'), 'the owner can still rename the assistant')
+    assert.ok(paletteLabels().includes('Rename Session'), 'session naming stays separate from the global identity label')
     // Seen in the real Desktop trial: state and resources had become two identical entries.
     assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
     await click(dialog('命令中心'), '刷新助手（Reload）重新读入人设、手写设定、记忆和工具扩展，对话接着原来的')
@@ -3191,6 +3510,20 @@ try {
     assert.ok(text(dialog('她能用的工具')).includes('extension / local'), 'the actual tool list identifies its extension source')
     assert.equal(all(dialog('她能用的工具'), item => item.type === 'button').some(item => text(item).includes('读取文件里的文字和图片。')), false, 'her tool list has no unsupported per-tool switch')
     await click(dialog('她能用的工具'), '关闭')
+    await click(assistantView, '她的子 Work，空闲')
+    assert.equal(assistantApp.selectedWorkId, child.id, 'the child row opens that child, not her own conversation')
+    await click(assistantView, '打开命令中心')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Stop Work')).props.onClick(); await settle()
+    stopNative = args => {
+      extraListed = extraListed.filter(item => item.id !== child.id)
+      return { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...child, lifecycle: 'stopped', execution: 'unavailable', ownerHostEpoch: undefined }) }
+    }
+    await click(dialog('停止当前工作？'), '确认')
+    assert.equal(calls.findLast(call => call.command === 'stop_work').args.instanceId, child.id)
+    assert.equal(rowNames().includes('她的子 Work'), false)
+    assert.ok(rowNames(group('当前工作')).includes('普通子 Work'), 'stopping her child leaves the ordinary tree alone')
+    await click(assistantView, '打开小满的对话')
+    assert.equal(assistantApp.selectedWorkId, her.id)
     await click(assistantView, '打开命令中心')
     const restartOption = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('重启小满'))
     assert.ok(!!restartOption); restartOption.props.onClick(); await settle()
@@ -3211,13 +3544,348 @@ try {
     assert.equal(assistantApp.currentDraft, '还没发完的话', 'restart keeps the local draft')
     assert.equal(text(assistantView).includes('正在重启小满'), false, 'the progress notice leaves once she is back')
     assert.equal(assistantApp.selectedWork.displayName, '小满', 'restart preserves the chosen name')
-    assert.deepEqual(rowNames().slice(0, 2), ['助手小满', 'Work'])
+    assert.deepEqual(rowNames().slice(0, 1), ['Work'])
     assistantApp.selectWork('work'); await settle()
-    assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候'], 'the same device buttons still belong to ordinary Pi Works')
+    assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候', '说明', '填入恢复'], 'the same device buttons still belong to ordinary Pi Works')
     await click(assistantView, '打开命令中心')
     assert.ok(paletteLabels().includes('New Session'), 'ordinary Pi conversation controls stay available')
+    await click(dialog('命令中心'), '关闭')
+    // Old Hosts create assistant:true Pi Works. The identity label does not change their runtime.
+    const legacy = { ...assistantApp.selectedWork, assistant: true, executor: { ...assistantApp.selectedWork.executor, kind: 'pi-sdk' } }
+    assistantApp.applyWorkSnapshot(legacy); await settle()
+    await click(assistantView, '打开命令中心')
+    assert.ok(paletteLabels().includes('New Session'), 'an old Pi assistant still has its Session controls')
+    assert.ok(paletteLabels().includes('Stop Work'), 'an old Pi assistant stops instead of waiting for Main to restart it')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('New Session')).props.onClick(); await settle()
+    assert.ok(!!dialog('New Session'))
+    assert.equal(calls.findLast(call => call.command === 'new_session').args.instanceId, legacy.id)
+    await click(dialog('New Session'), '关闭')
+    await click(assistantView, '打开命令中心')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Active Tools')).props.onClick(); await settle()
+    const toggle = find(dialog('Active Tools'), item => item.type === 'button' && text(item).includes('读取文件里的文字和图片。'))
+    assert.ok(!!toggle, 'the Pi assistant retains tool switches'); toggle.props.onClick(); await settle()
+    assert.deepEqual(calls.findLast(call => call.command === 'set_active_tools').args.names, ['local_schedule'])
+    await click(assistantView, '打开工作区')
+    const shell = find(assistantView, item => item.type === 'textarea' && item.props['aria-label'] === 'shell 命令')
+    assert.ok(!!shell, 'the Pi assistant retains its shell input')
+    shell.props['onUpdate:modelValue']('pwd'); await settle()
+    find(assistantView, item => item.type === 'form' && item.props.class === 'workspace-command-input').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(calls.findLast(call => call.command === 'run_shell_command').args.instanceId, legacy.id)
+    await click(assistantView, '关闭工作区')
+    await click(assistantView, '打开命令中心')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Stop Work')).props.onClick(); await settle()
+    assert.ok(!!dialog('停止当前工作？'))
+    stopNative = args => { retiredWorks.add(legacy.id); return { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...legacy, lifecycle: 'stopped', execution: 'unavailable' }) } }
+    await click(dialog('停止当前工作？'), '确认')
+    assert.equal(assistantApp.works.some(item => item.id === legacy.id), false, 'Stop retires the Pi assistant like any Pi Work')
+    retiredWorks.delete(legacy.id)
     extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
-    console.log('PASS: permanent assistant: pinned with her children, existing conversation opened from settings, Pi-only controls hidden, real tools read-only, restart keeps her selected and preserves the draft')
+    console.log('PASS: resident identity opens her conversation; global rename keeps Session and later drafts across connections; restart, custom quick buttons and legacy Pi controls remain')
+  }
+
+  // #671: registered assistant commands use the existing runner and shortcuts;
+  // idle chat can still cancel a command, and requested details open in her visible command center.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear()
+    const her = { ...otherWork, id: 'command-assistant', displayName: '助手', assistant: true, execution: 'idle', runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
+    const savedCatalog = catalogNative, savedAbort = abortNative
+    extraListed = [her]
+    let commands = [
+      { referenceId: 'extension-echo', name: 'local-echo', source: { kind: 'extension', package: 'local' }, description: '扩展回显' },
+      { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情' },
+    ]
+    catalogNative = () => ({ commands: structuredClone(commands), total: commands.length, truncated: false })
+    const pinia = createPinia(), commandApp = useAppStore(pinia), actions = compiled.useWorkActionsStore(pinia), view = element('assistant-commands-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(view); await settle()
+    commandApp.selectWork(her.id); await settle()
+    const snapshot = (activeEvents = [], target = her) => {
+      observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: atHost(target), cursor: atHost(target).eventCursor, records: [], activeEvents, queue: [],
+        extensionUi: { status: {}, toolsExpanded: false, sharedQuestions: true, events: [] } }, contentToken: `commands-${target.id}`, state: 'connected' })
+      observation({ kind: 'content', token: `commands-${target.id}`, change: { kind: 'checkpoint_end' } })
+    }
+    snapshot(); await settle()
+    const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
+    const button = label => find(view, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
+    const click = async label => { const target = button(label); assert.ok(!!target, `button exists: ${label}`); target.props.onClick(); await settle() }
+    const dialog = () => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
+    const event = (eventType, data, target = her) => {
+      const cut = nextCursor(target.id, target.runtimeGeneration)
+      const value = { sequence: cut.sequence, runtimeGeneration: cut.runtimeGeneration, occurredAt: 'now', eventType, data }
+      observation({ kind: 'event', event: value })
+      return value
+    }
+    const notify = (operationId, message) => event('extension.notification', { operationId, message, level: 'info' })
+    let running
+    runCatalogNative = args => {
+      running = args
+      notify(args.operationId, '扩展回显结果')
+      event('command.handled', { operationId: args.operationId })
+      throw { code: 'connection_failed', message: '回执连接断开，请重试。', operationId: args.operationId }
+    }
+    await click('打开命令中心')
+    const extensionOption = find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显'))
+    assert.ok(!!extensionOption, 'the registered extension is listed beside existing local controls')
+    assert.ok(text(dialog()).includes('刷新状态'), 'the local refresh action stays available')
+    assert.ok(!!button('把 /refresh 做成快捷按钮') && !!button('把 /local-echo 做成快捷按钮'), 'local and extension commands keep their original pin controls')
+    extensionOption.props.onClick(); await settle()
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(running.name, 'local-echo')
+    assert.equal(running.instanceId, her.id)
+    assert.ok(text(dialog()).includes('扩展回显结果'), 'the selected extension executes through the catalog')
+    assert.equal(text(dialog()).includes('回执连接断开'), false, 'a command already confirmed by its event does not turn into a failure when the reply is lost')
+    assert.equal(commandApp.selectedWork.execution, 'idle')
+    // P3 re-review: an accepted Queue handoff can still fail later, without a run settlement.
+    let queuedCommand
+    runCatalogNative = args => {
+      queuedCommand = args
+      return { receipt: { operationId: args.operationId, kind: 'prompt', queued: true, delivery: 'follow_up' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.ok(text(dialog()).includes('已加入 Queue。'))
+    const queueFailure = event('instance.error', { operationId: queuedCommand.operationId, source: 'command_background', error: '排队消息没有交给 Agent，请重新发送。' })
+    await settle()
+    assert.ok(text(dialog()).includes('排队消息没有交给 Agent'), 'a failed Queue handoff is still reported after the command receipt')
+    await click('关闭')
+    snapshot([queueFailure]); await settle()
+    assert.equal(text(view).includes('排队消息没有交给 Agent'), false, 'the replay keeps this reported failure in its command result')
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.equal(all(dialog(), item => item.props.class === 'cmd-center-entry-text').filter(item => text(item).includes('排队消息没有交给 Agent')).length, 1)
+
+    // A mutation's successful receipt belongs to its original Host even if it was not followed there.
+    let resolveCrossHost, crossHostCommand
+    runCatalogNative = args => new Promise(resolve => { crossHostCommand = args; resolveCrossHost = resolve })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    await commandApp.switchHost('spare'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    commandApp.setCurrentDraft('另一台 Host 上新写的消息'); await settle()
+    resolveCrossHost({ receipt: { operationId: crossHostCommand.operationId, kind: 'prompt', queued: false, delivery: 'prompt' }, instance: atHost(her) }); await settle()
+    assert.equal(commandApp.currentDraft, '另一台 Host 上新写的消息')
+    await commandApp.switchHost('host'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.ok(text(dialog()).includes('已交给 Agent，后续内容显示在主要对话。'), 'the late receipt is accepted without observing command.handled')
+    assert.equal(text(dialog()).includes('当前连接已切换'), false, 'switching Host does not turn an actual command success into a failure')
+
+    // Editing the parameters while the request is pending makes a new draft, even in the same panel.
+    let resolveEdited, editedCommand
+    const parameters = () => find(dialog(), item => item.type === 'input' && item.props.class === 'cmd-center-args')
+    parameters().props['onUpdate:modelValue']('第一次参数'); await settle()
+    runCatalogNative = args => new Promise(resolve => { editedCommand = args; resolveEdited = resolve })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    parameters().props['onUpdate:modelValue']('后来写的参数'); await settle()
+    resolveEdited({ receipt: { operationId: editedCommand.operationId, kind: 'prompt', queued: false, delivery: 'prompt' }, instance: atHost(her) }); await settle()
+    assert.equal(parameters().value, '后来写的参数', 'a late successful command only clears the parameters it submitted')
+    // #671 browser acceptance: the extension notice and Host failure repeated the same error twice.
+    const failedEvents = []
+    runCatalogNative = args => {
+      failedEvents.push(event('extension.notification', { operationId: args.operationId, level: 'error', message: '本机命令失败，请重试。' }))
+      failedEvents.push(event('instance.error', { operationId: args.operationId, source: 'command_background', error: '本机命令失败，请重试。' }))
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const commandErrors = () => all(dialog(), item => item.props.class === 'cmd-center-entry-text').map(text).filter(value => value === '本机命令失败，请重试。')
+    assert.equal(commandErrors().length, 1)
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(commandErrors().length, 2, 'a second command with identical error text keeps its own result')
+    await click('关闭')
+    // Final PR P3: the command center owned this failure; closing it must not reveal a second copy in chat.
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'closing the command center does not leave its failure in the conversation')
+    snapshot(failedEvents); await settle()
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'a refreshed read keeps command-owned failures out of chat')
+
+    // P3 retirement review: Main's offline SubHost snapshot drops ownerHostEpoch,
+    // but preserves this Work/runtime and the Main-mapped eventCursor domain.
+    const remote = { ...work, id: 'remote-command', hostId: 'subhost', displayName: '远端命令工作' }
+    extraListed = [her, remote]
+    await commandApp.refreshWorksQuietly(); commandApp.selectWork(remote.id); await settle(); snapshot([], remote); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    let remoteFailure
+    runCatalogNative = args => {
+      remoteFailure = event('instance.error', { operationId: args.operationId, source: 'command_background', error: '远端命令没有完成，请重试。' }, remote)
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(remote) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.ok(text(dialog()).includes('远端命令没有完成'))
+    await click('关闭')
+    extraListed = [her, { ...remote, lifecycle: 'host_lost', execution: 'unavailable', ownerHostEpoch: undefined }]
+    await commandApp.refreshWorksQuietly(); await settle()
+    assert.equal(commandApp.selectedWork.lifecycle, 'host_lost')
+    assert.equal(commandApp.selectedWork.ownerHostEpoch, undefined)
+    extraListed = [her, remote]
+    await commandApp.refreshWorksQuietly(); await settle(); snapshot([], remote); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.ok(text(dialog()).includes('远端命令没有完成'), 'a temporary SubHost outage keeps the original command output after recovery')
+    await click('关闭')
+    snapshot([remoteFailure], remote); await settle()
+    assert.equal(text(view).includes('远端命令没有完成'), false, 'the old failure replay stays out of chat after the same runtime reconnects')
+    extraListed = [her]
+    await commandApp.refreshWorksQuietly(); commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+
+    // Closing the panel, or visiting another Work, does not transfer the original command's output.
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    let rejectCommand, lateCommand
+    runCatalogNative = args => new Promise((_resolve, reject) => { lateCommand = args; rejectCommand = reject })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    await click('关闭')
+    commandApp.selectWork('work'); await settle(); snapshot([], work); await settle()
+    rejectCommand({ operationId: lateCommand.operationId, code: 'busy', message: '离开后命令失败，请重试。' }); await settle()
+    assert.equal(text(view).includes('离开后命令失败'), false, 'the late reply does not report A in B')
+    const unrelated = event('instance.error', { operationId: lateCommand.operationId, source: 'command_background', error: '本机命令失败，请重试。' }, work)
+    await settle()
+    assert.ok(text(view).includes('本机命令失败，请重试。'), 'the same operation ID in another Work is not claimed')
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    // Native post-cut replay arrives after control facts already cover these events.
+    observation({ kind: 'content', token: `commands-${her.id}`, change: { kind: 'checkpoint_begin', bootstrap: { ...bootstrap, instance: atHost(her), cursor: atHost(her).eventCursor, records: [], activeEvents: [] }, replay: true } })
+    for (const replayed of failedEvents) observation({ kind: 'event', replayToken: `commands-${her.id}`, event: replayed })
+    observation({ kind: 'content', token: `commands-${her.id}`, change: { kind: 'checkpoint_end' } }); await settle()
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'returning to A does not replay its command failures into chat')
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.equal(commandErrors().length, 2, 'replay does not append the old command results again')
+    assert.ok(text(dialog()).includes('离开后命令失败'), 'the late command reply remains in its original Work command center')
+    await click('关闭')
+    event('instance.error', { operationId: 'not-started-here', source: 'command_background', error: '其他命令失败，请重试。' })
+    event('instance.error', { operationId: lateCommand.operationId, source: 'host', error: 'Host 请求失败，请重试。' })
+    event('instance.error', { error: 'Host 状态读取失败，请重试。' })
+    await settle()
+    for (const message of ['其他命令失败', 'Host 请求失败', 'Host 状态读取失败']) assert.ok(text(view).includes(message), `${message} keeps its conversation error`)
+    await commandApp.switchHost('spare'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    event('instance.error', { operationId: lateCommand.operationId, source: 'command_background', error: '另一台 Host 的命令失败，请重试。' }); await settle()
+    assert.ok(text(view).includes('另一台 Host 的命令失败'), 'an identical Work and operation ID on another Host is not claimed')
+    await commandApp.switchHost('host'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(failedEvents); await settle()
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'returning to the original Host retains its command ownership')
+    commandApp.setCurrentDraft('/refresh'); await settle()
+    const beforeLocal = calls.filter(call => call.command === 'run_catalog_command').length
+    const beforeRefresh = calls.filter(call => call.command === 'bootstrap').length
+    find(view, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(calls.filter(call => call.command === 'run_catalog_command').length, beforeLocal, 'an exact no-argument typed local command keeps local priority')
+    assert.ok(calls.filter(call => call.command === 'bootstrap').length > beforeRefresh, 'typed refresh performs the existing local refresh')
+    snapshot(); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+
+    runCatalogNative = args => {
+      running = args
+      event('interaction.requested', { interactionId: 'command-confirm', method: 'confirm', title: '确认扩展操作', message: '等待主人确认。', issuedAt: 'now' })
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(commandApp.selectedWork.execution, 'idle')
+    assert.equal(!!button('中止命令'), true, 'the command has a visible cancel action even though chat is idle')
+    // #671 browser acceptance: the command modal covered its own confirmation without a way to open it.
+    await click('回答问题')
+    assert.equal(!!dialog(), false, 'answering leaves the command overlay and exposes the existing question')
+    assert.ok(text(teleport).includes('确认扩展操作'))
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    abortNative = () => { throw { code: 'busy', message: '输入框先前的中止失败，请重试。' } }
+    await actions.abortCurrentRun(); await settle()
+    abortNative = () => { throw { code: 'connection_failed', message: '连接中断。请重试。' } }
+    await click('中止命令')
+    assert.ok(text(dialog()).includes('连接中断'), 'cancellation failure is visible in the command center')
+    // Final PR P3: cancellation used to copy the input error into the panel without giving it ownership.
+    assert.equal(all(view, item => String(item.props.class).includes('alu-composer-error')).some(item => text(item).includes('连接中断')), false, 'command cancellation reports its failure only in the panel')
+    assert.ok(all(view, item => String(item.props.class).includes('alu-composer-error')).some(item => text(item).includes('输入框先前的中止失败')), 'claiming this failure does not clear an unrelated input error')
+    for (const leave of ['close', 'switch-work']) {
+      let rejectAbort, abortArgs
+      abortNative = args => new Promise((_resolve, reject) => { abortArgs = args; rejectAbort = reject })
+      await click(leave === 'close' ? '重试中止' : '中止命令')
+      await click('关闭')
+      if (leave === 'switch-work') { commandApp.selectWork('work'); await settle(); snapshot([], work); await settle() }
+      const failure = { operationId: abortArgs.operationId, kind: 'abort_run', connectionId: abortArgs.connectionId, instanceId: her.id,
+        hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: her.executor.piSessionId, editor: null, state: 'failed',
+        error: { code: 'busy', outcomeUnknown: false, message: '迟到的命令中止失败，请重试。' } }
+      nativeResults.set(failure.operationId, failure); emit('aludock://operation', failure)
+      rejectAbort({ ...failure.error, operationId: failure.operationId }); await settle()
+      assert.equal(nativeResults.has(failure.operationId), true, 'closing before failure leaves the native result available')
+      if (leave === 'switch-work') {
+        assert.equal(text(view).includes('迟到的命令中止失败'), false, 'the abort error does not enter a different Work')
+        commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+      }
+      const results = find(view, item => item.props['aria-label'] === '当前 Work 操作结果')
+      assert.ok(!!results && text(results).includes('迟到的命令中止失败'), 'the original Work keeps the late abort failure in its results')
+      assert.equal(all(view, item => String(item.props.class).includes('alu-composer-error')).some(item => text(item).includes('迟到的命令中止失败')), false)
+      find(results, item => item.type === 'details').open = true
+      await find(results, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
+      await click('打开命令中心')
+      find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    }
+    abortNative = args => {
+      assert.equal(args.instanceId, her.id)
+      event('interaction.resolved', { interactionId: 'command-confirm', method: 'confirm' })
+      notify(running.operationId, '命令已中止。')
+      event('command.handled', { operationId: running.operationId })
+      return { receipt: { instanceId: her.id, restored: [], inFlight: [] }, instance: atHost(her) }
+    }
+    await click('中止命令')
+    assert.ok(text(dialog()).includes('命令已中止。'))
+    assert.equal(!!find(teleport, item => item.props.role === 'dialog'), false, 'aborting dismisses the waiting confirmation')
+    assert.equal(!!button('中止命令'), false, 'completed commands no longer show as running')
+    await click('关闭')
+
+    commandApp.selectWork('work'); await settle()
+    actions.openAssistantStatus(); await settle()
+    assert.equal(commandApp.selectedWorkId, her.id, 'the detail action navigates from another Work to the actual resident assistant')
+    assert.ok(!!dialog() && text(dialog()).includes('/assistant-status'), 'the real built-in catalog entry is selected before running')
+    snapshot(); await settle()
+    const details = '滚动整理\n最近一次完成：2026-11-16 10:00\n当前采用：100000 token 开始整理，保留最近原话约 20000 token。\n\n工具扩展\nlocal：已加载，1 个工具、1 个命令。'
+    runCatalogNative = args => {
+      notify(args.operationId, details)
+      event('command.handled', { operationId: args.operationId })
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const output = find(dialog(), item => item.props.role === 'log')
+    assert.ok(text(output).includes(details), 'complete detail text appears in the command notification area')
+    assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
+    await click('关闭')
+
+    // P3 re-review: a new runtime retires old command results; its late failure stays natively available.
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    let rejectRetired, retiredCommand
+    runCatalogNative = args => new Promise((_resolve, reject) => { retiredCommand = args; rejectRetired = reject })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const restarted = { ...her, runtimeGeneration: 2 }
+    extraListed = [restarted]
+    snapshot([], restarted); await settle()
+    const retiredFailure = { operationId: retiredCommand.operationId, kind: 'run_catalog_command', connectionId: retiredCommand.connectionId, instanceId: her.id,
+      hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: her.executor.piSessionId, editor: null, state: 'failed',
+      error: { code: 'busy', outcomeUnknown: false, message: '重启前的命令失败，请检查后重试。' } }
+    nativeResults.set(retiredFailure.operationId, retiredFailure); emit('aludock://operation', retiredFailure)
+    rejectRetired({ ...retiredFailure.error, operationId: retiredFailure.operationId }); await settle()
+    assert.equal(nativeResults.has(retiredFailure.operationId), true, 'a retired command cannot acknowledge a failure it no longer displays')
+    assert.equal(text(dialog()).includes('重启前的命令失败'), false, 'the new runtime does not receive the retired command result')
+    await click('关闭')
+    assert.ok(text(view).includes('重启前的命令失败'), 'the old command failure is available through the Work operation results')
+    const retiredResults = find(view, item => item.props['aria-label'] === '当前 Work 操作结果')
+    find(retiredResults, item => item.type === 'details').open = true
+    await find(retiredResults, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
+    commands = []
+    commandApp.selectWork('work'); await settle()
+    actions.openAssistantStatus(); await settle()
+    assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
+    await click('关闭')
+    // A fresh page has no command owner; cached errors must remain readable there.
+    mounted.unmount(); await settle()
+    const rebuiltPinia = createPinia()
+    mounted = renderer.createApp({ render: () => h(App) }).use(rebuiltPinia); mounted.mount(view); await settle()
+    const rebuiltApp = useAppStore(rebuiltPinia)
+    rebuiltApp.selectWork('work'); await settle(); snapshot([unrelated], work); await settle()
+    assert.ok(text(view).includes('本机命令失败，请重试。'), 'a page without the command center owner still shows the cached error')
+    extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
+    console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
+    console.log('PASS: command failures stay with their command center across close, Work switch, temporary SubHost outage, late reply and replay; unclaimed and Host errors remain visible')
+    console.log('PASS: failed Queue handoff remains visible after its receipt and replay; cross-Host success stays successful and keeps later parameters; a retired command leaves its late failure in Work results')
   }
 
   // #665 review: the color theme survives a reload, works without this device's settings,

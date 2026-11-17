@@ -83,7 +83,6 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
     if (event.type === "compaction.completed") {
       return {
         ...snapshot,
-        execution: snapshot.activeCommandId === undefined && !event.data.willRetry ? "idle" : snapshot.execution,
         compacting: false,
         updatedAt: event.occurredAt,
         eventCursor: advanceCursor(snapshot, event),

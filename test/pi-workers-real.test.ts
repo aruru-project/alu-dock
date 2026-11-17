@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,11 +7,11 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { DockRegistry } from "../src/control/dock-registry.js";
-import { DockClient } from "../src/control/dock-client.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import { WorkerIncidentStore } from "../src/control/worker-incident-store.js";
-import { resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
+import { createPiProjectTrustCoordinator, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
 import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
@@ -29,10 +29,25 @@ const ZERO_USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-test("startup restores local Works concurrently once, leaving failed and stopped Works alone", { timeout: 30_000 }, async () => {
+async function requireTrust(action: () => Promise<unknown>): Promise<string> {
+  let challengeId = "";
+  await assert.rejects(action, (error: unknown) => {
+    assert.ok(error instanceof ControlClientError);
+    assert.equal(error.code, "project_trust_required");
+    assert.equal(typeof error.details?.challengeId, "string");
+    challengeId = error.details!.challengeId as string;
+    return true;
+  });
+  return challengeId;
+}
+
+test("Work recovery retains trust_once and deny_once across Worker loss and Host restart (lost Work trust incident)", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-startup-recovery-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
+  const projectExtension = join(cwd, ".pi/extensions/project.ts");
+  await mkdir(join(cwd, ".pi/extensions"), { recursive: true });
+  await writeFile(projectExtension, 'export default function (pi) { pi.registerCommand("project-marker", { handler: async () => {} }); }');
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "offline", defaultModel: "fixture" }));
   await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { offline: {
     baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "unused-offline-fixture",
@@ -47,9 +62,8 @@ test("startup restores local Works concurrently once, leaving failed and stopped
       api: "openai-completions", provider: "offline", model: "fixture", stopReason: "stop", timestamp: 2, usage: ZERO_USAGE });
     return session.getSessionFile()!;
   });
-  const environment = { HOME: home, USERPROFILE: home, PATH: process.env.PATH,
-    XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache"),
-    XDG_DATA_HOME: join(home, ".local/share"), XDG_STATE_HOME: join(home, ".local/state"), PI_OFFLINE: "1" };
+  const environment = isolatedProcessEnvironment(home, { PI_CODING_AGENT_DIR: agentDir });
+  const workerPids = new Map<string, number>();
   const store = new FileCatalogStore(join(root, "state/catalog.json"));
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -62,11 +76,13 @@ test("startup restores local Works concurrently once, leaving failed and stopped
     const registry = new DockRegistry(async (input) => {
       if (recovering) { active++; peak = Math.max(peak, active); if (++starts === 2) allStarting(); }
       try {
-        const instance = await createPiInstance({ ...input, agentDir, sessionDir, workerEnvironment: environment });
+        const instance = await createPiInstance({ ...input, agentDir, sessionDir, workerEnvironment: environment,
+          onWorkerSpawn: (pid) => { workerPids.set(input.id, pid); } });
         if (recovering) await gate;
         return instance;
       } finally { if (recovering) active--; }
-    }, undefined, { catalogStore: store, reopenTargetResolver: { resolve: resolvePiReopenTarget } });
+    }, undefined, { catalogStore: store, reopenTargetResolver: { resolve: resolvePiReopenTarget },
+      trustPreflight: createPiProjectTrustCoordinator(agentDir) });
     host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog() });
     await host.start();
     client = new DockClient({ socketPath: host.socketPath, timeoutMs: 10_000 });
@@ -74,11 +90,33 @@ test("startup restores local Works concurrently once, leaving failed and stopped
   try {
     await startHost();
     const works: InstanceSnapshot[] = [];
-    for (const file of files) works.push((await client!.adopt(file)).instance);
+    for (const [index, file] of files.entries()) {
+      const operationId = `adopt-${index}`;
+      const challengeId = await requireTrust(() => client!.adopt(file, undefined, operationId));
+      works.push((await client!.adopt(file, undefined, operationId, { challengeId,
+        decision: index === 1 ? "deny_once" : "trust_once" })).instance);
+    }
+    const hasProjectResources = async (id: string) => (await client!.resources(id)).resources.some((item) => item.path === projectExtension);
+    assert.equal(await hasProjectResources(works[0]!.id), true);
+    assert.equal(await hasProjectResources(works[1]!.id), false);
+    // Same-Host reopen is the original accident path; neither choice is a directory grant.
+    process.kill(workerPids.get(works[0]!.id)!, "SIGKILL");
+    for (let attempt = 0; attempt < 100 && (await client!.status(works[0]!.id)).lifecycle !== "runtime_error"; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((await client!.status(works[0]!.id)).lifecycle, "runtime_error");
+    works[0] = (await client!.reopen(works[0]!.id, "worker-loss-reopen")).instance;
+    assert.equal(works[0]!.executor.sessionFile, files[0]);
+    assert.equal(await hasProjectResources(works[0]!.id), true);
+    await requireTrust(() => client!.create(cwd, undefined, "new-work-still-asks"));
     await client!.stop(works[3]!.id, "explicit-stop");
     await host!.stop(); client!.closeActiveConnections();
     const missing = await readFile(files[2]!, "utf8");
     await rm(files[2]!);
+    // A pre-fix Work has no saved decision. It must use the original trust gate when its session is fixed.
+    const legacyCatalog = (await store.load())!;
+    delete legacyCatalog.instances.find((record) => record.id === works[2]!.id)!.projectTrusted;
+    await store.commit(legacyCatalog, { kind: "test.legacy-catalog", effect: "pre_effect" });
     recovering = true;
     await startHost();
     const recovery = host!.recoverInstancesOnce();
@@ -96,6 +134,9 @@ test("startup restores local Works concurrently once, leaving failed and stopped
       const restored = await client!.status(works[index]!.id);
       assert.equal(restored.lifecycle, "active");
       assert.equal(restored.runtimeGeneration, works[index]!.runtimeGeneration + 1);
+      assert.equal(restored.executor.sessionFile, files[index]);
+      assert.equal(restored.executor.piSessionId, works[index]!.executor.piSessionId);
+      assert.equal(await hasProjectResources(restored.id), index === 0);
       assert.ok((await client!.history(restored.id)).entries.some((entry) => entry.content.some((block) => block.type === "text" && block.text === `Saved answer ${["A", "B"][index]}`)));
     }
     const catalog = (await store.load())!;
@@ -104,7 +145,28 @@ test("startup restores local Works concurrently once, leaving failed and stopped
     await writeFile(files[2]!, missing);
     await host!.recoverInstancesOnce();
     assert.equal((await client!.status(works[2]!.id)).lifecycle, "host_lost", "fixing a failed target must not cause a second automatic attempt");
-    assert.equal((await client!.reopen(works[2]!.id, "manual-after-fix")).instance.lifecycle, "active");
+    assert.equal(catalog.instances.find((record) => record.id === works[2]!.id)!.projectTrusted, undefined);
+    const legacyChallenge = await requireTrust(() => client!.reopen(works[2]!.id, "manual-after-fix"));
+    assert.equal((await client!.reopen(works[2]!.id, "manual-after-fix", undefined,
+      { challengeId: legacyChallenge, decision: "deny_once" })).instance.lifecycle, "active");
+    assert.equal((await store.load())!.instances.find((record) => record.id === works[2]!.id)!.projectTrusted, false);
+    await requireTrust(() => client!.create(cwd, undefined, "new-work-after-restart"));
+    await assert.rejects(readFile(join(agentDir, "trust.json")), { code: "ENOENT" });
+
+    await host!.stop(); client!.closeActiveConnections();
+    recovering = false;
+    await startHost();
+    await assert.rejects(client!.reopen(works[1]!.id, "unknown-challenge", undefined,
+      { challengeId: "not-issued", decision: "trust_once" }), { code: "invalid_project_trust_challenge" });
+    await host!.stop(); client!.closeActiveConnections();
+    // Security boundary: replacing the old canonical directory with a symlink must not move its grant.
+    await rename(cwd, join(root, "original-workspace"));
+    const otherProject = join(root, "other-project");
+    await mkdir(join(otherProject, ".pi/extensions"), { recursive: true });
+    await writeFile(join(otherProject, ".pi/extensions/project.ts"), 'export default function () {}');
+    await symlink(otherProject, cwd, process.platform === "win32" ? "junction" : "dir");
+    await startHost();
+    await requireTrust(() => client!.reopen(works[0]!.id, "changed-directory"));
   } finally {
     release(); client?.closeActiveConnections(); await host?.stop(); await rm(root, { recursive: true, force: true });
   }
@@ -437,7 +499,7 @@ test("one crashed Worker leaves a saved diagnostic while other work continues", 
   }
 });
 
-test("cross-project session replacement updates the Worker process cwd before extension rebind", async (context) => {
+test("session switch commits the target trust with its cwd; cancellation keeps the current project's resources", async (context) => {
   if (process.platform !== "linux") { context.skip("/proc cwd proof requires Linux"); return; }
   const root = await mkdtemp(join(tmpdir(), "alu-dock-worker-cwd-"));
   const cwdA = join(root, "project-a");
@@ -447,11 +509,22 @@ test("cross-project session replacement updates the Worker process cwd before ex
   await mkdir(join(root, "target-sessions"), { recursive: true });
   const sourceAgentDir = join(root, "source-agent");
   const cwdProbe = join(root, "extension-factory-cwd.txt");
-  await mkdir(join(sourceAgentDir, "extensions"), { recursive: true });
+  const cancelledTarget = SessionManager.create(cwdA, join(root, "target-sessions"));
+  cancelledTarget.appendMessage({ role: "user", content: "Cancelled target", timestamp: 1 });
+  cancelledTarget.appendMessage({ role: "assistant", content: [{ type: "text", text: "Saved answer" }], api: "openai-completions",
+    provider: "offline", model: "fixture", stopReason: "stop", timestamp: 2, usage: ZERO_USAGE });
+  const projectExtension = join(cwdA, ".pi/extensions/project.ts");
+  await Promise.all([join(sourceAgentDir, "extensions"), join(cwdA, ".pi/extensions"), join(cwdB, ".pi/extensions")]
+    .map((path) => mkdir(path, { recursive: true })));
+  await writeFile(projectExtension, 'export default function (pi) { pi.registerCommand("project-marker", { handler: async () => {} }); }');
+  await writeFile(join(cwdB, ".pi/extensions/project.ts"), await readFile(projectExtension));
   await writeFile(join(sourceAgentDir, "extensions", "cwd-probe.ts"), `
 import { appendFileSync } from "node:fs";
-export default function () {
+export default function (pi) {
   appendFileSync(${JSON.stringify(cwdProbe)}, process.cwd() + "\\n");
+  pi.on("session_before_switch", (event) => {
+    if (event.targetSessionFile === ${JSON.stringify(cancelledTarget.getSessionFile())}) return { cancel: true };
+  });
 }
 `, "utf8");
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -470,24 +543,47 @@ export default function () {
   assert.equal(targetHeader.cwd, cwdB);
 
   let sourcePid = 0;
-  const source = await createPiInstance({
-    id: "cwd-source", hostEpoch: "cwd-host", creationOperationId: "cwd-source-create",
-    cwd: cwdA, agentDir: sourceAgentDir, sessionDir: join(root, "source-sessions"),
-    projectTrusted: true, tools: [], onWorkerSpawn: (pid) => { sourcePid = pid; },
-  });
+  const store = new FileCatalogStore(join(root, "state/catalog.json"));
+  const registry = new DockRegistry((input) => createPiInstance({
+    ...input, agentDir: sourceAgentDir, sessionDir: join(root, "source-sessions"), tools: [],
+    workerEnvironment: isolatedProcessEnvironment(join(root, "home"), { PI_CODING_AGENT_DIR: sourceAgentDir }),
+    onWorkerSpawn: (pid) => { sourcePid = pid; },
+  }), undefined, { catalogStore: store, trustPreflight: createPiProjectTrustCoordinator(sourceAgentDir),
+    reopenTargetResolver: { resolve: resolvePiReopenTarget } });
+  const host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog() });
+  await host.start();
+  const client = new DockClient({ socketPath: host.socketPath });
   try {
+    const challengeId = await requireTrust(() => client.create(cwdA, undefined, "source-create"));
+    const source = await client.create(cwdA, undefined, "source-create", { challengeId, decision: "trust_once" });
     assert.equal(await readlink(`/proc/${sourcePid}/cwd`), cwdA);
     assert.deepEqual((await readFile(cwdProbe, "utf8")).trim().split("\n"), [cwdA]);
-    assert.equal((await source.switchSession("cwd-switch", targetFile!, { canonicalCwd: cwdB, projectTrusted: true })).cancelled, false);
+    const cancelChallenge = await requireTrust(() => client.switchSession(source.id, cancelledTarget.getSessionFile()!, "cancel-switch"));
+    assert.equal((await client.switchSession(source.id, cancelledTarget.getSessionFile()!, "cancel-switch",
+      { challengeId: cancelChallenge, decision: "deny_once" })).cancelled, true);
+    assert.equal((await client.status(source.id)).cwd, cwdA);
+    assert.equal((await store.load())!.instances[0]!.projectTrusted, true);
+    // A cancelled same-project denial used to poison Pi's trust map: the next /new lost project resources.
+    await client.newSession(source.id, undefined, "new-after-cancel");
+    assert.equal((await client.resources(source.id)).resources.some((item) => item.path === projectExtension), true);
+    const switchChallenge = await requireTrust(() => client.switchSession(source.id, targetFile!, "cwd-switch"));
+    assert.equal((await client.switchSession(source.id, targetFile!, "cwd-switch",
+      { challengeId: switchChallenge, decision: "deny_once" })).cancelled, false);
     assert.equal(await readlink(`/proc/${sourcePid}/cwd`), cwdB);
-    assert.equal(source.snapshot().cwd, cwdB);
+    assert.equal((await client.status(source.id)).cwd, cwdB);
+    const committed = (await store.load())!.instances[0]!;
+    assert.equal(committed.cwd, cwdB);
+    assert.equal(committed.projectTrusted, false, "the replacement must persist its decision before any later operation");
+    assert.equal(committed.sessionFile, targetFile);
+    assert.equal((await client.resources(source.id)).resources.some((item) => item.path === join(cwdB, ".pi/extensions/project.ts")), false);
     assert.deepEqual(
       (await readFile(cwdProbe, "utf8")).trim().split("\n"),
-      [cwdA, cwdB],
+      [cwdA, cwdA, cwdB],
       "replacement extension factories must observe the target cwd during construction",
     );
   } finally {
-    await source.disposeUnpublished();
+    client.closeActiveConnections();
+    await host.stop();
   }
 });
 

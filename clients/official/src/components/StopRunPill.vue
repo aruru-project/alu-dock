@@ -13,6 +13,7 @@ import { useWorkActionsStore } from '../stores/work-actions'
 // Work stays in the command center with its own confirmation and look.
 const app = useAppStore()
 const running = computed(() => app.selectedWork?.execution === 'running')
+const compacting = computed(() => app.selectedWork?.compacting === true)
 const workActions = useWorkActionsStore()
 const { aborting } = storeToRefs(workActions)
 const { abortCurrentRun } = workActions
@@ -44,13 +45,13 @@ const elapsed = computed(() => {
   const milliseconds = turnDurationMs(turn, now.value)
   return milliseconds === undefined ? '' : formatTurnDuration(milliseconds, true)
 })
-const label = computed(() => `${aborting.value ? '正在中止当前回复' : '中止当前回复'}${elapsed.value ? `，已运行 ${elapsed.value}` : ''}`)
+const label = computed(() => `${aborting.value ? '正在中止当前回复' : '中止当前回复'}${compacting.value ? '，正在压缩上下文' : ''}${elapsed.value ? `，已运行 ${elapsed.value}` : ''}`)
 </script>
 
 <template>
-  <button v-if="running" type="button" class="alu-stop-run" :class="{ 'is-pending': aborting }" :title="label" :aria-label="label" :disabled="!isTauri || aborting" @click="abortCurrentRun">
+  <button v-if="running" type="button" class="alu-stop-run" :class="{ 'is-pending': aborting }" :title="label" :aria-label="label" :disabled="!isTauri || aborting" @click="abortCurrentRun()">
     <span class="alu-stop-run-icon" aria-hidden="true" />
-    <span>{{ aborting ? '中止中' : '中止' }}</span>
+    <span>{{ aborting ? '中止中' : compacting ? '压缩中 · 中止' : '中止' }}</span>
     <span v-if="elapsed" class="alu-stop-run-time" aria-hidden="true">{{ elapsed }}</span>
   </button>
 </template>

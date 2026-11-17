@@ -301,15 +301,27 @@ test("discarded replies still enforce Worker structure, envelope and state bound
   const { MAX_WORKER_CHUNK_CHARS } = await import("../src/worker/worker-protocol.js");
   const large = "x".repeat(2_000_001);
   const response = { kind: "response", callId: "host-1", ok: true, result: { ignored: large } };
-  function receive(value: unknown, cancelled: boolean) {
+  function receive(value: unknown, cancelled: boolean | "during-transfer") {
     const json = JSON.stringify(value), count = Math.ceil(json.length / MAX_WORKER_CHUNK_CHARS);
-    const receiver = new WorkerFrameReceiver(() => true, () => cancelled ? "cancelled" : undefined);
+    let expired = cancelled === true;
+    const receiver = new WorkerFrameReceiver(() => true, callId => callId === "host-1" && expired ? "cancelled" : undefined);
     let result;
-    for (let index = 0; index < count; index++) result = receiver.accept({ protocol: "alu-dock-pi-worker", version: 1, identity: IDENTITY,
-      sequence: index + 1, transferId: "discard", index, count, payload: json.slice(index * MAX_WORKER_CHUNK_CHARS, (index + 1) * MAX_WORKER_CHUNK_CHARS) });
+    for (let index = 0; index < count; index++) {
+      result = receiver.accept({ protocol: "alu-dock-pi-worker", version: 1, identity: IDENTITY,
+        sequence: index + 1, transferId: "discard", index, count, payload: json.slice(index * MAX_WORKER_CHUNK_CHARS, (index + 1) * MAX_WORKER_CHUNK_CHARS) });
+      if (cancelled === "during-transfer") expired = true;
+    }
+    if (cancelled === "during-transfer") {
+      // PR review P1: a query may expire after its first frame. Finishing its late response
+      // must neither deliver the old state nor consume the following request's answer.
+      const next = { kind: "response", callId: "host-2", ok: true, result: [], state: STATE };
+      assert.deepEqual(receiver.accept({ protocol: "alu-dock-pi-worker", version: 1, identity: IDENTITY,
+        sequence: count + 1, transferId: "next", index: 0, count: 1, payload: JSON.stringify(next) }), next);
+    }
     return result;
   }
   assert.equal(receive(response, true), undefined);
+  assert.equal(receive({ ...response, state: { ...STATE, sessionId: "expired-query-session" } }, "during-transfer"), undefined);
   assert.deepEqual(receive(response, false), response);
   let deep: unknown = large;
   for (let i = 0; i < 33; i++) deep = { deep };

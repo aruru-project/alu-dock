@@ -697,6 +697,43 @@ impl DockClient {
         Ok(result)
     }
 
+    /// The Continue button owns one request. If its reply is lost, observe that
+    /// Work once; the Host orders this read after an already admitted reopen.
+    /// No mutation is replayed, and a second disconnection ends this wait.
+    pub async fn continue_instance(
+        &self,
+        instance_id: &str,
+        continuation: Option<(&str, ProjectTrustDecision)>,
+        operation_id: &str,
+    ) -> Result<InstanceSnapshot> {
+        match self
+            .reopen_instance(instance_id, continuation, Some(operation_id))
+            .await
+        {
+            Ok(result) => Ok(result.instance),
+            Err(original @ ClientError::EffectUnknown { .. }) => {
+                match self
+                    .read_instance(instance_id, None, crate::ReadReplay::ConversationBootstrap)
+                    .await
+                {
+                    Ok(read) if read.instance.lifecycle == InstanceLifecycle::Active => {
+                        Ok(read.instance)
+                    }
+                    // The startup that this read waited for failed. Its producer owns
+                    // these diagnoses; transport failure still leaves the result unknown.
+                    Err(error)
+                        if matches!(&error, ClientError::Host { code, .. }
+                        if matches!(code.as_str(), "resource_unavailable" | "model_not_found" | "runtime_unavailable")) =>
+                    {
+                        Err(error)
+                    }
+                    _ => Err(original),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn forget_instance(
         &self,
         instance_id: &str,
@@ -826,6 +863,100 @@ mod tests {
                     sequence: 8,
                 },
             },
+        }
+    }
+
+    // RC67 Continue: the response can disappear while the Host still starts the
+    // Worker. Native ownership outlives the page, and observes instead of replaying.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lost_continue_observes_the_same_work_and_a_second_disconnect_ends_waiting() {
+        use crate::tls::{read_json_line, write_json_line};
+        use crate::{
+            ConnectionRouter, IdentityStore, LocalDockEndpoint, OperationAssociations,
+            OperationState, operation_association,
+        };
+        for (read_epoch, disconnect_read) in
+            [("epoch", false), ("restarted", false), ("epoch", true)]
+        {
+            let directory = std::env::temp_dir().join(format!("continue-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let endpoint = directory.join("dock.sock");
+            let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+            let mut active =
+                serde_json::to_value(stopped_result("original", None).instance).unwrap();
+            active["lifecycle"] = serde_json::json!("active");
+            active["execution"] = serde_json::json!("idle");
+            active["runtimeGeneration"] = serde_json::json!(2);
+            active["ownerHostEpoch"] = serde_json::json!(read_epoch);
+            active["eventCursor"] = serde_json::json!({"hostEpoch":read_epoch,"instanceId":"work","runtimeGeneration":2,"sequence":1});
+            let peer = tokio::spawn(async move {
+                for (method, epoch) in [("instance.reopen", "epoch"), ("instance.read", read_epoch)]
+                {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio::io::BufReader::new(socket);
+                    let hello: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+                    write_json_line(&mut socket, &serde_json::json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],
+                        "catalogSchemaVersion":1,"host":{"hostEpoch":epoch},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":16384}})).await.unwrap();
+                    let request: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+                    assert_eq!(
+                        request["type"], method,
+                        "lost Continue sends a read, not another mutation"
+                    );
+                    assert_eq!(request["params"]["instanceId"], "work");
+                    if method == "instance.reopen" {
+                        assert_eq!(request["params"]["operationId"], "original");
+                        continue;
+                    }
+                    if disconnect_read {
+                        continue;
+                    }
+                    write_json_line(&mut socket, &serde_json::json!({"kind":"response","version":2,"requestId":request["requestId"],
+                        "hostEpoch":epoch,"ok":true,"result":{"instance":active,"page":{"events":[],"earliest":active["eventCursor"],
+                        "latest":active["eventCursor"],"truncated":false,"epochChanged":false,"generationChanged":false},
+                        "recentHistory":[],"historyRevision":0,"historyTruncated":false,"pendingMessages":[]}})).await.unwrap();
+                }
+            });
+            let store = IdentityStore::new(directory.join("identity"));
+            let client = DockClient::new(
+                ConnectionRouter::local(
+                    &store,
+                    LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                    "continue-test".into(),
+                )
+                .unwrap(),
+            );
+            let operations = OperationAssociations::default();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                operations.execute(
+                    operation_association(
+                        "original",
+                        "reopen_work",
+                        "host",
+                        "work",
+                        "epoch",
+                        1,
+                        Value::Null,
+                    ),
+                    async move { client.continue_instance("work", None, "original").await },
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if disconnect_read {
+                assert!(matches!(result, Err(ClientError::EffectUnknown { .. })));
+                assert_eq!(operations.pending()[0].state, OperationState::Unknown);
+            } else {
+                let continued = result.unwrap();
+                assert_eq!(continued.id, "work");
+                assert_eq!(continued.executor.pi_session_id, "session");
+                assert_eq!(continued.event_cursor.host_epoch, read_epoch);
+                assert_eq!(operations.pending()[0].state, OperationState::Succeeded);
+            }
+            peer.await.unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
         }
     }
 

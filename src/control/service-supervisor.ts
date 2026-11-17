@@ -73,6 +73,7 @@ export class SupervisedService {
   private restartTimer: NodeJS.Timeout | undefined;
   private stableTimer: NodeJS.Timeout | undefined;
   private readonly waiters = new Set<() => void>();
+  private readonly readyListeners = new Set<() => void>();
 
   constructor(private readonly options: SupervisedServiceOptions) {}
 
@@ -101,6 +102,13 @@ export class SupervisedService {
       child.once("exit", () => { clearTimeout(kill); resolve(); });
       child.kill("SIGTERM");
     });
+  }
+
+  /** Observe actual readiness, including supervised restarts; already-ready subscribers run now. */
+  onReady(listener: () => void): () => void {
+    this.readyListeners.add(listener);
+    if (this.readyChild?.connected) listener();
+    return () => { this.readyListeners.delete(listener); };
   }
 
   /** The service process while it runs; tests use it to stop the service from outside. */
@@ -206,6 +214,7 @@ export class SupervisedService {
           this.onFirstStart?.resolve();
           this.onFirstStart = undefined;
           this.wakeWaiters();
+          for (const listener of this.readyListeners) listener();
           return;
         }
         if (message?.type === "ask" && typeof message.id === "string" && !asked.has(message.id)) {

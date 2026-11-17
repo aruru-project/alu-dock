@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnDockWorker } from "../src/control/native-collaboration.js";
+import { DockRegistry } from "../src/control/dock-registry.js";
+import { ManagedInstance } from "../src/core/managed-instance.js";
+import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import type { InstanceSnapshot } from "../src/core/instance-dto.js";
 import type { ObservedInstanceStatus } from "../src/core/instance-observation.js";
 
@@ -19,6 +22,26 @@ test("a child Work keeps the parent's thinking level, on another model too", asy
   await spawnDockWorker(source, request, port);
   await spawnDockWorker(source, { ...request, model: { provider: "other", id: "plain" } }, port);
   assert.deepEqual(created.map((input) => input.thinkingLevel), ["low", "low"]);
+});
+
+// #671's permission boundary: a legacy Pi Work marked assistant is not Main's independent resident.
+test("an assistant marker on a Pi Work does not grant access to another Work's children", async (context) => {
+  const registry = new DockRegistry(async (input) => new ManagedInstance({
+    ...input, session: new DelayedAgentWorkerConnection(input.id),
+    ...(input.child === undefined ? {} : { parentId: input.child.parentId }),
+    ...(input.name === "Legacy Pi" ? { assistant: true } : {}),
+  }), undefined, { assistantWorkspace: process.cwd() });
+  context.after(() => registry.stopAll());
+  const marked = await registry.create({ operationId: "marked", cwd: process.cwd(), name: "Legacy Pi" });
+  const parent = await registry.create({ operationId: "parent", cwd: process.cwd(), name: "Parent" });
+  const child = await registry.create({ operationId: "child", cwd: process.cwd(), name: "Child", child: { parentId: parent.id } });
+  assert.equal(marked.snapshot().assistant, true);
+  assert.equal(marked.snapshot().executor.kind, "pi-sdk");
+  assert.equal(registry.isResidentAssistant(marked.id), false);
+  const listed = await registry.invokeDockTool(marked.id, { type: "list", includeHistory: true });
+  assert.ok(listed.type === "list");
+  assert.ok(!listed.result.instances.some((work) => work.id === child.id));
+  await assert.rejects(registry.invokeDockTool(marked.id, { type: "inspect", target: child.id }));
 });
 
 test("spawn preserves a visible child and never sends an unconfirmed task twice", async () => {
@@ -52,6 +75,9 @@ test("native collaboration wire validates tool selections, delivery and terminal
   // and only a child gets a tool ceiling.
   assert.throws(() => parseDockToolsRequest({ ...spawn, thinkingLevel: "infinite" }));
   assert.throws(() => parseDockToolsRequest({ ...spawn, parentId: "spoofed" }));
+  // #671: a request cannot self-authorize the resident assistant's read or delegation policy.
+  assert.throws(() => parseDockToolsRequest({ ...spawn, assistant: true }));
+  assert.throws(() => parseDockToolsRequest({ type: "list", assistant: true }));
   assert.throws(() => parseDockToolsRequest({ type: "create", operationId: "top-level", cwd: "/project", allowedTools: ["read"] }));
   assert.throws(() => parseDockToolsRequest({ ...spawn, cwd: "relative" }));
   // A SubHost reads Main's answers with this parser, and an older Main still sends this error.

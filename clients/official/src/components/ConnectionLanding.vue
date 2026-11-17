@@ -6,6 +6,7 @@ import { FileText, Monitor, Plus, RefreshCw, Settings, Waypoints, WifiOff } from
 import { openDesktopHostLog, openDesktopTui } from '../lib/bridge'
 import { copyPlainText } from '../lib/clipboard'
 import type { Work } from '../lib/types'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
 import { useHostStore } from '../stores/host'
@@ -24,7 +25,7 @@ const workActions = useWorkActionsStore()
 const { workMutating } = storeToRefs(workActions)
 const { reopenSelectedWork } = workActions
 function inactiveState(work: Work) {
-  if (work.assistant) {
+  if (isResidentAssistant(work)) {
     if (work.lifecycle === 'stopping' || work.lifecycle === 'stopped') return { label: `正在重启${work.displayName || '助手'}`, message: 'Main 会重新启动她，对话和记忆保留。可以刷新状态查看进展。', action: '' }
     return { label: `暂时连不上${work.displayName || '助手'}`, message: '对话和记忆还在。可以刷新状态查看她是否已回来。', action: `重新启动${work.displayName || '助手'}` }
   }
@@ -112,7 +113,7 @@ async function copyDiagnostic(text: string) {
       <section class="alu-work-state-card" aria-labelledby="alu-work-state-title">
         <div class="alu-work-state-status"><span class="alu-work-state-signal" aria-hidden="true" /><span>{{ inactiveState(selected).label }}</span></div>
         <h1 id="alu-work-state-title">{{ selected.displayName }}</h1>
-        <p class="alu-work-state-message">{{ inactiveState(selected).message }}</p>
+        <p class="alu-work-state-message" role="status">{{ workMutating ? '正在继续这个 Work，并等待它的实际状态。你可以离开此页；原 Work 和会话保留。' : inactiveState(selected).message }}</p>
         <dl class="alu-work-state-meta"><div><dt>Workspace</dt><dd>{{ selected.cwd }}</dd></div></dl>
         <details v-if="selected.lastError" class="alu-diagnostic alu-work-state-diagnostic">
           <summary>查看详情</summary>

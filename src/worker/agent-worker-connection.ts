@@ -8,7 +8,7 @@ import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, Agent
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { parseAssistantRequest, type AssistantHostPort } from "../core/assistant.js";
 import { answerModelQuestion, type ModelHostPort } from "../model-service/service-process.js";
-import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError, survivesSessionReplacement } from "../core/agent-worker.js";
+import { AgentMutationEffectUnknownError, AgentQueryTimeoutError, AgentStartupTimeoutError, AgentUnavailableBeforeEffectError, survivesSessionReplacement } from "../core/agent-worker.js";
 import { WorkerProcess, type WorkerLaunch, type WorkerProcessTimeouts } from "./worker-process.js";
 import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import {
@@ -93,8 +93,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     this.receiver = new WorkerFrameReceiver((received) => this.acceptIdentity(received, identity), (callId) => {
       const pending = this.pending.get(callId);
       if (pending) return { method: pending.label };
-      // Generation replacement cancels pending consumers, but an already running
-      // dispatch can legally reply using the new generation. No second call log.
+      // Query deadlines and generation replacement release pending consumers. A late
+      // reply may still finish (even across chunks); it has no remaining result/state owner.
       const issued = /^host-([1-9][0-9]*)$/.exec(callId);
       const sequence = issued ? Number(issued[1]) : NaN;
       return Number.isSafeInteger(sequence) && sequence <= this.nextCall ? "cancelled" : undefined;
@@ -126,7 +126,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     try {
       const ready = await Promise.race([
         session.readyPromise,
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Worker startup deadline exceeded")), startup); }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentStartupTimeoutError()), startup); }),
       ]);
       return { session, ...ready };
     } catch (error) {
@@ -185,12 +185,23 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     const callId = `host-${++this.nextCall}`;
     const timeoutMs = deadline === "none" ? undefined : deadline === "request" ? this.process.timeouts.requestMs
       : deadline === "mutation" ? this.process.timeouts.mutationMs : deadline === "control" ? this.process.timeouts.controlMs : this.process.timeouts.gracefulShutdownMs;
+    const query = envelope.kind === "agent_request" && controlRequestDescriptor(envelope.request.type).effect === "query";
     return new Promise<unknown>((resolve, reject) => {
-      const timer = timeoutMs === undefined ? undefined : setTimeout(() => this.failTransport(new AgentWorkerUnavailableError(`Worker ${label} deadline exceeded`)), timeoutMs);
+      const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+        if (query) {
+          // PR review P1: a read waiting on Main is not evidence that the Worker's running work died.
+          // Keep the deadline, release this reader, and let the existing cancelled-reply path discard it.
+          this.pending.delete(callId);
+          reject(new AgentQueryTimeoutError());
+        } else {
+          this.failTransport(new AgentWorkerUnavailableError(`Worker ${label} deadline exceeded`));
+        }
+      }, timeoutMs);
       this.pending.set(callId, { label, resolve, reject, timer, preflight, accepted: false, generation: this.expectedGeneration,
         survivesSessionReplacement: envelope.kind === "agent_request" && survivesSessionReplacement(envelope.request) });
       void this.sender.sendEnvelope({ ...envelope, callId } as WorkerEnvelope).catch((error) => {
-        if (this.pending.has(callId)) this.failTransport(error);
+        // A genuine send failure is still a transport failure, even if this query already timed out.
+        if (query || this.pending.has(callId)) this.failTransport(error);
       });
     });
   }

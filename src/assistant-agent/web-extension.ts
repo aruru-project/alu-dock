@@ -21,8 +21,8 @@ export const webExtension: AssistantExtensionFactory = async (context) => {
   const entry = metadata.bin?.["pi-web-access-mcp"];
   if (!entry) throw new Error("随包联网工具缺少启动入口，请更新 Alu Dock 后重试。");
 
-  // The standalone engine uses this filename. Its configuration lives with this extension,
-  // not under a user's Pi installation; only this extension receives these private values.
+  // Derived runtime input for the standalone engine, rewritten on every load from Main's
+  // extensions.json. This file is not another settings source; only this factory receives config.
   await writeFile(join(context.dataDir, "web-search.json"), JSON.stringify(context.config), { mode: 0o600 });
   const client = new McpClient({ name: "aludock-assistant-web", version: DOCK_VERSION, requestTimeoutMs: 10_000 });
   try {
