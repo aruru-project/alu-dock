@@ -234,7 +234,9 @@ test("Planning cannot change files, shows the full plan for review, and executes
   assert.match(await h.surface(), /1\s*\/\s*10/);
   autonomous.text("The follow-up report is in progress.");
   const continuation = await h.request();
-  assert.match(await h.surface(), /2\s*\/\s*10/);
+  // The provider request and the Goal status reach different processes. Keep this round open
+  // until the client actually sees its counter, before letting the provider finish it.
+  await waitFor(async () => /2\s*\/\s*10/.test(await h.surface()), "The client did not show Goal round 2/10 while its model request was still open");
   // A review found every automatic round repeating the whole approved plan.
   assert.match(lastMessageText(continuation), /执行已批准的第 \d+ 版计划/);
   assert.equal(lastMessageText(continuation).includes("LAST: never deploy"), false, "Automatic rounds refer to the plan instead of repeating it");

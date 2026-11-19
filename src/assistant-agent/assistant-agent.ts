@@ -173,8 +173,8 @@ class AssistantAgent implements WorkerAgent {
   private readonly recorder: SessionRecorder;
   private readonly opening: AssistantOpening;
   private readonly agent: Agent;
-  private tools: AgentTool[];
-  private readonly builtInTools: AgentTool[];
+  private tools: Agent["state"]["tools"];
+  private readonly builtInTools: Agent["state"]["tools"];
   private readonly extensions: AssistantToolExtensions;
   private readonly skills: AgentSkills;
   private readonly workTools: AgentTool[];
