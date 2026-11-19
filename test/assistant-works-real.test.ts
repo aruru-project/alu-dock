@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { MAX_REPLY_STEPS } from "../src/assistant-agent/assistant-agent.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
@@ -115,25 +115,26 @@ test("her Dock tools show as on, and her owner can switch them off and on like a
   await waitFor(async () => await shown() === "on", "Her Dock tools did not come back on");
 });
 
-// Incident this guards against (the Minecraft companion this design follows, on its live server): a
-// long reply ran out of steps after the work was done, and the person who asked never heard back.
-test("a reply of hers that runs out of steps still ends with a word to her owner", { timeout: 90_000 }, async (context) => {
+// The private assistant used to block the 21st tool step, even during an owner's ordinary review.
+test("the assistant reads the last of 21 reports and answers without a second prompt", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-steps-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
   const alu = await team.assistantWork();
-  await client.prompt(alu.id, "把所有 Work 挨个看一遍。", "auto", "alu-busy");
-  for (let step = 0; step < MAX_REPLY_STEPS; step += 1) {
-    (await coordinator.request(step)).tools({ id: `list-${step}`, name: "dock_list", arguments: {} });
+  for (let n = 1; n <= 21; n++) await writeFile(join(alu.cwd, `report-${n}.txt`), n === 21 ? "FINAL_REPORT: valve inspected" : `Report ${n} checked`);
+  await client.prompt(alu.id, "依次读完这 21 份报告，再告诉我最后一份的结论。", "auto", "review-reports");
+  for (let n = 1; n <= 21; n++) {
+    const request = await coordinator.request(n - 1);
+    request.tools({ id: `read-${n}`, name: "read", arguments: { path: `report-${n}.txt` } });
   }
-  const last = await coordinator.request(MAX_REPLY_STEPS);
-  assert.ok(given(last).includes("[步数上限]"), "At the limit she is told this is her last step");
-  // In that step only a message to another Work still goes out.
-  last.tools({ id: "one-more", name: "dock_list", arguments: {} });
+  const readLast = () => client.history(alu.id).then(history => history.entries.find(entry => entry.source === "tool" && entry.toolCallId === "read-21"));
+  await waitFor(async () => !!await readLast(), "The last read did not finish");
+  assert.match(JSON.stringify((await readLast())?.content), /FINAL_REPORT: valve inspected/);
+  const finalRequest = await coordinator.request(21);
+  assert.ok(!given(finalRequest).includes("[步数上限]"));
+  finalRequest.text("最后一份报告确认阀门已检查。");
   await settled(client, alu.id);
-  assert.equal(coordinator.requests.length, MAX_REPLY_STEPS + 1, "The reply ends after its last step");
-  const results = (await client.history(alu.id)).entries.filter((entry) => entry.toolCallId === "one-more" && entry.source === "tool");
-  assert.ok(JSON.stringify(results).includes("这一轮已到步数上限，这个调用没有执行。"), "A call in the last step that is not a message to a Work is not run");
+  assert.ok((await client.history(alu.id)).entries.some(entry => entry.source === "assistant" && entry.visibility === "conversation" && JSON.stringify(entry.content).includes("最后一份报告确认阀门已检查。")));
 });
 
 // Card #667: a child Work never outlives its parent's Worker, so after her Work is opened again she
@@ -176,6 +177,7 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   old.appendMessage({ role: "user", content: "看看有哪些文件", timestamp: 2 });
   old.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "ls-1", name: "bash", arguments: { command: "ls" } }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "toolUse", timestamp: 3, usage: ZERO_USAGE });
   old.appendMessage({ role: "toolResult", toolCallId: "ls-1", toolName: "bash", content: [{ type: "text", text: "README.md" }], isError: false, timestamp: 4 });
+  old.appendCustomMessageEntry("assistant-dock-note", "[步数上限] 这是最后一步。", false);
   old.appendMessage({ role: "assistant", content: [{ type: "text", text: "只有一个 README.md。" }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "stop", timestamp: 5, usage: ZERO_USAGE });
 
   // This fixture supplies the older Pi conversation, rather than waiting for automatic recovery.
@@ -189,6 +191,7 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   const system = (asked.body.messages ?? []).filter((message) => message.role === "system" || message.role === "developer").map((message) => JSON.stringify(message.content)).join("\n");
   assert.ok(system.includes("你是**阿露**") && !system.includes("You are an expert coding assistant."), "Her opening leads the request in place of the old prompt");
   assert.ok(given(asked).includes("只有一个 README.md。"), "She has the old conversation");
+  assert.ok(!given(asked).includes("[步数上限]"), "A persisted internal closing instruction no longer tells her to stop");
   asked.text("README.md。");
   await settled(client, alu.id);
 });

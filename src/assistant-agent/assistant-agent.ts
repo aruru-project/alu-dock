@@ -94,8 +94,6 @@ const RETRY_DELAYS_MS = [2_000, 6_000, 15_000];
 /** A Work that is stopping waits this long at most for her last words to reach Main. */
 const SHUTDOWN_SYNC_MS = 1_000;
 
-/** Requests to the model one reply may make before it is told to wrap up. */
-export const MAX_REPLY_STEPS = 20;
 /** Kept with her conversation: the reminders still waiting. */
 const REMINDERS_STATE_TYPE = "assistant-reminders";
 /** A reminder that came due, in her conversation. */
@@ -197,9 +195,6 @@ class AssistantAgent implements WorkerAgent {
   private readonly savedState = new Map<string, string>();
   /** What her owner said in the reply in progress, as he said it; handed on with the work she gives out. */
   private ownerWords: string[] = [];
-  private steps = 0;
-  /** The reply reached its last step: only messages to other Works still go out. */
-  private closing = false;
   /** Whether the model's context was built from the conversation yet; until then the session alone holds it. */
   private contextReady = false;
   private readonly handoff: Handoff;
@@ -285,20 +280,6 @@ class AssistantAgent implements WorkerAgent {
       steeringMode: "all",
       followUpMode: "all",
       sessionId: session.getSessionId(),
-      finishTurn: (turn) => {
-        this.steps += 1;
-        if (this.closing) return { action: "end" };
-        // Tool results mean she would ask the model again. At the limit she gets one more request to
-        // say where things stand, so a long reply never ends without a word to her owner.
-        if (turn.toolResults.length > 0 && this.steps >= MAX_REPLY_STEPS) {
-          this.closing = true;
-          this.agent.steer(this.dockNote(`[步数上限] 这一轮已经走了 ${MAX_REPLY_STEPS} 步，这是最后一步。现在用几句话向主人交代做到哪了、还差什么；要通知别的 Work 可以用 dock_send。这一步里其他工具都不会执行。`));
-        }
-        return undefined;
-      },
-      beforeToolCall: async ({ toolCall }) => this.closing && toolCall.name !== "dock_send"
-        ? { block: true, reason: "这一轮已到步数上限，这个调用没有执行。" }
-        : undefined,
       // Before every request: a conversation grown long gets its hand-over record started. The record
       // takes its place between replies; only past the point where she cannot go on without one does
       // she wait for it here and go on from it inside the reply.
@@ -691,11 +672,6 @@ class AssistantAgent implements WorkerAgent {
     return false;
   }
 
-  /** A note from Dock inside her reply; clients do not show it. */
-  private dockNote(text: string): AgentMessage {
-    return customMessage(DOCK_NOTE_TYPE, text, false);
-  }
-
   // ---- Her tools beyond memory ------------------------------------------------------------------
 
   private reminderTool(): AgentTool {
@@ -828,8 +804,6 @@ class AssistantAgent implements WorkerAgent {
     if (this.running !== undefined) throw new Error("The assistant is already replying");
     this.runOperationId = operationId;
     this.stopRequested = false;
-    this.steps = 0;
-    this.closing = false;
     const run = (async () => {
       const model = this.model;
       if (model === undefined) return;
@@ -871,8 +845,6 @@ class AssistantAgent implements WorkerAgent {
         }
         if (!this.agent.hasQueuedMessages()) break;
         this.stopRequested = false;
-        this.steps = 0;
-        this.closing = false;
         await this.agent.continue();
       }
     })().catch((error: unknown) => error instanceof Error ? error.message : String(error)).then((failure) => {
@@ -1043,7 +1015,9 @@ class AssistantAgent implements WorkerAgent {
     const { text, changed } = await this.opening.text();
     if (!changed && this.contextReady) return;
     const opening = createInitialSystemMessage(text + this.skills.prompt, this.tools.map(toToolDeclaration));
-    const conversation = this.session.buildSessionContext().messages.filter((message) => message.role !== "system");
+    // Older sessions keep Dock's retired step-limit instructions on disk, not in new model requests.
+    const conversation = this.session.buildSessionContext().messages.filter((message) =>
+      message.role !== "system" && !(message.role === "custom" && message.customType === DOCK_NOTE_TYPE));
     this.agent.state.messages = opening === undefined ? conversation : [opening, ...conversation];
     this.contextReady = true;
   }
