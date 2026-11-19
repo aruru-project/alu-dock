@@ -6,6 +6,7 @@ import {
   DefaultPackageManager,
   getAgentDir,
   ModelRuntime,
+  type ProgressCallback,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
@@ -177,17 +178,10 @@ export async function logoutPiProvider(providerId: string, options: PiEnvironmen
   }
 }
 
-export interface PiPackageProgress {
-  type: "start" | "progress" | "complete" | "error";
-  action: "install" | "remove" | "update" | "clone" | "pull";
-  source: string;
-  message?: string;
-}
-
 /** Install and persist a user-scoped Pi package with Pi's bundled package manager. */
 export async function installPiPackage(
   source: string,
-  options: PiEnvironmentOptions & { cwd?: string; onProgress?: (event: PiPackageProgress) => void } = {},
+  options: PiEnvironmentOptions & { cwd?: string; onProgress?: ProgressCallback } = {},
 ): Promise<{ source: string; agentDir: string }> {
   if (typeof source !== "string" || source.trim().length === 0 || source.length > 16_384 || /[\u0000-\u001f\u007f-\u009f]/u.test(source)) {
     throw new Error("Pi package source must be one non-empty line");
