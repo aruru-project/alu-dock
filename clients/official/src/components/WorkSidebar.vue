@@ -61,10 +61,10 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     <button v-if="resident || (app.connectionContext && assistant.available)" type="button" class="alu-assistant-identity" :class="{ 'is-selected': resident && resident.id === selected?.id }" :aria-label="resident ? `打开${resident.displayName}的对话` : '助手'" :aria-current="resident && resident.id === selected?.id ? 'page' : undefined" @click="openResident">
       <span class="alu-assistant-icon" aria-hidden="true"><Sparkles :size="22" /></span>
       <span class="alu-assistant-heading">
-        <span class="alu-assistant-name">{{ resident?.displayName || 'alu' }}</span>
+        <span class="alu-assistant-name">{{ resident?.displayName || assistant.identity.current || 'alu' }}</span>
         <span v-if="resident" class="alu-instance-state" :class="`is-${workPresence(resident).tone}`" aria-hidden="true" />
       </span>
-      <span class="alu-assistant-model"><template v-if="resident?.executor.model">{{ resident.executor.model.provider }}/<wbr><span>{{ resident.executor.model.id }}</span></template><template v-else>未选择模型</template></span>
+      <span class="alu-assistant-model"><template v-if="resident?.executor.model">{{ resident.executor.model.provider }}/<wbr><span>{{ resident.executor.model.id }}</span></template><template v-else>{{ resident ? '未选择模型' : '正在读取…' }}</template></span>
     </button>
     <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="pairingInProgress" @click="openDirectory">＋ 新建工作</button></div>
     <div class="alu-instance-list">

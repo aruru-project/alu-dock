@@ -406,7 +406,7 @@ async function reload() {
     const result = await currentSessionCall(scope, () => reloadSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration)
     reloadScope.value = scope
     reloadSummary.value = result
-    status.value = residentAssistant.value ? '助手已刷新，对话接着原来的。扩展的加载结果可在助手设置里查看。' : `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
+    status.value = residentAssistant.value ? '助手已刷新，对话接着原来的。扩展的加载结果可在她的状态页查看（点对话上方的名字或状态条）。' : `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
     emit('finished')
   }
   catch (cause) { if (!handOverLostReply(cause, 'reload_session')) mutationFailure(cause, 'sessions') } finally { pending.value = '' }

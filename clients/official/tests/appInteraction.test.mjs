@@ -287,6 +287,10 @@ const refreshControl = (view) => find(find(view, item => item.type === 'details'
 const all = (item, predicate) => [...(predicate(item) ? [item] : []), ...item.children.flatMap(child => all(child, predicate))]
 const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
+const until = async (predicate, message) => {
+  const deadline = Date.now() + 3_000
+  while (!predicate()) { assert.ok(Date.now() < deadline, message); await new Promise(resolve => setImmediate(resolve)) }
+}
 let mounted
 try {
   await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations', 'work-actions'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
@@ -1395,6 +1399,7 @@ try {
     // Main does a change to a line once per operation; the same operation asked again gets its first answer, a refusal too.
     const lineAnswers = new Map()
     const entryAt = (entryId, kind, text, extra = {}) => ({ entryId, at: '2026-11-06T08:05:00.000Z', kind, text, ...extra })
+    let holdPersonaSave, searchBusy = false
     let persona = { document: 'persona', text: '她说话简短。', revision: 'p1' }
     let notes = { document: 'notes', text: '早上先说天气。', revision: 'n1' }
     const fallback = assistantNative
@@ -1409,6 +1414,7 @@ try {
       }
       if (command === 'set_assistant_document') {
         if (args.baseRevision !== persona.revision) throw { code: 'assistant_document_changed', message: 'The document changed since it was read.' }
+        if (holdPersonaSave) await holdPersonaSave.promise
         persona = { document: 'persona', text: args.text, revision: `${persona.revision}+` }
         return structuredClone(persona)
       }
@@ -1441,6 +1447,7 @@ try {
         return holdLineChange ? new Promise((resolve, reject) => holdLineChange(() => { try { resolve(change()) } catch (error) { reject(error) } })) : change()
       }
       if (command === 'assistant_search') {
+        if (searchBusy) throw { code: 'assistant_busy', message: '助手正在处理很多查询，这次没有排上。请稍后再试。' }
         const answer = args.cursor
           ? { hits: [{ session: { ...session, sessionId: 's0', workId: 'retired', name: undefined }, entryId: 'old', at: '2026-11-01T08:00:00.000Z', kind: 'user', snippet: '上周的天气' }] }
           : { hits: [{ session, entryId: 'e3', at: '2026-11-06T08:05:00.000Z', kind: 'assistant', snippet: '…今天上午有雨…' }], nextCursor: 'c2' }
@@ -1512,6 +1519,16 @@ try {
     assert.ok(text(page()).includes('已保存'))
     assert.equal(persona.text, '她说话简短，先给结论。')
     assert.equal(text(entry()).includes('有改动还没有保存'), false)
+    const previousPersona = persona.text
+    holdPersonaSave = Promise.withResolvers()
+    await type('这份正在保存。'); await click(page(), '保存')
+    await type(previousPersona)
+    holdPersonaSave.resolve(); holdPersonaSave = null
+    await until(() => !button(page(), '保存').props.disabled, 'the later draft could not be saved after the first save finished')
+    assert.equal(editor().value, previousPersona)
+    assert.equal(button(page(), '保存').props.disabled, false, 'reverting to the former base during a save leaves the newer edit available')
+    await click(page(), '保存')
+    assert.equal(persona.text, previousPersona)
     // A save whose reply is lost is told once; reading the current version settles whether it went through.
     await click(page(), '手写设定')
     await type('早上先说天气，再说日程。')
@@ -1528,7 +1545,13 @@ try {
     find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
     const search = calls.filter(call => call.command === 'assistant_search').at(-1).args
     assert.deepEqual([search.query, search.from, search.to, search.cursor], ['天气', null, null, null])
+    searchBusy = true
+    await find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await nextTick()
+    await until(() => text(page()).includes('助手正在处理别的查询，请稍后再试。'), 'the owner did not see why the search was refused')
+    searchBusy = false
+    await find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await nextTick()
     const results = () => find(page(), item => item.props['aria-label'] === '搜索结果')
+    await until(() => !!results() && text(results()).includes('今天上午有雨'), 'no search result arrived after the busy reader recovered')
     assert.ok(text(results()).includes('今天上午有雨') && text(results()).includes('早上的闲聊') && text(results()).includes('工作站'), 'a hit shows where it happened and the text around it')
     await click(page(), '更多结果')
     assert.equal(calls.filter(call => call.command === 'assistant_search').at(-1).args.cursor, 'c2')
@@ -1553,7 +1576,7 @@ try {
     await click(timeline(), '保存')
     const rewrite = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
     assert.deepEqual([rewrite.id, rewrite.revision, rewrite.edit], ['7', 1, { text: '早上聊天气，提醒十点的评审。' }])
-    assert.ok(text(timeline()).includes('早上聊天气，提醒十点的评审。') && text(timeline()).includes('已改写') && text(timeline()).includes('你改过'), 'the line shows as rewritten')
+    assert.ok(text(timeline()).includes('早上聊天气，提醒十点的评审。') && text(timeline()).includes('已改写。到她的对话里点“刷新助手（Reload）”后，她按改后的读。') && text(timeline()).includes('你改过'), 'the line shows as rewritten')
     await click(rows()[0], '忘掉')
     const forget = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
     assert.deepEqual([forget.revision, forget.edit], [2, { state: 'forgotten' }], 'forgetting names the revision just read')
@@ -1950,7 +1973,7 @@ try {
     assert.ok(text(page()).includes('已定下：每次都带上') && text(page()).includes('后台整理不会再改'))
     await click(labelled('什么时候用'), '她查的时候才用')
     assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], ['3', 2, { resident: false }])
-    assert.ok(text(page()).includes('已改成她查的时候才用'))
+    assert.ok(text(page()).includes('已改成她查的时候才用：到她的对话里点“刷新助手（Reload）”后，她不再带上它'))
     // Changed by her meanwhile: nothing is changed, the page shows it as it is now and keeps the rewrite.
     await click(page(), '改写')
     await type('改写这条记忆', '主人不吃香菜和葱。')
@@ -1961,6 +1984,8 @@ try {
     await click(page(), '保存改写')
     assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [4, { text: '主人不吃香菜和葱。' }])
     assert.ok(text(page()).includes('已改写') && text(page()).includes('你改的'))
+    await click(labelled('什么时候用'), '每次都带上')
+    assert.ok(text(page()).includes('到她的对话里点“刷新助手（Reload）”后，她会读到它'))
     // A deletion whose reply is lost is said once; sending it again is the same operation, done once.
     loseNextReply = true
     await click(page(), '删除')
@@ -2105,7 +2130,7 @@ try {
     assert.equal(calls.some(call => call.command === 'reorganize_assistant'), false, 'nothing starts over before the owner confirms')
     await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理')
     assert.deepEqual(sent('reorganize_assistant').extractionModel, { provider: 'openai', id: 'gpt-mini' })
-    assert.ok(text(page()).includes('已开始从头整理') && text(page()).includes('2 条记忆') && text(page()).includes('3 行时间线'), text(page()))
+    assert.ok(text(page()).includes('读完之前，她能查到的记忆还不全。') && text(page()).includes('2 条记忆') && text(page()).includes('3 行时间线'), text(page()))
     const startOver = async () => { await click(page(), '用这个模型从头整理'); await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理') }
     // (#295 review 2) Starting over still on its way when another model was chosen and saved: the late
     // answer of the start-over put its own model back in the list, though Main had the one chosen after.
@@ -3455,11 +3480,16 @@ try {
     nameReply = '小满'
     await editName('小满')
     find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    await editName('  小满  ')
     finishName(); await settle()
     assert.equal(entryHint(), '人设、记忆和过去的对话')
+    assert.equal(nameInput().props.value, '小满')
     await click(assistantView, '整理记忆的速度')
     await click(assistantView, 'Fast')
     assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { extractionSpeed: 'fast' }, 'memory speed changes independently, leaving its model and chat speed alone')
+    assert.ok(visibleText(assistantView).includes('已保存为Fast'))
+    await click(assistantView, '关闭'); await click(assistantView, '打开工作列表'); await click(assistantView, '助手')
+    await until(() => !visibleText(assistantView).includes('已保存为Fast') && !!button(assistantView, '整理记忆的速度'), 'a new settings read must retire the receipt for the former speed')
     await click(assistantView, '打开小满的对话')
     assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'the settings page opens the already listed assistant')
     // The control is absent until the Host reports an acceleration tier for this model.
@@ -3605,7 +3635,12 @@ try {
     await click(dialog('停止当前工作？'), '确认')
     assert.equal(assistantApp.works.some(item => item.id === legacy.id), false, 'Stop retires the Pi assistant like any Pi Work')
     retiredWorks.delete(legacy.id)
-    extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
+    extraListed = []
+    await assistantApp.refreshWorksQuietly(); await nextTick()
+    const identity = find(drawer, item => String(item.props.class).split(' ').includes('alu-assistant-identity'))
+    assert.equal(visibleText(find(identity, item => item.props.class === 'alu-assistant-name')), '小满')
+    assert.equal(visibleText(find(identity, item => item.props.class === 'alu-assistant-model')), '正在读取…')
+    stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
     console.log('PASS: resident identity opens her conversation; global rename keeps Session and later drafts across connections; restart, custom quick buttons and legacy Pi controls remain')
   }
 
@@ -3861,10 +3896,6 @@ try {
     commandApp.selectWork('work'); await nextTick()
     button('打开工作列表').props.onClick(); await nextTick()
     button('助手').props.onClick(); await nextTick()
-    const until = async (predicate, message) => {
-      const deadline = Date.now() + 3_000
-      while (!predicate()) { assert.ok(Date.now() < deadline, message); await new Promise(resolve => setImmediate(resolve)) }
-    }
     const lists = () => calls.filter(call => call.command === 'work_catalog').length
     const retries = () => calls.filter(call => call.command === 'run_catalog_command' && call.args.name === 'retry-handoff')
     const warning = '10:00 失败，最早 10:05 后有对话时重试'
@@ -3874,6 +3905,10 @@ try {
     const handoffSection = find(view, item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
     await until(() => text(handoffSection).includes(warning), 'Settings did not refresh the unselected resident status')
     assert.equal(lists(), initialLists + 1)
+    commandApp.applyWorkSnapshot(atHost({ ...her, lifecycle: 'stopping' })); await nextTick()
+    await button('立即重试').props.onClick(); await nextTick()
+    assert.ok(text(handoffSection).includes('助手目前没有运行。请打开她的对话查看状态，恢复后再重试。'))
+    commandApp.applyWorkSnapshot(atHost(her)); await nextTick()
     let finishRetry
     runCatalogNative = args => new Promise(resolve => { finishRetry = () => resolve({ receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }) })
     button('立即重试').props.onClick(); await nextTick()

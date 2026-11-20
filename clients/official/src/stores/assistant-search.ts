@@ -23,7 +23,7 @@ interface LineOutcome { state: 'done' | 'failed'; message: string }
 
 const LINE_CHANGE_NAMES: Record<LineChange, string> = { text: '改写', forgotten: '忘掉', active: '恢复' }
 const LINE_CHANGED: Record<LineChange, string> = {
-  text: '已改写。新开的助手会话按改后的读。',
+  text: '已改写。到她的对话里点“刷新助手（Reload）”后，她按改后的读。',
   forgotten: '已忘掉：不再列出、不再载入，它覆盖的原话还在。可以在「已忘掉的」里恢复。',
   active: '已恢复。',
 }

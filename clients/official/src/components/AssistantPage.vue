@@ -87,7 +87,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
     <nav class="assistant-nav" aria-label="助手分区">
       <button v-for="item in sections" :key="item.id" type="button" class="assistant-nav-item" :class="{ 'is-active': section === item.id }" :aria-current="section === item.id ? 'page' : undefined" @click="section = item.id">
         <component :is="item.icon" :size="16" /><span>{{ item.label }}</span>
-        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts) || (item.id === 'search' && search.hasDrafts) || (item.id === 'settings' && (memory.hasSettingsDrafts || (assistant.identity.draft !== null && assistant.identity.draft !== assistant.identity.current)))" class="assistant-nav-dot" aria-label="有未保存的改动" />
+        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts) || (item.id === 'search' && search.hasDrafts) || (item.id === 'settings' && (memory.hasSettingsDrafts || assistant.identityChanged))" class="assistant-nav-dot" aria-label="有未保存的改动" />
       </button>
     </nav>
 
