@@ -723,7 +723,12 @@ export class PiAgentAdapter {
       ...prompts.diagnostics.map(projectDiagnostic),
       ...(modelError ? [{ severity: "error" as const, message: safeRequiredText(modelError, 2_048, "Model configuration error omitted"), source: "models.json" }] : []),
     ];
-    return projectResources(resources, diagnostics);
+    // Report the loader's actual base source, independent of today's creation settings or any append files.
+    const source = loader.getSystemPromptSource();
+    const systemSource: NonNullable<AgentResourceProjectionBody["systemSource"]> = !source ? { kind: "pi-builtin" }
+      : basename(source.path) !== "SYSTEM.md" ? { kind: "dock-template", name: basename(source.path) }
+      : source.path === join(binding.services.agentDir, "SYSTEM.md") ? { kind: "global-system" } : { kind: "project-system" };
+    return { ...projectResources(resources, diagnostics), systemSource };
   }
 
   private getDocumentResources(): ResourceDto[] {

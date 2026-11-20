@@ -15,6 +15,7 @@ import { MainMachineController, SubHostMachineConnection } from "../src/control/
 import { SystemService } from "../src/control/system-service.js";
 import type { SystemCandidate, SystemCatalogCursor } from "../src/control/protocol.js";
 import { createPiInstance, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { createPiSystemTemplateProvider, piSystemPromptResolver } from "../src/pi/system-template-provider.js";
 
 test("choose and read a system on the target machine before creating Work, save only on request, and retain its actual source on reopen", { timeout: 45_000 }, async (context) => {
@@ -43,11 +44,7 @@ export default function(pi) {
   // Card 271: the Host-selected template must survive a different Worker login-shell HOME.
   const workerHome = join(root, "worker-home");
   await mkdir(workerHome);
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: workerHome, USERPROFILE: workerHome,
-    XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"), XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"),
-    APPDATA: join(home, "appdata"), LOCALAPPDATA: join(home, "localappdata"), TMPDIR: root, TEMP: root, TMP: root,
-    PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
-  for (const key of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"]) if (process.env[key]) env[key] = process.env[key];
+  const env = isolatedProcessEnvironment(workerHome, { PI_CODING_AGENT_DIR: agentDir, npm_config_cache: join(workerHome, ".npm"), TMPDIR: root, TEMP: root, TMP: root });
   const store = new FileCatalogStore(join(root, "catalog", "catalog.json"));
   const workerPids: number[] = [];
   const registryFactory = () => new DockRegistry((input) => createPiInstance({ ...input, agentDir, sessionDir: sessions,
@@ -64,7 +61,9 @@ export default function(pi) {
   const port = await reservePort();
   const settings = new MachineSettingsState(join(root, "listener"));
   await settings.writeMainConnections({ enabled: true, port });
-  const mainRegistry = new DockRegistry(async () => { throw new Error("This flow must create only on the selected machine"); });
+  const mainHome = join(root, "main-home");
+  const mainRegistry = new DockRegistry(async () => { throw new Error("This flow must create only on the selected machine"); }, undefined,
+    { systemService: new SystemService(mainHome, createPiSystemTemplateProvider(join(mainHome, "agent"))) });
   const controller = new MainMachineController({ state: mainState, settingsState: settings, bindAddress: "127.0.0.1",
     mainHostEpoch: mainRegistry.hostEpoch, localSnapshots: () => [] });
   const main = new DockHost({ socketPath: join(root, "main.sock"), registry: mainRegistry, remoteInstances: controller });
@@ -98,6 +97,57 @@ export default function(pi) {
     await writeFile(selectedPath, selectedText);
     const chosen = (await client.systemCatalog(cwd, hostId)).candidates.find((item) => item.path === selectedPath)!;
     assert.equal(chosen.warning, undefined, "UTF-8 BOM JSON remains selectable");
+    const template = { kind: "dock-template", name: "chosen.json" } as const;
+    const global = { kind: "global-system" } as const;
+    const setting = join(home, ".aludock", "work-system-default.json");
+    await context.test("Main and SubHost keep separate defaults and offer only sources usable across directories", async () => {
+      const onMain = await client.hostSystemDefault();
+      assert.deepEqual(onMain.selection, null);
+      await client.setHostSystemDefault({ kind: "dock-template", name: "pi-default.json" });
+      const onSub = await client.hostSystemDefault(hostId);
+      assert.deepEqual(onSub.options.map(option => option.selection), [global, template, { kind: "dock-template", name: "pi-default.json" }]);
+      assert.equal(onSub.selection, null);
+      await client.setHostSystemDefault(template, hostId);
+      assert.deepEqual((await client.hostSystemDefault(hostId)).selection, template);
+      assert.deepEqual((await client.hostSystemDefault()).selection, { kind: "dock-template", name: "pi-default.json" });
+      assert.deepEqual(JSON.parse(await readFile(setting, "utf8")), { selection: template });
+    });
+    await writeFile(setting, JSON.stringify({ selection: template }));
+    await context.test("a new SubHost Work uses its Host template ahead of native project SYSTEM, but explicit and directory choices win", async () => {
+      const page = await client.systemCatalog(cwd, hostId, undefined, 1);
+      assert.partialDeepStrictEqual(page, { defaultSelection: { name: "chosen.json" }, defaultSource: "host" });
+      const hostWork = await client.create(cwd, "Host default on SubHost", undefined, undefined, hostId);
+      assert.partialDeepStrictEqual(await client.resources(hostWork.id), { systemSource: template });
+      await client.setSystemDefault(cwd, all[0]!.id, hostId);
+      assert.partialDeepStrictEqual(await client.systemCatalog(cwd, hostId), { defaultSelection: { kind: "project-system" }, defaultSource: "directory" });
+      // An unreadable machine preference does not invalidate a usable directory or explicit choice.
+      await writeFile(setting, "{invalid");
+      const dirWork = await client.create(cwd, "Directory default ahead of Host", undefined, undefined, hostId);
+      assert.partialDeepStrictEqual(await client.resources(dirWork.id), { systemSource: { kind: "project-system" } });
+      const explicitWork = await client.create(cwd, "Explicit global SYSTEM", undefined, undefined, hostId, all[1]!.workerConfig);
+      assert.partialDeepStrictEqual(await client.resources(explicitWork.id), { systemSource: global });
+      await rm(saved);
+      await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId), { code: "system_default_unavailable" });
+      assert.ok((await client.hostSystemDefault(hostId)).warnings.length);
+      await client.setHostSystemDefault(null, hostId);
+      const native = await client.create(cwd, "Pi chooses again", undefined, undefined, hostId);
+      assert.partialDeepStrictEqual(await client.resources(native.id), { systemSource: { kind: "project-system" } });
+      assert.partialDeepStrictEqual(await client.resources(hostWork.id), { systemSource: template });
+      for (const item of [native, explicitWork, dirWork, hostWork]) await client.stop(item.id);
+    });
+    for (const failure of ["file removed", "invalid body"]) await context.test(`broken Host default (${failure}) fails implicit creation, and can be repaired`, async () => {
+      await writeFile(setting, JSON.stringify({ selection: template }));
+      if (failure === "file removed") await rm(selectedPath); else await writeFile(selectedPath, "{}");
+      try {
+        const page = await client.systemCatalog(cwd, hostId);
+        assert.ok(page.warnings.length && !page.defaultSelection);
+        await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId), { code: "system_default_unavailable" });
+        assert.deepEqual((await client.hostSystemDefault(hostId)).selection, template);
+        await client.setHostSystemDefault(null, hostId);
+        assert.partialDeepStrictEqual(await client.systemCatalog(cwd, hostId), { defaultSource: "pi" });
+      } finally { await writeFile(selectedPath, selectedText); }
+    });
+    await rm(setting, { force: true });
     const longText = "中文 😀 café\n".repeat(9_000);
     await writeFile(join(cwd, ".pi", "SYSTEM.md"), longText);
     let offset: number | undefined, revision: string | undefined, full = "", pages = 0;

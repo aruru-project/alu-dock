@@ -11,7 +11,7 @@ import { FILE_TRANSFER_CAPABILITY, MULTIPLEX_CAPABILITY, isByteStreamRequest } f
 import { ClientLink, MAX_LINK_LINE_BYTES, VirtualProtocolSocket } from "./stream-link.js";
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
-import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
+import { HOST_SYSTEM_DEFAULT_CAPABILITY, SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { CHILD_MODELS_CAPABILITY, MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
 import { ModelVisibilityError, type ModelVisibilityPort } from "./model-visibility.js";
 import type { ChildModelsEditor, ChildModelsSource } from "./child-models.js";
@@ -278,7 +278,9 @@ export class DockHost {
     this.assistant = options.assistant;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
-    if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);
+    if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) {
+      capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY); capabilities.delete(HOST_SYSTEM_DEFAULT_CAPABILITY);
+    }
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
     // A Main that routes to SubHosts keeps its own list too (the CLI always gives it a state directory).
     if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
@@ -1096,6 +1098,14 @@ export class DockHost {
       }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.listSessions(request.params.scope)); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); await this.sendTreeSuccessAndEnd(socket,request.requestId,await instance.getTree()); return; }
+      case "system.host-default.get":
+      case "system.host-default.set": {
+        if (!this.systemService) throw new ProtocolValidationError("capability_missing", "这台机器的 Dock 还不支持设置默认 system。请更新这台机器的 Dock。");
+        const result = request.type === "system.host-default.get"
+          ? await this.systemService.hostDefault(request.params.cursor, request.params.limit)
+          : await this.operationLedger.run(request.params.operationId, request.type, request.params, () => this.systemService!.setHostDefault(request.params.selection));
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "system.catalog":
       case "system.content":
       case "system.default.set": {
