@@ -380,7 +380,7 @@ export interface AssistantHostPort {
 
 /** Refusals the owner can act on; each is also the Protocol V2 error code. */
 export const ASSISTANT_ERROR_CODES = [
-  "assistant_unavailable", "assistant_document_changed", "assistant_document_too_large",
+  "assistant_unavailable", "assistant_busy", "assistant_document_changed", "assistant_document_too_large",
   "assistant_edit_not_found", "assistant_edit_ambiguous", "assistant_entry_not_found", "assistant_query_timeout",
   "assistant_memory_not_found", "assistant_memory_changed", "assistant_memory_merged",
   "assistant_episode_not_found", "assistant_episode_changed", "invalid_request",

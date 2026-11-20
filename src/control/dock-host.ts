@@ -1814,7 +1814,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof AttachmentIntegrityError) return { code: error.code, message: error.message };
   if (error instanceof AttachmentUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof ModelVisibilityError) return { code: error.code, message: error.message, retryable: error.retryable };
-  if (error instanceof AssistantError) return { code: error.code, message: error.message, ...(error.code === "assistant_unavailable" ? { retryable: true } : {}) };
+  if (error instanceof AssistantError) return { code: error.code, message: error.message, ...(error.code === "assistant_unavailable" || error.code === "assistant_busy" ? { retryable: true } : {}) };
   if (error instanceof RoutedControlError) return { code: error.code, message: error.message, retryable: error.retryable, ...(error.details === undefined ? {} : { details: error.details }) };
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };

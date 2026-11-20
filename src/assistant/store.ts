@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
+import { ASSISTANT_DB_BUSY_TIMEOUT_MS } from "./backup.js";
 
 import {
   ASSISTANT_SPOKEN_KINDS,
@@ -240,7 +241,8 @@ export class AssistantStore {
   constructor(path: string, options: { reader?: boolean } = {}) {
     this.db = new DatabaseSync(path);
     try {
-      this.db.exec(options.reader ? "PRAGMA query_only = 1; PRAGMA busy_timeout = 5000;" : "PRAGMA busy_timeout = 5000;");
+      this.db.exec(`PRAGMA busy_timeout = ${ASSISTANT_DB_BUSY_TIMEOUT_MS};`);
+      if (options.reader) this.db.exec("PRAGMA query_only = 1;");
       const tables = (this.db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name);
       const version = tables.includes("meta")
         ? (this.db.prepare("SELECT value FROM meta WHERE key = 'schema'").get() as { value: string } | undefined)?.value
