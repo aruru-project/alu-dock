@@ -40,6 +40,7 @@ import {
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
+import { ASSISTANT_CLIENT_IDENTITY } from "../core/assistant-identity.js";
 import { MAX_MESSAGE } from "../control/protocol.js";
 import { compareCommandDtos, compareToolDtos, type CommandDto, type DiagnosticDto, type ResourceDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
@@ -279,6 +280,7 @@ class AssistantAgent implements WorkerAgent {
     ];
     this.builtInTools = this.tools;
     this.agent = new Agent({
+      identity: ASSISTANT_CLIENT_IDENTITY,
       initialState: { tools: this.tools },
       streamFn: (model, context, options) => models.streamSimple(model, context, { ...options, onPayload: modelSpeed.wrap(options?.onPayload) }),
       convertToLlm,
@@ -933,7 +935,7 @@ class AssistantAgent implements WorkerAgent {
     const model = this.model;
     if (model === undefined) throw new Error("没有可用的模型");
     const reply = await this.models.completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      { signal, onPayload: this.modelSpeed.wrap() });
+      { signal, identity: ASSISTANT_CLIENT_IDENTITY, onPayload: this.modelSpeed.wrap() });
     if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? "模型没有回答");
     if (reply.stopReason === "length") throw new Error("模型的回答被截断了");
     return reply.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");

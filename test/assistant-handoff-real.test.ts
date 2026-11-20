@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
@@ -70,6 +71,7 @@ test("saved hand-over settings guide background writing while she answers, and s
 
   // The record is being written: the model is asked for it and has not answered.
   const writing = await coordinator.request(2);
+  assert.equal(writing.headers["user-agent"], `AluDock-Assistant/${DOCK_VERSION} (${process.platform}; node/${process.version}; ${process.arch})`, "Assistant handoff User-Agent");
   assert.equal(Reflect.get(writing.body, "max_completion_tokens"), 8_192, "The record can use the model's full output budget");
   assert.equal(writing.body.messages?.find((message) => message.role === "system" || message.role === "developer")?.content, handoff.prompt, "The entire saved instruction replaces the factory role and writing rules");
   // #671: routine background work is available on demand, not presented as a chat warning.

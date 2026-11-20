@@ -3,6 +3,7 @@ import { mkdir, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
@@ -33,6 +34,7 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
 
   await client.prompt(alu.id, "我家猫叫什么来着？", "auto", "alu-ask");
   const asked = await coordinator.request(0);
+  assert.equal(asked.headers["user-agent"], `AluDock-Assistant/${DOCK_VERSION} (${process.platform}; node/${process.version}; ${process.arch})`, "Assistant chat User-Agent");
   const prompt = systemMessages(asked.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
   assert.ok(prompt.startsWith("## 身份\n\n你是**阿露**"), `The prompt opens with her persona: ${prompt.slice(0, 200)}`);
   assert.ok(prompt.includes("主人的猫叫团子。"), "The assistant loads the owner's notes");

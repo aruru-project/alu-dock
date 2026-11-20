@@ -1,6 +1,7 @@
 import type { Message, Tool, ToolCall } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
+import { ASSISTANT_CLIENT_IDENTITY } from "../core/assistant-identity.js";
 import type { AssistantModelRef } from "../core/assistant.js";
 import type { ModelSpeedTier } from "../core/model-speed.js";
 import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
@@ -39,7 +40,7 @@ export class MainModelAccess implements ExtractionModel {
       let reply: Awaited<ReturnType<ModelRuntime["completeSimple"]>>;
       try {
         reply = await runtime.completeSimple(model, { systemPrompt: prompt.system, messages, ...(declared ? { tools: declared } : {}) },
-          { signal, onPayload: this.modelSpeed.wrap(undefined, speed) });
+          { signal, identity: ASSISTANT_CLIENT_IDENTITY, onPayload: this.modelSpeed.wrap(undefined, speed) });
       } catch (error) {
         throw failed(name, error instanceof Error ? error.message : String(error));
       }

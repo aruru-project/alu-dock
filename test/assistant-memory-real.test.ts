@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
@@ -37,6 +38,7 @@ test("what she hears becomes a memory and a timeline line her next session start
 
   const reading = await memory.request(0);
   assert.equal(Reflect.get(reading.body, "max_completion_tokens"), 32_768, "Memory extraction uses the model's output budget");
+  assert.equal(reading.headers["user-agent"], `AluDock-Assistant/${DOCK_VERSION} (${process.platform}; node/${process.version}; ${process.arch})`, "Main memory User-Agent");
   const read = JSON.stringify(reading.body.messages);
   assert.ok(read.includes("主人：我不吃香菜，以后点外卖记得避开。"), "Extraction reads what the owner said");
   assert.ok(read.includes("助手：记住啦，香菜退散～"), "Extraction reads what she answered");
