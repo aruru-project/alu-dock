@@ -6,6 +6,8 @@ import { assistantTime, extractionStateLabel } from '../lib/assistant'
 import { modelKey } from '../lib/modelLists'
 import { modelSpeedOptions } from '../lib/settingLabels'
 import type { ModelSpeedTier } from '../lib/types'
+import { isResidentAssistant } from '../lib/uiBoundaries'
+import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
 import { useWorkActionsStore } from '../stores/work-actions'
@@ -13,6 +15,12 @@ import AluSelect from './AluSelect.vue'
 import AssistantIdentity from './AssistantIdentity.vue'
 
 // Main owns the saved settings; the assistant Work reports its own rolling hand-over status.
+const app = useAppStore()
+const handoffStatus = computed(() => {
+  // “滚动整理” corresponds to the Worker's HANDOFF_STATUS_KEY.
+  const status = app.works.find(isResidentAssistant)?.extensionStatus['滚动整理']
+  return typeof status === 'string' ? status : undefined
+})
 const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
 const actions = useWorkActionsStore()
@@ -141,6 +149,8 @@ function choose(value: string) {
   <section class="assistant-setting" aria-labelledby="assistant-handoff-settings">
     <h4 id="assistant-handoff-settings">滚动整理对话</h4>
     <p class="assistant-setting-text">对话变长时，用聊天模型整理较早的内容，保留最近的原话。原始记录不会删除。</p>
+    <p v-if="handoffStatus" class="assistant-note is-warning" role="status">{{ handoffStatus }}</p>
+    <button v-if="handoffStatus" type="button" class="button secondary" @click="actions.retryAssistantHandoff()">立即重试</button>
     <details v-if="handoffValues && handoff.current" class="assistant-handoff-options">
       <summary>整理参数与提示词<span v-if="handoff.draft" class="assistant-handoff-dirty">未保存</span></summary>
       <div class="assistant-handoff-form">

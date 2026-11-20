@@ -463,7 +463,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   watch(() => app.activeConnectionId, () => { assistantStatusError.value = '' })
 
   /** An explicit owner click navigates to her command center before any command is sent. */
-  function openAssistantStatus() {
+  function runAssistantBuiltin(name: 'assistant-status' | 'retry-handoff') {
     assistantStatusError.value = ''
     const assistant = app.works.find(isResidentAssistant)
     if (!assistant) {
@@ -475,8 +475,11 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       return
     }
     app.selectWork(assistant.id)
-    page.openControlCenter('commands', { name: 'assistant-status', source: { kind: 'built-in' } })
+    page.openControlCenter('commands', { name, source: { kind: 'built-in' } }, { run: true })
   }
+
+  function openAssistantStatus() { runAssistantBuiltin('assistant-status') }
+  function retryAssistantHandoff() { runAssistantBuiltin('retry-handoff') }
 
   function acceptCreatedWork(work: Work) {
     page.directoryBusy = false
@@ -494,6 +497,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, checkContinuedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, openAssistantStatus, assistantStatusError, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, openAssistantStatus, retryAssistantHandoff, assistantStatusError, acceptCreatedWork,
   }
 })

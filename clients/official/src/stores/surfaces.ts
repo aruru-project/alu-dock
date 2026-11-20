@@ -38,7 +38,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const commandOpen = ref(false)
   const controlSection = ref<ControlSection>('commands')
   /** Navigation intent only; the command center resolves it against the real catalog. */
-  const requestedCommand = ref<{ workId: string; name: string; source: CommandInfo['source']['kind'] } | null>(null)
+  const requestedCommand = ref<{ workId: string; name: string; source: CommandInfo['source']['kind']; run: boolean } | null>(null)
   const controlTitleOverride = ref('')
   const controlBodyOverride = ref('')
   const controlSizeOverride = ref<'default' | 'wide' | 'tree' | ''>('')
@@ -389,10 +389,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     return ['ui-dialog-box', size === 'tree' ? 'ui-dialog-size-tree' : size === 'wide' ? 'ui-dialog-size-wide' : '']
   }
 
-  function openControlCenter(section: ControlSection, command?: Pick<CommandInfo, 'name' | 'source'>) {
+  function openControlCenter(section: ControlSection, command?: Pick<CommandInfo, 'name' | 'source'>, options?: { run?: boolean }) {
     if (!app.selectedWork || !controlSectionAvailable(section, isResidentAssistant(app.selectedWork))) return
     rememberModalTrigger()
-    requestedCommand.value = command ? { workId: app.selectedWork.id, name: command.name, source: command.source.kind } : null
+    requestedCommand.value = command ? { workId: app.selectedWork.id, name: command.name, source: command.source.kind, run: options?.run === true } : null
     controlTitleOverride.value = ''
     controlBodyOverride.value = ''
     controlSizeOverride.value = ''

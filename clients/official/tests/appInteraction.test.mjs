@@ -3619,7 +3619,8 @@ try {
     extraListed = [her]
     let commands = [
       { referenceId: 'extension-echo', name: 'local-echo', source: { kind: 'extension', package: 'local' }, description: '扩展回显' },
-      { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情' },
+      { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情', argumentCompletions: false },
+      { referenceId: 'retry-handoff', name: 'retry-handoff', source: { kind: 'built-in' }, description: '立即重试滚动整理（对话整理失败后用）', argumentCompletions: false },
     ]
     catalogNative = () => ({ commands: structuredClone(commands), total: commands.length, truncated: false })
     const pinia = createPinia(), commandApp = useAppStore(pinia), actions = compiled.useWorkActionsStore(pinia), view = element('assistant-commands-app')
@@ -3858,20 +3859,45 @@ try {
     assert.equal(!!button('中止命令'), false, 'completed commands no longer show as running')
     await click('关闭')
 
-    commandApp.selectWork('work'); await settle()
-    actions.openAssistantStatus(); await settle()
-    assert.equal(commandApp.selectedWorkId, her.id, 'the detail action navigates from another Work to the actual resident assistant')
-    assert.ok(!!dialog() && text(dialog()).includes('/assistant-status'), 'the real built-in catalog entry is selected before running')
-    snapshot(); await settle()
+    commandApp.selectWork('work'); await nextTick()
+    const openHandoffSettings = async () => {
+      button('打开工作列表').props.onClick(); await nextTick()
+      button('助手').props.onClick(); await nextTick()
+      button('设置').props.onClick(); await nextTick()
+      return find(view, item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
+    }
+    const handoffSection = await openHandoffSettings()
+    assert.equal(!!button('立即重试'), false)
+    const handoffWarning = () => find(handoffSection, item => item.props.role === 'status' && item.props.class === 'assistant-note is-warning')
+    assert.equal(!!handoffWarning(), false)
+    const warning = '10:00 整理失败：模型的回答被截断了。原对话保留，最早 10:05 后下次对话时自动重试，也可在助手设置里立即重试。'
+    her.extensionStatus = { '滚动整理': warning }
+    commandApp.applyWorkSnapshot(atHost(her)); await nextTick()
+    assert.equal(text(handoffWarning()), warning, 'assistant settings show the resident failure even while a different Work is selected')
     const details = '滚动整理\n最近一次完成：2026-11-16 10:00\n当前采用：100000 token 开始整理，保留最近原话约 20000 token。\n\n工具扩展\nlocal：已加载，1 个工具、1 个命令。'
+    const retryReply = '已开始重新整理，聊天照常。完成或失败都会显示在状态栏。'
     runCatalogNative = args => {
-      notify(args.operationId, details)
+      snapshot()
+      notify(args.operationId, args.name === 'assistant-status' ? details : retryReply)
       event('command.handled', { operationId: args.operationId })
       return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
     }
-    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
-    const output = find(dialog(), item => item.props.role === 'log')
-    assert.ok(text(output).includes(details), 'complete detail text appears in the command notification area')
+    for (const [action, name, label, result] of [['立即重试', 'retry-handoff', '运行', retryReply], ['查看运行详情', 'assistant-status', '刷新', details]]) {
+      if (name === 'assistant-status') { commandApp.selectWork('work'); await nextTick(); await openHandoffSettings() }
+      const before = calls.length
+      button(action).props.onClick()
+      const deadline = Date.now() + 3_000
+      while (!dialog() || !text(dialog()).includes(result)) {
+        assert.ok(Date.now() < deadline, `The result of /${name} did not appear after clicking ${action}`)
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      assert.equal(commandApp.selectedWorkId, her.id)
+      assert.deepEqual(calls.slice(before).filter(call => call.command === 'run_catalog_command').map(({ args }) => [args.instanceId, args.name, args.arguments]), [[her.id, name, '']])
+      assert.equal(!!parameters(), false)
+      assert.equal(text(find(dialog(), item => item.props.class === 'cmd-center-run')), label)
+      assert.equal(text(find(dialog(), item => item.props.class === 'cmd-palette-footer cmd-center-footer')), 'Esc 关闭')
+      if (name === 'retry-handoff') { button('关闭').props.onClick(); await nextTick() }
+    }
     assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
     await click('关闭')
 

@@ -148,6 +148,7 @@ const MAX_VISIBLE_COMMAND_CONTENT_CHARS = 4_000_000
 const commandSelectedIndex = ref(0)
 const commandSearchInput = ref<HTMLInputElement | null>(null)
 const commandArgsInput = ref<HTMLInputElement | null>(null)
+const commandRunButton = ref<HTMLButtonElement | null>(null)
 const selectedResource = ref<ResourceInfo | null>(null)
 const pending = ref('')
 let commandTargetRevision = 0
@@ -172,6 +173,10 @@ onUnmounted(panel.onWriteFailed((message) => { error.value = message }))
 watch(resources, (value) => { if (!value) selectedResource.value = null })
 
 const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
+const parameterlessBuiltin = computed(() => {
+  const command = selectedCommand.value
+  return residentAssistant.value && command?.source.kind === 'built-in' && command.argumentCompletions === false && !command.argumentHint
+})
 const dockToolsCommand = computed(() => catalog.commands.find((item) => item.name === 'dock-tools') ?? null)
 const dockTools = computed(() => dockToolsState(props.work.extensionStatus))
 const dockToolsLabel = computed(() => dockTools.value === 'on' ? '已开启' : dockTools.value === 'unavailable' ? '当前不可用' : '已关闭')
@@ -305,6 +310,7 @@ watch([() => surfaces.requestedCommand, () => catalog.state, () => props.work.id
   if (!command) return
   openCommandRunner(command)
   surfaces.requestedCommand = null
+  if (requested.run) void runSelectedCommand()
 }, { immediate: true })
 
 async function closeResource() {
@@ -390,7 +396,7 @@ function openCommandRunner(command: CommandInfo) {
   argumentCompletions.value = []
   commandDetailMode.value = 'runner'
   followingCommandOutput = true
-  void nextTick(() => { commandArgsInput.value?.focus(); showLatestCommandOutput() })
+  void nextTick(() => { (commandArgsInput.value ?? commandRunButton.value)?.focus(); showLatestCommandOutput() })
 }
 
 function backToCatalog() {
@@ -711,7 +717,7 @@ function isCurrentModel(model: ModelInfo) {
       <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
         <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ residentAssistant && selectedCommand.source.kind === 'built-in' ? '内置' : catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="!!pending">{{ pending ? '运行中…' : '运行' }}</button></form>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-if="!parameterlessBuiltin" ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button ref="commandRunButton" class="cmd-center-run" :disabled="!!pending">{{ parameterlessBuiltin && selectedCommand.name === 'assistant-status' ? (pending ? '正在读取…' : '刷新') : (pending ? '运行中…' : '运行') }}</button></form>
         <div v-if="argumentCompletionsLoading || argumentCompletions.length" class="cmd-center-completions" role="listbox" aria-label="参数候选">
           <button v-for="(item, index) in argumentCompletions" :key="`${item.value}:${index}`" type="button" class="cmd-center-completion" @click="chooseArgumentCompletion(item)"><strong>{{ item.label }}</strong><span v-if="item.description">{{ item.description }}</span></button>
           <div v-if="argumentCompletionsLoading && !argumentCompletions.length" class="cmd-center-completion-loading">正在读取参数候选…</div>
@@ -720,7 +726,7 @@ function isCurrentModel(model: ModelInfo) {
           <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : entry.level === 'warning' ? '△' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
           <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果只显示在这里。</div>
         </div>
-        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行，关闭面板后仍继续运行。' : 'Enter 运行 · Esc 关闭' }}</div>
+        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行，关闭面板后仍继续运行。' : parameterlessBuiltin ? 'Esc 关闭' : 'Enter 运行 · Esc 关闭' }}</div>
       </template>
 
       <template v-else-if="selectedCommand && commandDetailMode === 'content'">
