@@ -26,7 +26,7 @@ export async function createDockSystem(port: SystemPort, input: DockCreateInput,
   // Explicitly ordinary for an older target Host that still has directory assistant defaults.
   const assistant = input.child === undefined ? false : undefined;
   if (input.systemId === undefined) {
-    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig, input.child, assistant);
+    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig, input.child, assistant, input.createDirectory);
     return { type: "create", instance: observationStatus(instance) };
   }
   let page = await port.systemCatalog(input.cwd, hostId);
@@ -43,7 +43,7 @@ export async function createDockSystem(port: SystemPort, input: DockCreateInput,
     saved = true;
   }
   try {
-    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig }, input.child, assistant);
+    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig }, input.child, assistant, input.createDirectory);
     return { type: "create", instance: observationStatus(instance), ...(saved ? { defaultSaved: true } : {}) };
   } catch (error) {
     if (saved && error instanceof Error) error.message = `Directory default saved. Work creation did not return success; check Dock before trying again. ${error.message}`;

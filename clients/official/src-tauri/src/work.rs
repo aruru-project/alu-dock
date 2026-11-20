@@ -1015,6 +1015,7 @@ pub(crate) async fn create_work(
     target_host_id: Option<String>,
     worker_config: Option<serde_json::Map<String, Value>>,
     assistant: Option<bool>,
+    create_directory: Option<bool>,
     operation_id: Option<String>,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
@@ -1047,6 +1048,7 @@ pub(crate) async fn create_work(
                     target_host_id.as_deref(),
                     worker_config.as_ref(),
                     assistant,
+                    create_directory,
                 )
                 .await
                 .map_err(CommandError::from)

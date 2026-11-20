@@ -7,10 +7,10 @@ use uuid::Uuid;
 use crate::{
     ActiveInteraction, ClientError, DockClient, Result,
     capabilities::{
-        CATALOG_MAINTENANCE as FORGET_CAPABILITIES, INSTANCE_ADOPT as ADOPT_CAPABILITIES,
-        INSTANCE_CATALOG as INSTANCE_CAPABILITIES, INSTANCE_REOPEN as REOPEN_CAPABILITIES,
-        MACHINES as MACHINE_CAPABILITIES, WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
-        with_assistant_choice,
+        CATALOG_MAINTENANCE as FORGET_CAPABILITIES, CREATE_DIRECTORY_V1,
+        INSTANCE_ADOPT as ADOPT_CAPABILITIES, INSTANCE_CATALOG as INSTANCE_CAPABILITIES,
+        INSTANCE_REOPEN as REOPEN_CAPABILITIES, MACHINES as MACHINE_CAPABILITIES,
+        WORKSPACE_LIST as WORKSPACE_CAPABILITIES, with_assistant_choice,
     },
 };
 
@@ -287,6 +287,8 @@ struct CreateInstanceParams<'a> {
     project_trust_decision: Option<ProjectTrustDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
     assistant: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    create_directory: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -528,8 +530,17 @@ impl DockClient {
         continuation: Option<(&str, ProjectTrustDecision)>,
         operation_id: Option<&str>,
     ) -> Result<InstanceSnapshot> {
-        self.create_instance_for_machine(cwd, name, continuation, operation_id, None, None, None)
-            .await
+        self.create_instance_for_machine(
+            cwd,
+            name,
+            continuation,
+            operation_id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// `assistant` opens the Work as the personal assistant (true) or, against a directory
@@ -545,7 +556,13 @@ impl DockClient {
         target_host_id: Option<&str>,
         worker_config: Option<&serde_json::Map<String, Value>>,
         assistant: Option<bool>,
+        create_directory: Option<bool>,
     ) -> Result<InstanceSnapshot> {
+        let create_directory = create_directory.filter(|create| *create);
+        let mut required = with_assistant_choice(INSTANCE_CAPABILITIES, assistant);
+        if create_directory.is_some() {
+            required.push(CREATE_DIRECTORY_V1);
+        }
         let generated_operation_id = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated_operation_id);
         let (trust_challenge_id, project_trust_decision) = continuation
@@ -563,8 +580,9 @@ impl DockClient {
                     trust_challenge_id,
                     project_trust_decision,
                     assistant,
+                    create_directory,
                 },
-                &with_assistant_choice(INSTANCE_CAPABILITIES, assistant),
+                &required,
                 Some(operation_id),
             )
             .await?;
@@ -1018,6 +1036,7 @@ mod tests {
             trust_challenge_id: None,
             project_trust_decision: None,
             assistant: None,
+            create_directory: None,
         })
         .unwrap();
         assert_eq!(
@@ -1059,6 +1078,7 @@ mod tests {
             trust_challenge_id: None,
             project_trust_decision: None,
             assistant: Some(true),
+            create_directory: None,
         })
         .unwrap();
         assert_eq!(creation["assistant"], true);

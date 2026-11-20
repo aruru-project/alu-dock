@@ -19,6 +19,9 @@ pub struct HostIdentity {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostInfo {
+    /// Advertised by the connected Main's hello, not the host.info body.
+    #[serde(skip)]
+    pub supports_create_directory: bool,
     pub state: String,
     pub host: HostIdentity,
     pub catalog: Value,
@@ -57,14 +60,24 @@ pub async fn host_info_for_profile(
 
 impl DockClient {
     pub async fn host_info(&self) -> Result<HostInfo> {
-        let (result, host_epoch): (HostInfo, String) = self
-            .request_with_host_epoch("host.info", &EmptyParams {}, capabilities::HOST_INFO, None)
+        let (mut result, hello): (HostInfo, _) = self
+            .request_with_hello(
+                "host.info",
+                &EmptyParams {},
+                capabilities::HOST_INFO,
+                None,
+                None,
+            )
             .await?;
-        if result.host.host_epoch != host_epoch {
+        if result.host.host_epoch != hello.host.host_epoch {
             return Err(ClientError::Protocol(
                 "host.info result did not describe the negotiated host epoch".into(),
             ));
         }
+        result.supports_create_directory = hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == capabilities::CREATE_DIRECTORY_V1);
         Ok(result)
     }
 }

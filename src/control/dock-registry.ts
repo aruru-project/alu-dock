@@ -14,7 +14,6 @@ import { AgentModelNotFoundError, AgentStartupTimeoutError, AgentUnavailableBefo
 import { ResourceContentError } from "../core/resource-content.js";
 import type { ObservationDeliverySink } from "../core/instance-observation.js";
 import {
-  type DockChildSelection,
   type DockChildStart,
   type DockToolsHostPort,
   type DockToolsMutationPort,
@@ -23,11 +22,12 @@ import {
   type LocalDockToolsHostPort,
 } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
-import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
+import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import type { JsonObject } from "../core/json-value.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
 import { InstanceBusyError, InstanceNotActiveError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
+import type { CreateInstanceMutation } from "./instance-manager.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { ProtocolValidationError } from "./protocol.js";
@@ -72,20 +72,11 @@ export interface InstanceFactoryInput {
 
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
 
-export interface CreateRegistryInstanceInput {
-  child?: DockChildSelection;
+export interface CreateRegistryInstanceInput extends CreateInstanceMutation {
   modelSpeed?: ModelSpeedSelection;
-  operationId: string;
-  cwd: string;
-  name?: string;
-  trustChallengeId?: string;
-  projectTrustDecision?: ProjectTrustChoice;
-  workerConfig?: JsonObject;
-  /** Omitted: the directory's saved default decides. A child Work is never the assistant. */
-  assistant?: boolean;
 }
 
-export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "child" | "assistant"> {
+export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "child" | "assistant" | "createDirectory"> {
   key: string;
 }
 
@@ -341,6 +332,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     parentActive: () => boolean,
     assistant = false,
   ): Promise<ManagedInstance> {
+    if (input.createDirectory) await createMissingWorkingDirectory(input.cwd);
     // Her own workspace loads no project resources, so opening her does not grant project trust.
     const resolution = assistant
       ? { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: false }
@@ -1174,6 +1166,17 @@ const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
     throw new Error("Dock attachments require managed Host storage");
   },
 };
+
+async function createMissingWorkingDirectory(path: string): Promise<void> {
+  // Don't turn another platform's absolute path into a new relative directory here.
+  if (isPortableAbsoluteLocalPath(path) && !isNativeAbsoluteLocalPath(path)) return;
+  const lexical = resolve(path);
+  try { await stat(lexical); }
+  catch (error) {
+    // Existing paths and all other stat failures keep the normal working-directory check.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") await mkdir(lexical, { recursive: true });
+  }
+}
 
 async function canonicalDirectory(path: string): Promise<string> {
   const lexical = resolve(path);

@@ -148,6 +148,7 @@ export interface HostCatalog {
 }
 
 export interface HostSummary {
+  supportsCreateDirectory?: boolean
   state: string
   hostEpoch: string
   dockVersion: string

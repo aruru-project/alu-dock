@@ -46,6 +46,7 @@ type TrustAttempt = {
   workerConfig?: Record<string, unknown>
   /** The original attempt's "open as the assistant" choice; trust continuation replays it. */
   assistant?: boolean
+  createDirectory?: boolean
   path?: string
   sessionToken?: string
 }
@@ -69,6 +70,8 @@ const machineHostId = ref('')
 const browseStartPath = ref('')
 const browseVersion = ref(0)
 const workspacePath = ref('')
+const missingDirectory = ref<string>()
+const createDirectoryPath = computed(() => app.payload?.host.supportsCreateDirectory ? missingDirectory.value : undefined)
 const sessionPages = useSavedSessionPages()
 const pending = ref<'create' | 'adopt' | 'save' | ''>('')
 const error = ref<DialogError | null>(null)
@@ -146,7 +149,7 @@ const modelChoiceValue = computed(() => modelChoice.value ? modelKey(modelChoice
 const title = computed(() => view.value === 'systems' ? (assistantChoice.value ? '选择身份和 system' : '选择 system') : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
   if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
-  if (view.value === 'browse') return workspacePath.value
+  if (view.value === 'browse') return createDirectoryPath.value ?? workspacePath.value
   if (view.value === 'sessions' && sessionPages.loaded.value) return `${sessionPages.total.value} 个保存的 Session`
   return machine.value?.homePath || ''
 })
@@ -345,7 +348,7 @@ async function confirmSystem() {
       pending.value = ''
     }
   }
-  if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection?.workerConfig, asAssistant)
+  if (epoch === systemEpoch) await createAt(path, hostId, { workerConfig: selection?.workerConfig, assistant: asAssistant })
 }
 
 function clearError() {
@@ -395,6 +398,7 @@ function backToLauncher() {
 function startBrowsing(path = machineWorkspaceStart(machine.value)) {
   if (!machine.value?.available || actionBusy.value) return
   clearError()
+  missingDirectory.value = undefined
   browseStartPath.value = path
   ++browseVersion.value
   workspacePath.value = path
@@ -448,7 +452,9 @@ async function loadInventory() {
   }
 }
 
-async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, systemConfig?: Record<string, unknown>, asAssistant?: boolean) {
+async function createAt(path: string, machineId = machineHostId.value,
+  options: Pick<TrustAttempt, 'workerConfig' | 'assistant' | 'createDirectory'> = {}, continuation?: CreateWorkContinuation) {
+  const { workerConfig: systemConfig, assistant: asAssistant, createDirectory } = options
   if (!isTauri || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
@@ -459,14 +465,14 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const work = await createWork(path, app.captureHostOperation(context), undefined, continuation, machineId, workerConfig, asAssistant)
+    const work = await createWork(path, app.captureHostOperation(context), undefined, continuation, machineId, workerConfig, asAssistant, createDirectory)
     if (!app.contextMatches(context) || epoch !== systemEpoch) return
     trust.value = null
     emit('created', work)
   } catch (cause) {
     if (epoch === systemEpoch) {
-      if (systemCatalogState.value !== 'unsupported') view.value = 'systems'
-      handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path, workerConfig, assistant: asAssistant })
+      if (!createDirectory && systemCatalogState.value !== 'unsupported') view.value = 'systems'
+      handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path, workerConfig, assistant: asAssistant, createDirectory })
     }
   } finally {
     pending.value = ''
@@ -492,7 +498,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
   }
 }
 
-function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken' | 'workerConfig' | 'assistant'>) {
+function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken' | 'workerConfig' | 'assistant' | 'createDirectory'>) {
   const failure = cause as { code?: string; details?: Record<string, unknown>; operationId?: string }
   if (failure?.code === 'project_trust_required') {
     const operationId = String(failure.details?.operationId || failure.operationId || '')
@@ -526,7 +532,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
     trustChallengeId: attempt.trustChallengeId,
     projectTrustDecision: decision,
   }
-  if (attempt.kind === 'create' && attempt.path) void createAt(attempt.path, attempt.machineHostId, continuation, attempt.workerConfig, attempt.assistant)
+  if (attempt.kind === 'create' && attempt.path) void createAt(attempt.path, attempt.machineHostId, attempt, continuation)
   else if (attempt.kind === 'adopt' && attempt.sessionToken) void adoptSaved(attempt.sessionToken, attempt.machineHostId, continuation)
 }
 </script>
@@ -614,10 +620,12 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
           :disabled="actionBusy || !machine.available"
           picker
           @directory="workspacePath = $event"
+          @missing-directory="missingDirectory = $event"
         />
         <footer class="directory-confirm">
-          <span :title="workspacePath">{{ workspacePath }}</span>
-          <button type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || !machine.available" @click="chooseDirectory(workspacePath)">使用这个目录</button>
+          <span :title="body">{{ body }}</span>
+          <button v-if="createDirectoryPath" type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || !machine.available" @click="createAt(createDirectoryPath, machineHostId, { createDirectory: true })">创建这个目录并新建工作</button>
+          <button v-else type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || !machine.available" @click="chooseDirectory(workspacePath)">使用这个目录</button>
         </footer>
       </template>
 

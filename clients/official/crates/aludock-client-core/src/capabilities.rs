@@ -17,6 +17,7 @@ const EXTENSION_UI_V1: &str = "extension_ui.v1";
 const EXTENSION_UI_WIDGETS_V1: &str = "extension_ui.widgets.v1";
 const GIT_BRANCH_FOOTER_V1: &str = "git.branch-footer.v1";
 const HOST_INFO_CAPABILITY: &str = "host.info";
+pub(crate) const CREATE_DIRECTORY_V1: &str = "instance.create.directory.v1";
 const INSTANCE_CATALOG_CAPABILITY: &str = "instance.catalog";
 const INSTANCE_DELIVERABLES_V1: &str = "instance.deliverables.v1";
 const INSTANCE_DISPLAY_NAME_V1: &str = "instance.display-name.v1";

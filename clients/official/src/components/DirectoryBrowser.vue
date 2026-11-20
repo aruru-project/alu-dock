@@ -13,7 +13,7 @@ import {
 } from '../lib/workspaceBrowser'
 import { typedDirectoryTarget } from '../lib/machines'
 import type { MachinePlatform, WorkspaceFileCursor, WorkspaceFileEntry } from '../lib/types'
-import { userErrorMessage, type UserErrorPresentation } from '../lib/userError'
+import { errorCode, userErrorMessage, type UserErrorPresentation } from '../lib/userError'
 import { copyPlainText } from '../lib/clipboard'
 
 const props = defineProps<{
@@ -32,6 +32,7 @@ const showHidden = defineModel<boolean>('showHidden', { default: false })
 const emit = defineEmits<{
   file: [entry: WorkspaceFileEntry]
   directory: [path: string]
+  missingDirectory: [path: string | undefined]
   mobile: [mobile: boolean]
   refresh: []
 }>()
@@ -54,6 +55,8 @@ let mediaQuery: MediaQueryList | undefined
 const listMode = computed(() => isMobile.value || !!props.picker)
 const currentPath = computed(() => listMode.value ? listPath.value : rootPath.value)
 const currentState = computed(() => directories[currentPath.value])
+watch(() => props.picker && currentState.value?.errorCode === 'workspace_not_found' ? currentPath.value : undefined,
+  path => emit('missingDirectory', path))
 const currentParent = computed(() => currentState.value?.parent ?? (listMode.value ? trail.value.at(-2)?.path : undefined))
 const selected = computed(() => props.picker ? selectedDirectory.value : props.selectedPath)
 // The filter only narrows the level being viewed; entering a directory clears it.
@@ -99,6 +102,7 @@ async function loadDirectory(path: string, reset = false) {
   const token = ++state.loadToken
   state.loading = true
   state.error = ''
+  state.errorCode = undefined
   state.diagnostic = undefined
   state.diagnosticCopyState = undefined
   try {
@@ -117,6 +121,7 @@ async function loadDirectory(path: string, reset = false) {
       const presentation = props.describeError?.(cause, path)
         ?? { message: userErrorMessage(cause, '无法读取这个目录。请检查连接后重试。') }
       state.error = presentation.message
+      state.errorCode = errorCode(cause)
       state.diagnostic = presentation.diagnostic
     }
   } finally {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -107,6 +107,27 @@ test("official Rust client reads and edits the assistant on Main, finds her conv
     assert.match(result.stdout, /assistant gate: workspace=\S+ hits=1 context=2 day=2 history=5 waiting=1 lines=1/u);
   } finally {
     await stopChild(host);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("official Rust client uses the Main's advertised option to start a Work in a missing directory", { timeout: 20_000 }, async (context) => {
+  const { DockHost } = await import("../../src/control/dock-host.js");
+  const { DockRegistry } = await import("../../src/control/dock-registry.js");
+  const { ManagedInstance } = await import("../../src/core/managed-instance.js");
+  const { DelayedAgentWorkerConnection } = await import("../support/delayed-agent-worker.js");
+  const root = await mkdtemp(join(tmpdir(), "alu-rust-new-dir-"));
+  const cwd = join(root, "new", "project");
+  const registry = new DockRegistry(async input => new ManagedInstance({ ...input, session: new DelayedAgentWorkerConnection(input.id) }));
+  const host = new DockHost({ registry, socketPath: join(root, "dock.sock") });
+  try {
+    await host.start();
+    const gate = resolve(process.env.CARGO_TARGET_DIR ?? "clients/official/target", "debug/examples/protocol_create_directory");
+    const result = await run(gate, [host.socketPath, join(root, "identity"), cwd], isolatedProcessEnvironment(root), context.signal);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok((await stat(cwd)).isDirectory());
+  } finally {
+    await host.stop();
     await rm(root, { recursive: true, force: true });
   }
 });

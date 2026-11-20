@@ -96,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             host_id,
             Some(&chosen.worker_config),
             None,
+            None,
         )
         .await;
     let challenge = match first {
@@ -120,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(operation),
             host_id,
             Some(&chosen.worker_config),
+            None,
             None,
         )
         .await?;

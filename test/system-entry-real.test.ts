@@ -158,7 +158,7 @@ test("TUI and native Agent tools choose, read and explicitly save systems before
   const chosen = (await client.systemCatalog(peerCwd)).candidates.find((item) => item.name === "chosen.json")!;
   script = [
     { name: "dock_machines", arguments: {} },
-    { name: "dock_create", arguments: { cwd: peerCwd, name: "Native fallback" } },
+    { name: "dock_create", arguments: { cwd: join(peerCwd, "new", "project"), createDirectory: true, name: "Native fallback" } },
     { name: "dock_system", arguments: { cwd: peerCwd } },
     { name: "dock_system", arguments: { cwd: peerCwd, id: chosen.id } },
     { name: "dock_create", arguments: { cwd: peerCwd, name: "Agent chosen", machine: "Fixture Main", systemId: chosen.id, saveDefault: true } },
@@ -168,7 +168,7 @@ test("TUI and native Agent tools choose, read and explicitly save systems before
   const peer = (await client.list()).find((item) => item.name === "Agent chosen")!;
   assert.equal(registry.list().length, 3, "no configured default uses Pi native behavior, not an arbitrary candidate");
   const nativePeer = registry.list().find((item) => item.name === "Native fallback")!;
-  assert.ok(nativePeer);
+  assert.equal(nativePeer?.cwd, join(peerCwd, "new", "project"));
   assert.equal((await client.resources(nativePeer.id)).resources.some((item) => item.path?.endsWith("chosen.json")), false);
   assert.equal(registry.dockToolsEnabled(peer.id), true);
   const texts = received.flatMap((request) => request.messages.filter((message) => message.role === "tool").map((message) => message.content ?? "")).join("\n");
