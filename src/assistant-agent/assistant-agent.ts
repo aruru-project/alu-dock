@@ -41,6 +41,7 @@ import {
 } from "../core/agent-worker.js";
 import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
 import { ASSISTANT_CLIENT_IDENTITY } from "../core/assistant-identity.js";
+import { MAX_TEXT_CHARS } from "../core/instance-dto.js";
 import { MAX_MESSAGE } from "../control/protocol.js";
 import { compareCommandDtos, compareToolDtos, type CommandDto, type DiagnosticDto, type ResourceDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
@@ -56,6 +57,7 @@ import { appendDockAttachmentContext } from "../pi/dock-attachment-context.js";
 import {
   loadAttachmentContextKey,
   loadPiImages,
+  boundedString,
   PiConversationProjector,
   PiSessionConversation,
   type PiConversationSource,
@@ -204,6 +206,7 @@ class AssistantAgent implements WorkerAgent {
   /** Whether the model's context was built from the conversation yet; until then the session alone holds it. */
   private contextReady = false;
   private readonly handoff: Handoff;
+  private manualCompacting = false;
   /** What clients are shown of her conversation: from the hand-over record before the latest one on. */
   private readonly shown: RecentConversation;
   /** The entries Main said were forgotten when it was last asked. */
@@ -297,8 +300,7 @@ class AssistantAgent implements WorkerAgent {
           const stopped = new Promise<void>((done) => signal?.addEventListener("abort", () => done(), { once: true }));
           await Promise.race([this.handoff.require(tokens), stopped]);
           if (signal?.aborted) return undefined;
-          const record = this.handoff.take();
-          if (record !== undefined && await this.takeOver(record, true)) context = { ...context, messages: [...this.agent.state.messages] };
+          if (await this.handoff.adopt(record => this.takeOver(record, true))) context = { ...context, messages: [...this.agent.state.messages] };
         }
         // Each request (including retries) takes the latest choice; one already in flight is left alone.
         return { ...(this.model === undefined ? {} : { model: this.model }), thinkingLevel: this.thinkingLevel, context };
@@ -356,7 +358,7 @@ class AssistantAgent implements WorkerAgent {
       ...(sessionFile === undefined ? {} : { sessionFile }),
       ...(durable ? { durableSessionFile: sessionFile } : {}),
       isStreaming: this.running !== undefined,
-      isCompacting: false,
+      isCompacting: this.manualCompacting,
       modelState: this.modelState(),
       metrics: this.metrics(),
       extensionCommands: [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog].map(command => command.name).sort(),
@@ -423,9 +425,7 @@ class AssistantAgent implements WorkerAgent {
         this.tell(NO_OTHER_SESSION);
         return { cancelled: true };
       case "session.reload": return this.reload(request.params.operationId);
-      case "session.compact":
-        this.tell("助手的对话由她自己整理，不用手动压缩。");
-        throw new AgentCompactionKnownFailureError("nothing_to_compact", "The assistant keeps her own conversation short");
+      case "session.compact": return this.compact(request.params.operationId, request.params.customInstructions);
       case "session.compaction.prompts": throw this.notHers("助手的对话由她自己整理，没有可以查看的压缩提示。");
       case "bash.run": case "bash.abort": throw this.notHers("助手自己不跑命令。请在别的 Work 里运行。");
       case "tool.set_active":
@@ -795,6 +795,7 @@ class AssistantAgent implements WorkerAgent {
 
   private async abort(): Promise<void> {
     this.extensions.abortCommands();
+    this.handoff.abortManual();
     if (this.running === undefined) return;
     this.stopRequested = true;
     this.retryWait?.abort();
@@ -895,8 +896,8 @@ class AssistantAgent implements WorkerAgent {
       await this.dropForgotten();
     } else void this.recorder.sync();
     if (this.running !== undefined) return;
-    const record = this.handoff.take();
-    if (record !== undefined) await this.takeOver(record);
+    const adoption = this.handoff.adopt(record => this.takeOver(record));
+    if (adoption !== undefined) await adoption;
     else if (this.contextReady) this.handoff.consider(estimateContextTokens(convertToLlm(this.agent.state.messages)).tokens);
   }
 
@@ -916,6 +917,7 @@ class AssistantAgent implements WorkerAgent {
       if (!insideReply) await this.dropForgotten(forgotten);
       return false;
     }
+    if (!this.handoff.beginCommit(record)) return false;
     this.session.appendCompaction(record.summary, record.firstKeptEntryId, record.tokensBefore);
     cleanupSessionResources(this.session.getSessionId());
     if (!insideReply) await this.dropForgotten(forgotten);
@@ -925,6 +927,25 @@ class AssistantAgent implements WorkerAgent {
     this.publish(this.checkpoint());
     void this.recorder.sync();
     return true;
+  }
+
+  private async compact(operationId: string, customInstructions?: string) {
+    this.manualCompacting = true;
+    this.publish({ type: "compaction_start", reason: "manual", operationId });
+    let errorMessage: string | undefined;
+    let aborted = false;
+    try {
+      const record = await this.handoff.compact(customInstructions);
+      return { summary: boundedString(record.summary, MAX_TEXT_CHARS, ""), firstKeptEntryId: record.firstKeptEntryId, tokensBefore: record.tokensBefore };
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      aborted = error instanceof AgentCompactionKnownFailureError && error.reason === "cancelled";
+      throw error;
+    } finally {
+      this.manualCompacting = false;
+      this.publish({ type: "compaction_end", reason: "manual", operationId, aborted, willRetry: false,
+        ...(errorMessage === undefined ? {} : { errorMessage }) });
+    }
   }
 
   /** One request to her model outside the conversation. */

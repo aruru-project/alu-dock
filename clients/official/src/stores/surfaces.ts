@@ -345,6 +345,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   function controlDialogTitle(section: ControlSection) {
     if (isResidentAssistant(app.selectedWork)) {
+      if (section === 'compact-session') return '立即整理对话'
       if (section === 'reload-session') return '刷新助手（Reload）'
       if (section === 'tools') return '她能用的工具'
       if (section === 'resources') return '助手状态'

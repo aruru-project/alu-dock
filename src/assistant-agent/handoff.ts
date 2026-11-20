@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { buildSessionProjection, convertToLlm, estimateTokens, serializeConversation, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
+import { AgentCompactionKnownFailureError } from "../core/agent-worker.js";
 import type { AssistantHandoffSettings } from "../core/assistant.js";
 import { shortLocalTime } from "../core/local-time.js";
 import { DOCK_NOTE_TYPE, STATUS_NOTE_TYPE } from "./status.js";
@@ -66,6 +67,9 @@ export interface HandoffDeps {
 export class Handoff {
   private writing: { promise: Promise<void>; cancel: AbortController; startedAt: Date } | undefined;
   private record: HandoffRecord | undefined;
+  private adopting: { record: HandoffRecord; committed: boolean } | undefined;
+  /** The Host admits one manual compact at a time. It finishes at the same adoption point as a background write. */
+  private manual: { resolve(record: HandoffRecord): void; reject(error: Error): void } | undefined;
   private settings: AssistantHandoffSettings | undefined;
   private reading: Promise<void> | undefined;
   private settingsError: string | undefined;
@@ -107,7 +111,7 @@ export class Handoff {
     const epoch = this.epoch;
     void this.refresh().then(() => {
       if (this.stopped || epoch !== this.epoch || this.settings === undefined) return;
-      if (tokens < this.limits().startTokens || this.writing !== undefined || this.record !== undefined) return;
+      if (tokens < this.limits().startTokens || this.writing !== undefined || this.record !== undefined || this.adopting !== undefined) return;
       if ((this.deps.now ?? Date.now)() < this.retryAt) return;
       this.start(true);
     });
@@ -118,8 +122,8 @@ export class Handoff {
     await this.refresh();
     if (this.settings === undefined) return "还没读到滚动整理设置，暂时不能整理。之后会自动重新读取。";
     if (this.writing !== undefined) return "已经在整理，完成后状态栏会更新。";
-    if (this.record !== undefined) {
-      this.deps.ready();
+    if (this.record !== undefined || this.adopting !== undefined) {
+      if (this.record) this.deps.ready();
       return "交接记录已经写好，会在下一轮回复前采用。";
     }
     const { startTokens } = this.limits();
@@ -127,6 +131,28 @@ export class Handoff {
     this.retryAt = 0;
     this.start(true);
     return this.writing === undefined ? "现在没有可以整理的较早对话。" : "已开始重新整理，聊天照常。完成或失败都会显示在状态栏。";
+  }
+
+  compact(instructions?: string): Promise<HandoffRecord> {
+    return new Promise<HandoffRecord>((resolve, reject) => {
+      this.manual = { resolve, reject };
+      void this.prepareManual(instructions, this.epoch).catch(reject);
+    }).finally(() => { this.manual = undefined; });
+  }
+
+  private async prepareManual(instructions: string | undefined, epoch: number): Promise<void> {
+    if (!this.writing && !this.record && !this.adopting) await this.refresh();
+    if (this.stopped || this.epoch !== epoch || this.writing?.cancel.signal.aborted) throw new AgentCompactionKnownFailureError("cancelled", "Compaction cancelled");
+    if (!this.writing && !this.record && !this.adopting) {
+      if (!this.settings) throw new AgentCompactionKnownFailureError("failed", this.settingsError ?? "Main 尚未提供滚动整理设置");
+      this.start(true, instructions);
+      if (!this.writing) {
+        const message = "现在没有可以整理的较早对话。";
+        this.deps.tell(message);
+        throw new AgentCompactionKnownFailureError("nothing_to_compact", message);
+      }
+    }
+    if (this.record) this.deps.ready();
   }
 
   private limits(): HandoffLimits { return handoffLimits(this.deps.contextWindow(), this.settings); }
@@ -141,31 +167,60 @@ export class Handoff {
    */
   async require(tokens: number): Promise<void> {
     // No valid configuration yet: keep the whole conversation, never guess a prompt.
-    if (!this.mustWait(tokens) || this.record !== undefined) return;
+    if (!this.mustWait(tokens) || this.record !== undefined || this.adopting !== undefined) return;
     const epoch = this.epoch;
     // Only the existing high-water wait can wait for settings; ordinary requests never do.
     await this.refresh();
-    if (this.stopped || epoch !== this.epoch || tokens < this.limits().mustTokens || this.record !== undefined) return;
+    if (this.stopped || epoch !== this.epoch || tokens < this.limits().mustTokens || this.record !== undefined || this.adopting !== undefined) return;
     if (this.writing === undefined) this.start(false);
     await this.writing?.promise;
   }
 
-  /** The finished record, handed over once. */
-  take(): HandoffRecord | undefined {
+  /** Adopt the ready record once. Only report a manual compact after adoption actually completes. */
+  adopt(use: (record: HandoffRecord) => Promise<boolean>): Promise<boolean> | undefined {
     const record = this.record;
+    if (!record) return undefined;
     this.record = undefined;
-    return record;
+    const adoption = this.adopting = { record, committed: false };
+    return use(record).then(applied => {
+      if (this.adopting !== adoption) return false;
+      if (applied) this.manual?.resolve(record);
+      else this.manual?.reject(new AgentCompactionKnownFailureError("cancelled", "Compaction cancelled"));
+      return applied;
+    }, (error: unknown) => {
+      if (this.adopting === adoption) this.manual?.reject(new AgentCompactionKnownFailureError("failed", error instanceof Error ? error.message : String(error)));
+      throw error;
+    }).finally(() => { if (this.adopting === adoption) this.adopting = undefined; });
+  }
+
+  /** Called immediately before the synchronous session append, after the last asynchronous read. */
+  beginCommit(record: HandoffRecord): boolean {
+    if (this.adopting?.record !== record) return false;
+    this.adopting.committed = true;
+    return true;
+  }
+
+  abortManual(): void {
+    if (!this.manual || this.adopting?.committed) return;
+    this.adopting = undefined;
+    this.discard();
   }
 
   /** A record that may tell something forgotten meanwhile is thrown away; the next look writes another. */
   discard(): void {
     this.epoch += 1;
     this.writing?.cancel.abort();
+    if (!this.adopting) this.manual?.reject(new AgentCompactionKnownFailureError("cancelled", "Compaction cancelled"));
     this.record = undefined;
     this.showStatus();
   }
 
-  stop(): void { this.stopped = true; this.epoch += 1; this.writing?.cancel.abort(); }
+  stop(): void {
+    this.stopped = true;
+    this.epoch += 1;
+    this.writing?.cancel.abort();
+    this.manual?.reject(new AgentCompactionKnownFailureError("cancelled", "Compaction cancelled"));
+  }
 
   get problem(): string | undefined {
     if (this.settingsError !== undefined) return `滚动整理：${this.settingsError}`;
@@ -181,7 +236,7 @@ export class Handoff {
       : undefined);
   }
 
-  private start(background: boolean): void {
+  private start(background: boolean, instructions?: string): void {
     // Capture one complete configuration. Reading newer settings never changes a write in flight.
     const settings = this.settings!;
     const limits = this.limits();
@@ -189,13 +244,13 @@ export class Handoff {
     if (prepared === undefined) return;
     const startedAt = new Date((this.deps.now ?? Date.now)());
     const cancel = new AbortController();
-    const promise = this.write(prepared, settings.prompt, cancel.signal).then((record) => {
+    const promise = this.write(prepared, instructions ? `${settings.prompt}\n\n${instructions}` : settings.prompt, cancel.signal).then((record) => {
       if (cancel.signal.aborted) return;
       this.failures = 0;
       this.toldFailure = false;
       this.record = record;
       this.failureReason = undefined;
-      if (background) this.deps.ready();
+      if (background || this.manual) this.deps.ready();
     }, (error: unknown) => {
       if (cancel.signal.aborted) return;
       const at = (this.deps.now ?? Date.now)();
@@ -204,6 +259,7 @@ export class Handoff {
       this.retryAt = at + RETRY_MINUTES[Math.min(this.failures, RETRY_MINUTES.length - 1)]! * 60_000;
       this.failures += 1;
       this.failureReason = reason;
+      this.manual?.reject(new AgentCompactionKnownFailureError("failed", reason));
       if (this.toldFailure) return;
       this.toldFailure = true;
       this.deps.tell(`对话整理没有成功（${reason}）。原对话保留，下次对话时会自动重试，也可以在助手设置的“滚动整理对话”里立即重试。`);

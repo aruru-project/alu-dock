@@ -3532,7 +3532,7 @@ try {
     assert.equal(!!button(assistantView, '设置模型速度'), false, 'a model without acceleration tiers does not show the speed entry')
     settingsNative = undefined; updateSettingNative = undefined
     const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
-    assert.deepEqual(quickNames(), ['自选 Fork', '问候', '说明', '填入恢复'], 'only exactly executed Pi controls are hidden; custom text and insert buttons remain')
+    assert.deepEqual(quickNames(), ['自选 Fork', '压缩', '问候', '说明', '填入恢复'], 'only exactly executed Pi controls are hidden; custom text and insert buttons remain')
     const beforeInsert = calls.filter(call => call.command === 'submit_message').length
     await click(assistantView, '填入恢复')
     assert.equal(assistantApp.currentDraft, '/resume')
@@ -3547,12 +3547,24 @@ try {
     composer().props['onUpdate:modelValue']('/res'); await settle()
     const suggestions = all(assistantView, item => item.props.role === 'option').map(text).join(' ')
     assert.equal(suggestions.includes('/resume'), false, 'slash suggestions do not offer a second conversation')
+    composer().props['onUpdate:modelValue']('/compact'); await nextTick()
+    find(assistantView, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} }); await nextTick()
+    const compactPanel = dialog('立即整理对话')
+    assert.ok(!!compactPanel && !!find(compactPanel, item => item.props.id === 'compaction-instructions'))
+    assert.equal(text(compactPanel).includes('查看默认压缩提示'), false)
+    const beforeCompact = calls.length
+    compactNative = args => ({ result: { summary: '记录已采用', firstKeptEntryId: 'kept', tokensBefore: 500 }, instance: atHost(her) })
+    find(compactPanel, item => item.props.id === 'compaction-instructions').props['onUpdate:modelValue']('保留日期'); await nextTick()
+    button(compactPanel, '开始整理').props.onClick()
+    await until(() => calls.slice(beforeCompact).some(call => call.command === 'compact_session' && call.args.customInstructions === '保留日期'), 'The assistant compaction panel did not send the instructions')
+    compactNative = undefined
     composer().props['onUpdate:modelValue']('还没发完的话'); await settle()
     await click(assistantView, '打开命令中心')
     const paletteLabels = () => all(dialog('命令中心'), item => String(item.props.class).split(' ').includes('cmd-palette-item-label')).map(text)
-    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '压缩']) {
+    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复']) {
       assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
     }
+    assert.ok(paletteLabels().includes('立即整理对话') && text(dialog('命令中心')).includes('现在就把较早的对话整理成交接记录，不等对话变长'))
     assert.ok(paletteLabels().includes('Rename Session'), 'session naming stays separate from the global identity label')
     // Seen in the real Desktop trial: state and resources had become two identical entries.
     assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)

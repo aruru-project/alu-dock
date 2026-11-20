@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { DockEvent } from "../src/core/instance-dto.js";
 import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam } from "./support/native-team.js";
@@ -102,7 +103,11 @@ test("saved hand-over settings guide background writing while she answers, and s
   const retry = await coordinator.request(4);
   assert.equal(system(retry), system(writing), "The new request is another hand-over write, without waiting for the cooldown");
   assert.match((await status())!, /^正在重试（(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 开始）$/u);
+  const joined = client.compactSession(alu.id, "已有写作不重新开始。", "join-background");
+  void joined.catch(() => {});
+  await waitFor(async () => (await client.status(alu.id)).compacting, "The manual request did not join the held write");
   retry.text("主人周末要去爬山；她答应到时候提醒他带上要带的东西。");
+  assert.equal((await joined).result.summary, "主人周末要去爬山；她答应到时候提醒他带上要带的东西。");
   await waitFor(async () => (await records(client, alu.id)).length === 1, "The hand-over record did not take its place");
 
   await waitFor(async () => (await status()) === undefined, "The status bar did not clear after the successful retry");
@@ -126,6 +131,70 @@ test("saved hand-over settings guide background writing while she answers, and s
   const resident = await team.assistantWork();
   assert.equal(await handoffDiagnostic(reopened, resident.id), undefined);
   assert.equal((await reopened.status(resident.id)).extensionStatus["滚动整理"], undefined, "A healthy idle assistant leaves the chat status bar clear");
+});
+
+test("manual compaction writes below the threshold, keeps chatting, and returns only an adopted record", { timeout: 60_000 }, async context => {
+  const { client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-manual-handoff-");
+  const handoff = { startTokens: 55_000, keepRecentTokens: 100, prompt: "把较早的对话写成交接记录。" };
+  await client.setAssistantSettings({ handoff });
+  const events: DockEvent[] = [];
+  const follow = await client.streamEvents(alu.id, { onEvent: event => { events.push(event); } });
+  context.after(async () => { follow.close(); await follow.done.catch(() => {}); });
+  await assert.rejects(client.compactSession(alu.id), { code: "compaction_not_needed", message: "现在没有可以整理的较早对话。" });
+  await waitFor(() => events.some(event => event.type === "extension.notification" && event.data.message === "现在没有可以整理的较早对话。"), "Missing nothing-to-compact notice");
+  for (let index = 0; index < 2; index++) {
+    await client.prompt(alu.id, `资料 ${index}`, "auto", `manual-data-${index}`);
+    (await coordinator.request(index)).text("记住了。");
+    await settled(client, alu.id);
+  }
+  await client.prompt(alu.id, "继续聊天", "auto", "while-compacting");
+  const chatting = await coordinator.request(2);
+  const compact = client.compactSession(alu.id, "这次请记下日期。", "manual-record");
+  void compact.catch(() => {});
+  const writing = await coordinator.request(3);
+  assert.equal(writing.body.messages?.find(message => message.role === "system" || message.role === "developer")?.content, `${handoff.prompt}\n\n这次请记下日期。`);
+  writing.text("较早的资料已交接。");
+  assert.equal(chatting.closed, false, "Manual compaction must leave the running reply intact");
+  chatting.text("回复完了。");
+  const result = await compact;
+  assert.equal(result.result.summary, "较早的资料已交接。");
+  assert.ok(result.result.firstKeptEntryId && result.result.tokensBefore > 0);
+  assert.ok((await records(client, alu.id)).some(record => JSON.stringify(record.content).includes(result.result.summary)));
+  assert.deepEqual((await client.assistantSettings()).handoff, handoff);
+  await waitFor(() => events.some(event => event.type === "compaction.completed" && event.data.operationId === "manual-record" && event.data.reason === "manual"), "Missing manual completion");
+  assert.ok(events.some(event => event.type === "compaction.started" && event.data.operationId === "manual-record" && event.data.reason === "manual"));
+  await client.prompt(alu.id, "再补充一件事", "auto", "more-to-compact");
+  (await coordinator.request(4)).text("行。");
+  await settled(client, alu.id);
+  const cancelled = assert.rejects(client.compactSession(alu.id, undefined, "manual-stop"), { code: "compaction_cancelled" });
+  const cancelledWrite = await coordinator.request(5);
+  await client.abort(alu.id, "abort-only-compaction");
+  await cancelled;
+  await waitFor(() => cancelledWrite.closed, "Stop did not cancel the handoff model request");
+  assert.equal((await client.status(alu.id)).extensionStatus["滚动整理"], undefined);
+  assert.equal(await handoffDiagnostic(client, alu.id), undefined);
+  assert.equal((await records(client, alu.id)).length, 1);
+  const failure = assert.rejects(client.compactSession(alu.id, undefined, "manual-failure"), { code: "compaction_failed", message: "模型没有写出交接记录" });
+  const failing = await coordinator.request(6);
+  assert.equal(failing.body.messages?.find(message => message.role === "system" || message.role === "developer")?.content, handoff.prompt);
+  failing.text(" ");
+  await failure;
+  await waitFor(() => events.some(event => event.type === "compaction.completed" && event.data.operationId === "manual-failure" && event.data.error === "模型没有写出交接记录"), "Missing failed manual completion");
+  assert.equal((await handoffDiagnostic(client, alu.id))?.message, "滚动整理失败原因：模型没有写出交接记录");
+
+  await client.prompt(alu.id, "翻翻记忆再回答", "auto", "high-water-chat");
+  const toolTurn = await coordinator.request(7);
+  await client.setAssistantSettings({ handoff: { ...handoff, startTokens: 10, keepRecentTokens: 1 } });
+  const duringTools = client.compactSession(alu.id, undefined, "manual-before-next-step");
+  void duringTools.catch(() => {});
+  (await coordinator.request(8)).text("在工具轮之间采用的记录");
+  toolTurn.tools({ id: "read-memory", name: "assistant_search", arguments: { query: "较早" } });
+  const continued = await coordinator.request(9);
+  assert.ok(given(continued).includes("在工具轮之间采用的记录"));
+  assert.equal((await duringTools).result.summary, "在工具轮之间采用的记录", "The manual command returns while the next chat request is still open");
+  await client.setAssistantSettings({ handoff });
+  continued.text("查完了。");
+  await settled(client, alu.id);
 });
 
 // Card #667: what she is told to forget is no longer in front of her either: not where it was said

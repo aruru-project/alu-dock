@@ -507,10 +507,10 @@ function time(value?: string | null) { return treeNodeTime(value) }
             <textarea id="compaction-instructions" v-model="compactDraft" class="ui-dialog-editor" rows="4" placeholder="例如：保留关键决策、未完成事项和相关文件路径。" aria-describedby="compaction-hint" :disabled="compactionPending || work.compacting" />
             <p id="compaction-hint" class="compaction-hint">留空使用默认提示；填写后作为补充，不替换默认提示。</p>
           </div>
-          <button ref="promptLink" type="button" class="compaction-prompt-link" @click="openPromptReader"><BookOpen :size="16" /><span>查看默认压缩提示</span><span class="compaction-readonly">只读</span><ChevronRight :size="15" /></button>
+          <button v-if="!residentAssistant" ref="promptLink" type="button" class="compaction-prompt-link" @click="openPromptReader"><BookOpen :size="16" /><span>查看默认压缩提示</span><span class="compaction-readonly">只读</span><ChevronRight :size="15" /></button>
           <div v-if="compactionPending || work.compacting" class="compaction-progress" role="status"><span class="alu-agent-activity-spinner" />正在压缩，进度与结果会显示在对话中。</div>
         </div>
-        <div class="ui-dialog-form-footer compaction-footer"><button type="button" class="ui-dialog-btn" @click="$emit('close')">取消</button><button type="button" class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
+        <div class="ui-dialog-form-footer compaction-footer"><button type="button" class="ui-dialog-btn" @click="$emit('close')">取消</button><button type="button" class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : residentAssistant ? '开始整理' : '开始压缩' }}</button></div>
       </template>
       <section v-else class="compaction-reader" aria-label="默认压缩提示">
         <div class="compaction-reader-header"><button ref="promptBack" type="button" class="compaction-reader-back" @click="closePromptReader"><ArrowLeft :size="15" />返回压缩</button><span class="compaction-readonly">默认提示 · 只读</span></div>
