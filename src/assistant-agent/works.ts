@@ -19,6 +19,7 @@ export class WorkDesk {
   private readonly children = new ChildMessages();
   private readonly works = new Map<string, KnownWork>();
   private readonly followed = new Set<string>();
+  private readonly watchTargets = new Map<string, string>();
   /** Child Works that owed her a result when this Worker last stopped; a restart ended them. */
   private lost: string[] = [];
 
@@ -67,7 +68,16 @@ export class WorkDesk {
     else if (result.type === "watch") {
       const target = result.status === "watching" ? result.receipt.target : result.completion.target;
       this.know(target);
-      if (result.status === "watching") this.followed.add(target.id);
+      if (result.status === "watching") {
+        this.watchTargets.set(result.receipt.watchId, target.id);
+        this.followed.add(target.id);
+      }
+    } else if (result.type === "cancel") {
+      for (const id of result.cancelledWatchIds) {
+        const target = this.watchTargets.get(id);
+        if (target !== undefined) this.followed.delete(target);
+        this.watchTargets.delete(id);
+      }
     } else if (result.type === "work_message" && result.to === "child") this.know(result.target);
     else if (result.type === "stop") { this.works.delete(result.instance.id); this.followed.delete(result.instance.id); }
     this.syncOwed();
@@ -88,6 +98,8 @@ export class WorkDesk {
   /** A watch of hers fired: the Work is no longer followed for it. */
   watched(notification: ObservationNotification): void {
     const { target } = notification;
+    this.watchTargets.delete(notification.watchId);
+    this.followed.delete(target.id);
     this.know(target);
     if (target.reply !== undefined) this.works.get(target.id)!.lastSaid = firstLine(target.reply);
     this.persist();

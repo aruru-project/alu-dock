@@ -52,7 +52,7 @@ export class SessionRecorder {
       // The next run or the next start of this Work catches up; the owner hears once until it does.
       if (this.told) return;
       this.told = true;
-      this.notify(`刚才的对话还没记进助手的记忆（${error instanceof Error ? error.message : String(error)}）。连上 Main 后会自动补记，不用重发。`);
+      this.notify(`刚才的对话还没记进助手的记忆（${error instanceof Error ? error.message : String(error)}）。下次对话或 Reload 时会自动补记，不用重发。`);
     }).finally(() => { this.running = undefined; });
     return this.running;
   }

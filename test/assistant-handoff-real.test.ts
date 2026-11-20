@@ -143,7 +143,11 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
     for (; handled < coordinator.requests.length; handled += 1) {
       const request = coordinator.requests[handled]!;
       if (request.closed) continue; // A record cancelled after forgetting no longer needs a reply.
-      if (given(request).includes("要忘掉的事")) { rewrites.push(given(request)); request.text("没有还没了结的事。"); }
+      if (given(request).includes("要忘掉的事")) {
+        rewrites.push(given(request));
+        if (rewrites.length === 1) request.fail(400, "这一次没能改写");
+        else request.text("没有还没了结的事。");
+      }
       else if (given(request).includes("写一份交接记录")) request.text(given(request).includes("水壶") ? "主人周末爬山，她要提醒他带水壶。" : "主人贴过一份资料。");
       else hers.push(request);
     }
@@ -159,6 +163,11 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   (await reply(1)).text("记下了。");
   await settled(client, alu.id);
   const memory = (await client.assistantMemories()).memories.find((item) => item.text.includes("水壶"));
+  // Older forgets with larger IDs occupy the entire first page. The relevant memory will be on the next page.
+  for (let n = 0; n < 50; n++) {
+    const other = await client.addAssistantMemory({ topic: "events", text: `旧资料 ${n}`, resident: false });
+    await client.updateAssistantMemory({ id: other.id, revision: other.revision, state: "forgotten" });
+  }
   await client.prompt(alu.id, `这是我贴的资料：${LONG_PASTE}`, "auto", "alu-paste");
   (await reply(2)).text("收到。");
   await settled(client, alu.id);
@@ -171,13 +180,17 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   (await reply(4)).text("好，忘了。");
   await settled(client, alu.id);
   // The record written before tells it: the model is asked to take it out.
-  await waitFor(() => rewrites.length === 1, "The hand-over record was not rewritten");
-  assert.ok(rewrites[0]!.includes("主人周末爬山要带水壶。") && rewrites[0]!.includes("她要提醒他带水壶"));
+  await waitFor(() => rewrites.length >= 1, "The record was not submitted for rewriting");
+  await client.prompt(alu.id, "在吗？", "auto", "retry-forget");
+  (await reply(5)).text("在。");
+  await settled(client, alu.id);
+  await waitFor(() => rewrites.length >= 2, "The failed rewrite was not retried on the next turn with the same forgotten entries");
+  assert.ok(rewrites[1]!.includes("主人周末爬山要带水壶。") && rewrites[1]!.includes("她要提醒他带水壶") && !rewrites[1]!.includes("旧资料"));
   await waitFor(async () => (await records(client, alu.id)).some((record) => JSON.stringify(record.content).includes("没有还没了结的事。")), "The rewritten record did not take its place");
 
   await client.updateAssistantMemory({ id: resident.id, revision: resident.revision, state: "forgotten" });
   await client.prompt(alu.id, "周末我要带什么来着？", "auto", "alu-ask");
-  const asked = await reply(5);
+  const asked = await reply(6);
   assert.ok(!given(asked).includes("水壶") && !given(asked).includes("青栀"), `Nothing she is given still tells it: ${given(asked).replace(/lorem ipsum dolor sit amet /gu, "").slice(-1_500)}`);
   asked.text("不记得了。");
   await settled(client, alu.id);

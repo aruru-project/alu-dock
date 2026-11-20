@@ -22,9 +22,14 @@ export class AssistantOpening {
       try {
         this.loaded = await this.port.call({ op: "load" });
         this.stale = false;
+        this.told = false;
         changed = true;
       } catch (error) {
         reason = error instanceof Error ? error.message : String(error);
+        if (this.loaded && !this.told) {
+          this.told = true;
+          this.notify("没读到最新的人设和记忆，先沿用上次读到的版本。");
+        }
       }
     }
     if (this.loaded) return { text: this.loaded.text, changed };

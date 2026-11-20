@@ -138,7 +138,10 @@ test("she keeps what the owner tells her to remember, forgets it so it cannot be
   await client.prompt(alu.id, "用这个模型把记忆从头整理一遍吧。", "auto", "alu-restart");
   (await coordinator.request(6)).tools({ id: "restart", name: "assistant_memory", arguments: { action: "reorganize" } });
   await waitFor(async () => (await client.status(alu.id)).activeInteraction?.method === "confirm", "The owner was not asked to confirm");
-  await client.respondInteraction(alu.id, undefined, (await client.status(alu.id)).activeInteraction!.id, { method: "confirm", confirmed: true });
+  const shared = await client.read(alu.id, undefined, "conversation_bootstrap", { interactions: "shared" });
+  const question = shared.page.events.find(event => event.type === "interaction.requested")?.data;
+  assert.ok(question?.method === "confirm" && question.message.includes("读完之前，她能查到的记忆还不全"));
+  await client.respondInteraction(alu.id, undefined, question.interactionId, { method: "confirm", confirmed: true });
   const restarted = await coordinator.request(7);
   assert.ok(JSON.stringify(restarted.body.messages?.findLast((message) => message.role === "tool")?.content ?? "").includes("Started over with coordinator/fixture"), "She is told it started");
   restarted.text("开始从头读了。");

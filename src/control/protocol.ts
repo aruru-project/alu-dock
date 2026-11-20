@@ -21,7 +21,7 @@ import { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type Machines
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_OMITTED_FIELDS, MAX_JSON_STRING_CHARS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
-import { parseAllowedTools } from "../core/worker-tool-policy.js";
+import { MAX_ALLOWED_TOOL_NAME_CHARS, parseAllowedTools } from "../core/worker-tool-policy.js";
 import type { DockChildSelection } from "../core/dock-tools.js";
 import {
   AssistantError,
@@ -219,7 +219,7 @@ export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
 export const MAX_CATALOG_PRUNE_ITEMS = 1_000;
 const MAX_TOOL_RESULT_TEXT = 256_000;
 export const MAX_MESSAGE = 2_048;
-const MAX_COLLECTION = 2_000;
+export const MAX_COLLECTION = 2_000;
 
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
@@ -1327,7 +1327,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "model.children.set": exact(params, ["operationId", "models"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), models: parseChildModelRefs(params.models, "params.models", "invalid_request") } };
     case "model.visibility.set": exact(params, ["operationId", "hostId", "hidden"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), hostId: hostId(), hidden: parseModelRefs(params.hidden, "params.hidden", "invalid_request") } };
     case "tool.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
-    case "tool.set_active": { exact(params, ["operationId", "instanceId", "names"], "invalid_request"); const names = strings(params.names, "params.names", MAX_COLLECTION, 256, "invalid_request"); if (new Set(names).size !== names.length) throw validation("invalid_request", "params.names must be unique"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), names } }; }
+    case "tool.set_active": { exact(params, ["operationId", "instanceId", "names"], "invalid_request"); const names = strings(params.names, "params.names", MAX_COLLECTION, MAX_ALLOWED_TOOL_NAME_CHARS, "invalid_request"); if (new Set(names).size !== names.length) throw validation("invalid_request", "params.names must be unique"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), names } }; }
     case "settings.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "settings.update": exact(params, ["operationId", "instanceId", "update"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), update: parseSettingUpdate(params.update, "params.update", "invalid_request") } };
     case "resource.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
@@ -3265,7 +3265,7 @@ function parseSettingValue(key: SettingKey, input: unknown, code = "invalid_resp
   return result;
 }
 
-function parseTool(input: unknown, field: string): ToolDto { const value = object(input, field); exact(value, ["name", "description", "active", "source", "parameterSchema"]); return { name: string(value.name, `${field}.name`, 256), description: boundedString(value.description, `${field}.description`, MAX_MESSAGE), active: boolean(value.active, `${field}.active`), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.parameterSchema === undefined ? {} : { parameterSchema: parseJsonObject(value.parameterSchema, `${field}.parameterSchema`) }) }; }
+function parseTool(input: unknown, field: string): ToolDto { const value = object(input, field); exact(value, ["name", "description", "active", "source", "parameterSchema"]); return { name: string(value.name, `${field}.name`, MAX_ALLOWED_TOOL_NAME_CHARS), description: boundedString(value.description, `${field}.description`, MAX_MESSAGE), active: boolean(value.active, `${field}.active`), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.parameterSchema === undefined ? {} : { parameterSchema: parseJsonObject(value.parameterSchema, `${field}.parameterSchema`) }) }; }
 function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source", "contentRef"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.contentRef === undefined ? {} : { contentRef: string(value.contentRef, `${field}.contentRef`, MAX_RESOURCE_CONTENT_REF_CHARS) }) }; }
 function parseSource(input: unknown, field: string, code = "invalid_response"): import("../core/config-projection.js").SourceDto { const value = object(input, field, code); exact(value, ["kind", "path", "package"], code); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"], code); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation(code,`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS, code) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256, code) }) }; }
 function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const value = object(input, field); exact(value, ["severity", "message", "source"]); return { severity: enumeration(value.severity, `${field}.severity`, ["info", "warning", "error"]), message: string(value.message, `${field}.message`, MAX_MESSAGE), ...(value.source === undefined ? {} : { source: string(value.source, `${field}.source`, 256) }) }; }

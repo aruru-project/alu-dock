@@ -645,7 +645,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   private reminderDue(reminder: Reminder, lateMs: number): void {
-    const late = lateMs >= 60_000 ? `，晚了 ${Math.round(lateMs / 60_000)} 分钟（到点时 Dock 没在运行）` : "";
+    const late = lateMs >= 60_000 ? `（晚了 ${Math.round(lateMs / 60_000)} 分钟）` : "";
     const content = `[提醒 · 你定在 ${localMinute(new Date(reminder.at))}${late}]\n${reminder.text}`;
     this.arrive("reminder", { customType: REMINDER_NOTE_TYPE, content, display: true, details: { id: reminder.id, at: reminder.at } }, `你定的提醒（#${reminder.id}）`);
   }
@@ -988,31 +988,36 @@ class AssistantAgent implements WorkerAgent {
       } else continue;
       changed = true;
     }
-    if (await this.rewriteRecord(hidden)) changed = true;
-    this.forgottenSeen = hidden;
+    const rewrite = await this.rewriteRecord(hidden);
+    if (rewrite === "rewritten") changed = true;
+    if (rewrite !== "failed") this.forgottenSeen = hidden;
     if (!changed) return;
     this.contextReady = false;
     this.publish(this.checkpoint());
   }
 
   /** The hand-over record in use, when it was written before something in this conversation was forgotten, is rewritten without it. */
-  private async rewriteRecord(hidden: ReadonlySet<string>): Promise<boolean> {
+  private async rewriteRecord(hidden: ReadonlySet<string>): Promise<"rewritten" | "unneeded" | "failed"> {
     const record = this.session.buildContextEntries()[0];
-    if (record?.type !== "compaction" || !hidden.has(record.id)) return false;
+    if (record?.type !== "compaction" || !hidden.has(record.id)) return "unneeded";
     try {
       const since = Date.parse(record.timestamp);
-      const { memories } = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50 });
+      let page = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50 });
+      const memories = [...page.memories];
+      while (page.nextCursor !== undefined) {
+        page = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50, cursor: page.nextCursor });
+        memories.push(...page.memories);
+      }
       const texts = memories.filter((memory) => Date.parse(memory.updatedAt) > since).map((memory) => memory.text);
-      if (texts.length === 0) return false;
+      if (texts.length === 0) return "unneeded";
       const { system, prompt } = rewriteWithoutPrompt(record.summary, texts);
       const rewritten = (await this.complete(system, prompt, new AbortController().signal)).trim();
-      if (rewritten.length === 0) return false;
+      if (rewritten.length === 0) return "failed";
       this.session.appendCompaction(rewritten, record.firstKeptEntryId, record.tokensBefore);
       cleanupSessionResources(this.session.getSessionId());
-      return true;
+      return "rewritten";
     } catch {
-      // Tried again the next time something is found forgotten; until then the record stays.
-      return false;
+      return "failed";
     }
   }
 

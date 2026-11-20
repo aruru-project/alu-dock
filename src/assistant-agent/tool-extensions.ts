@@ -6,7 +6,8 @@ import { pathToFileURL } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Models } from "@earendil-works/pi-ai";
 import { ASSISTANT_EXTENSIONS_FILE, readAssistantExtensions } from "../assistant/extensions-config.js";
-import { parseCommandsResult } from "../control/protocol.js";
+import { MAX_ALLOWED_TOOL_NAME_CHARS } from "../core/worker-tool-policy.js";
+import { MAX_COLLECTION, MAX_MESSAGE, parseCommandsResult } from "../control/protocol.js";
 import { compareCommandDtos, type CommandDto, type DiagnosticDto, type ResourceDto, type SourceDto } from "../core/config-projection.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import { validateUiCapabilityArgs } from "../worker/worker-protocol.js";
@@ -163,12 +164,15 @@ export class AssistantToolExtensions {
         const extensionTools = extension.tools ?? [];
         const extensionCommands = extension.commands ?? [];
         const ownNames = new Set<string>();
+        if (names.size + extensionTools.length > MAX_COLLECTION) throw new RegistrationError(`工具总数超过 ${MAX_COLLECTION} 个`);
         for (const tool of extensionTools) {
           if (!tool || typeof tool.name !== "string" || !/^[a-zA-Z0-9_-]+$/u.test(tool.name) || typeof tool.description !== "string" || !tool.description.trim()
             || !tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters) || tool.parameters.type !== "object" || typeof tool.execute !== "function") {
             throw new Error("工具需要 name、description、object JSON Schema parameters 和 execute 函数");
           }
-          if (names.has(tool.name) || ownNames.has(tool.name)) throw new RegistrationConflict(`工具名 ${tool.name} 已被占用，请改名后 Reload；原工具没有被替换。`);
+          if (tool.name.length > MAX_ALLOWED_TOOL_NAME_CHARS) throw new RegistrationError(`工具名超过 ${MAX_ALLOWED_TOOL_NAME_CHARS} 字符`);
+          if (tool.description.length > MAX_MESSAGE) throw new RegistrationError(`工具描述超过 ${MAX_MESSAGE} 字符`);
+          if (names.has(tool.name) || ownNames.has(tool.name)) throw new RegistrationError(`工具名 ${tool.name} 已被占用，请改名后 Reload；原工具没有被替换。`);
           ownNames.add(tool.name);
         }
         const ownCommands = new Map<string, { command: AssistantExtensionCommand; dto: CommandDto }>();
@@ -239,7 +243,7 @@ export class AssistantToolExtensions {
         // Log only loader-owned facts; neither UI nor local diagnostics receive the exception.
         console.error(`Assistant extension ${setting.id} load_failed: Check extensions.json and the extension module, then Reload.`);
         this.failures++;
-        const reason = error instanceof RegistrationConflict ? error.message : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload。`;
+        const reason = error instanceof RegistrationError ? error.message : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload。`;
         this.diagnostics.push({ severity: "error", message: `工具扩展 ${setting.id}：${reason}` });
       }
     }
@@ -316,4 +320,4 @@ export class AssistantToolExtensions {
 }
 
 /** Only loader-owned, non-secret diagnoses may be displayed verbatim. */
-class RegistrationConflict extends Error {}
+class RegistrationError extends Error {}

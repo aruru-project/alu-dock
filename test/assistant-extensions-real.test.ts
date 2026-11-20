@@ -9,6 +9,25 @@ import { DOCK_TOOLS_STATUS_KEY } from "../src/worker/dock-tools-client.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
+test("an oversized extension tool leaves the rest of the catalog available and explains the failed load", { timeout: 60_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-tool-bounds-", assistant: true });
+  const module = join(team.root, "oversized.mjs");
+  await writeFile(module, `export default async () => ({ tools: ["good_sibling", "bad_tool"].map(name => ({ name, description: name === "bad_tool" ? "a".repeat(2049) : "valid", parameters: { type: "object", properties: {} }, execute() {} })) });`);
+  await writeFile(join(team.cwd, "extensions.json"), JSON.stringify([{ id: "oversized", module, enabled: true, config: {} }, { id: "web", module: "builtin:web", enabled: true, config: {} }]));
+  const client = await team.startHost();
+  const assistant = await team.assistantWork();
+  const tools = (await client.tools(assistant.id)).tools;
+  assert.ok(tools.some(item => item.name === "web_search"));
+  assert.ok(!tools.some(item => item.source?.package === "oversized"));
+  assert.ok((await client.resources(assistant.id)).diagnostics.some(item => item.severity === "error" && item.message === "工具扩展 oversized：工具描述超过 2048 字符"));
+  for (const [names, reason] of [['["a".repeat(257)]', "工具名超过 256 字符"], ["Array.from({ length: 2000 }, (_, i) => 'tool_' + i)", "工具总数超过 2000 个"]]) {
+    await writeFile(module, `export default async () => ({ tools: ${names}.map(name => ({ name, description: "valid", parameters: { type: "object" }, execute() {} })) });`);
+    await client.reloadSession(assistant.id);
+    assert.ok((await client.resources(assistant.id)).diagnostics.some(item => item.severity === "error" && item.message === `工具扩展 oversized：${reason}`));
+    assert.ok((await client.tools(assistant.id)).tools.some(item => item.name === "web_search"));
+  }
+});
+
 // #670 and the RC6/7 correction: private extensions belong to Main's local file, not public
 // settings. Only the loopback model transport and local extension factories are fake.
 test("Main migrates its private tools once, keeps their configuration and data, and Reload reads only the local file", { timeout: 60_000 }, async (context) => {
