@@ -227,6 +227,16 @@ const filteredTools = computed(() => {
   const query = toolSearch.value.trim().toLowerCase()
   return (tools.value?.tools ?? []).filter((tool) => !query || `${tool.name} ${tool.description} ${tool.source?.kind ?? ''} ${tool.source?.package ?? ''}`.toLowerCase().includes(query))
 })
+const currentSystem = computed(() => {
+  const source = resources.value?.systemSource
+  switch (source?.kind) {
+    case 'dock-template': return `Dock 模板 · ${source.name}`
+    case 'project-system': return '项目 .pi/SYSTEM.md'
+    case 'global-system': return '全局 SYSTEM.md'
+    case 'pi-builtin': return 'Pi 内置默认'
+    default: return undefined
+  }
+})
 const filteredResources = computed(() => {
   const query = resourceSearch.value.trim().toLowerCase()
   return (resources.value?.resources ?? []).filter((resource) => !query || `${resource.kind} ${resource.name} ${resource.source?.kind ?? ''} ${resource.source?.package ?? ''}`.toLowerCase().includes(query))
@@ -793,7 +803,7 @@ function isCurrentModel(model: ModelInfo) {
       </section>
       <section class="alu-project-status-section">
         <h3>Session</h3>
-        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ formatContextUsage(work.metrics?.context, 'status') }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
+        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><div v-if="currentSystem && !residentAssistant" class="alu-project-status-metric current-system"><dt>当前 system</dt><dd>{{ currentSystem }}</dd></div><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ formatContextUsage(work.metrics?.context, 'status') }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
         <div v-if="work.lastError" class="alu-project-status-error">{{ work.lastError }}</div>
       </section>
       <section class="alu-project-status-section">
@@ -912,8 +922,11 @@ function isCurrentModel(model: ModelInfo) {
 }
 .alu-project-status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 0; }
 .alu-project-status-metric { min-width: 0; padding: 8px 9px; border-radius: 7px; background: var(--alu-bg); }
-.alu-project-status-metric dt { color: var(--alu-text-faint); font-size: var(--alu-micro-size); text-transform: uppercase; }
-.alu-project-status-metric dd { overflow: hidden; margin: 3px 0 0; color: var(--alu-text-dim); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
+.alu-project-status-metric dt { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.alu-project-status-metric:not(.current-system) dt { text-transform: uppercase; }
+.alu-project-status-metric dd { margin: 3px 0 0; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
+.alu-project-status-metric:not(.current-system) dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.current-system dd { overflow-wrap: anywhere; }
 .alu-project-status-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .alu-project-status-chip { padding: 3px 7px; border: 1px solid var(--alu-border); border-radius: 6px; color: var(--alu-text-dim); background: var(--alu-bg); font-size: var(--alu-micro-size); }
 .alu-handoff-retry { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }

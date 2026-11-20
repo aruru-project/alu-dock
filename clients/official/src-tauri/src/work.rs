@@ -12,11 +12,12 @@ use aludock_client_core::{
     AssistantPreview, AssistantReorganizeResult, AssistantSearchResult, AssistantSettings,
     AssistantSettingsEdit, AssistantTimelineFilter, AssistantTimelineList, AttachmentState,
     BashRunResult, ChildModelsResult, ChildModelsSetResult, DeliveryMode, ExtensionControlState,
-    InstanceSnapshot, Machine, ModelRef, ModelVisibilityResult, ModelVisibilitySetResult,
-    ResourceContentResult, RestoredImageState, SafeQueueDequeueResult, SessionTokenState,
-    StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
-    WorkspaceCursor, WorkspacePage, operation_association, project_queue_dequeue,
-    resolve_machine_session_token, restored_image_scope,
+    HostSystemDefaultResult, HostSystemDefaultSetting, HostSystemRef, InstanceSnapshot, Machine,
+    ModelRef, ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult,
+    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
+    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
+    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
+    restored_image_scope,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -544,6 +545,36 @@ pub(crate) async fn set_model_visibility(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_model_visibility(&hidden, target_host_id.as_deref(), None)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn host_system_default(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    target_host_id: Option<String>,
+    cursor: Option<SystemCatalogCursor>,
+) -> Result<HostSystemDefaultResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .host_system_default(target_host_id.as_deref(), cursor.as_ref())
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn set_host_system_default(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    target_host_id: Option<String>,
+    selection: Option<HostSystemRef>,
+) -> Result<HostSystemDefaultSetting, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_host_system_default(target_host_id.as_deref(), selection.as_ref(), None)
         .await
         .map_err(CommandError::from)
 }

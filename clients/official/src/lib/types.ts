@@ -616,6 +616,7 @@ export interface SettingUpdateResult {
 export interface ResourceInfo { kind: 'extension' | 'skill' | 'prompt' | 'context'; name: string; source?: SafeSource; contentRef?: string }
 export interface ResourceContentResult { text: string; revision: string; nextOffset?: number }
 export interface ResourcesResult {
+  systemSource?: HostSystemRef | {kind: 'project-system' | 'pi-builtin' | 'unrecognized'}
   resources: ResourceInfo[]
   diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; message: string }>
   resourceTotal: number
@@ -720,6 +721,14 @@ export type ConversationItem = (
 
 ) & { sourceEntryIds?: string[]; turnId?: string }
 
+export type HostSystemRef = {kind: 'dock-template'; name: string} | {kind: 'global-system'}
+export interface HostSystemDefaultSetting { selection: HostSystemRef | null }
+export interface HostSystemDefaultResult extends HostSystemDefaultSetting {
+  options: {selection: HostSystemRef; warning?: string}[]
+  warnings: string[]
+  revision: string
+  nextCursor?: SystemCatalogCursor
+}
 export interface SystemCandidate {
   id: string
   name: string
@@ -736,6 +745,7 @@ export interface SystemCatalogResult {
   revision: string
   warnings: string[]
   defaultSelection?: SystemCandidate
+  defaultSource?: 'directory' | 'host' | 'pi'
   nextCursor?: SystemCatalogCursor
   /** This directory opens new Works as the assistant unless the creator says otherwise. */
   defaultAssistant?: true

@@ -6,8 +6,8 @@ use aludock_client_core::{
     AssistantDocumentName, AssistantEntryKind, AssistantEntryRef, AssistantEpisodeEdit,
     AssistantEpisodeState, AssistantExtractionState, AssistantMemoryAction, AssistantMemoryAuthor,
     AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryState, AssistantMemoryTopic,
-    AssistantTimelineFilter, ClientError, ConnectionRouter, DockClient, IdentityStore,
-    LocalDockEndpoint, MachineKind, ModelRef,
+    AssistantTimelineFilter, ClientError, ConnectionRouter, DockClient, HostSystemRef,
+    IdentityStore, LocalDockEndpoint, MachineKind, ModelRef,
 };
 
 #[tokio::main]
@@ -36,6 +36,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert!(!workspace.default_assistant);
     assert!(!workspace.assistant_choice);
+
+    // The official client can choose and clear Main's default without choosing a directory.
+    let settings = client.host_system_default(None, None).await?;
+    assert!(settings.selection.is_none());
+    let template = settings.options.iter().find(|option| matches!(&option.selection, HostSystemRef::DockTemplate { name } if name == "pi-default.json")).ok_or("missing Pi template")?;
+    client
+        .set_host_system_default(Some(&main.host_id), Some(&template.selection), None)
+        .await?;
+    let configured = client
+        .system_catalog(&info.workspace_path, None, None)
+        .await?;
+    assert_eq!(configured.default_source.as_deref(), Some("host"));
+    assert_eq!(
+        configured.default_selection.unwrap().name,
+        "pi-default.json"
+    );
+    assert!(
+        client
+            .set_host_system_default(None, None, None)
+            .await?
+            .selection
+            .is_none()
+    );
 
     // The shipped persona, and notes saved against the version they were edited from.
     assert!(

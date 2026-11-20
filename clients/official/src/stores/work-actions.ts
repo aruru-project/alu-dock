@@ -447,10 +447,9 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     }
   }
 
-  /** Host 设置 edits Main's model lists, which every machine shares (card #303); no machine is chosen. */
-  function openMachineSettings(section?: MachineSettingsSection) {
+  function openMachineSettings(section?: MachineSettingsSection, targetHostId?: string) {
     if (host.pairingInProgress) return
-    page.openMachineSettings(section)
+    page.openMachineSettings(section, targetHostId)
   }
 
   /** The assistant's page; she lives on Main, so no machine is chosen (card #295). */
@@ -505,6 +504,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, checkContinuedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, retryAssistantHandoff, handoffRetryError, handoffRetryPending, acceptCreatedWork,
+    hostMachines, machineListError, refreshHostMachinesQuietly, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, retryAssistantHandoff, handoffRetryError, handoffRetryPending, acceptCreatedWork,
   }
 })

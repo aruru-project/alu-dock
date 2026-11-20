@@ -11,7 +11,7 @@ export type ImagePreview =
  * It also holds the editor's expanded/composition state, because every open
  * surface and the Escape/Back handling depend on it. */
 /** Host 设置 sections: the hidden-model list, or Main's child Work model list. */
-export type MachineSettingsSection = 'hidden' | 'children'
+export type MachineSettingsSection = 'hidden' | 'children' | 'system'
 /** The assistant page's sections (card #295). */
 export type AssistantSection = 'preview' | 'persona' | 'notes' | 'memories' | 'search' | 'settings'
 
@@ -49,6 +49,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   /** Host 设置: the model lists kept on Main (hidden models, child Work models). */
   const machineSettingsOpen = ref(false)
   const machineSettingsSection = ref<MachineSettingsSection>('hidden')
+  const machineSettingsTarget = ref<string>()
   /** The page has unsaved changes; closing it asks first. */
   const machineSettingsDirty = ref(false)
   /** The assistant's page; her drafts are kept by the assistant store, so closing never asks. */
@@ -246,7 +247,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   /** Resolves false when the user keeps unsaved Host settings open. */
   async function closeMachineSettings(): Promise<boolean> {
     if (machineSettingsDirty.value && confirmDialog.value) return false
-    if (machineSettingsDirty.value && !await askConfirm('放弃未保存的修改？', '模型设置的改动还没有保存，关闭后会丢失。')) return false
+    if (machineSettingsDirty.value && !await askConfirm('放弃未保存的修改？', 'Host 设置的改动还没有保存，关闭后会丢失。')) return false
     machineSettingsOpen.value = false
     machineSettingsDirty.value = false
     return true
@@ -469,7 +470,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
   }
   /** Opens Host 设置 on one of its sections. */
-  function openMachineSettings(section: MachineSettingsSection = 'hidden') {
+  function openMachineSettings(section: MachineSettingsSection = 'hidden', targetHostId?: string) {
+    machineSettingsTarget.value = targetHostId
     const handoff = modalOpen.value
     rememberModalTrigger(); machineSettingsSection.value = section; machineSettingsDirty.value = false; machineSettingsOpen.value = true
     appSettingsOpen.value = false; hostSettingsOpen.value = false; directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
@@ -496,5 +498,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsTarget, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

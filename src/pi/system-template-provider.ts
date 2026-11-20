@@ -9,7 +9,7 @@ import { ResourceContentError } from "../core/resource-content.js";
 export function createPiSystemTemplateProvider(agentDir = getAgentDir()): SystemTemplateProvider {
   return {
     nativeSources: (cwd) => [
-      { kind: "project-system", path: join(cwd, ".pi", "SYSTEM.md") },
+      ...(cwd === undefined ? [] : [{ kind: "project-system" as const, path: join(cwd, ".pi", "SYSTEM.md") }]),
       { kind: "global-system", path: join(agentDir, "SYSTEM.md") },
     ],
     initialTemplate: () => JSON.stringify(getDefaultSystemPromptBody(), null, 2) + "\n",

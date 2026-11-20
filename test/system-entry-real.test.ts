@@ -16,6 +16,7 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { SystemService } from "../src/control/system-service.js";
 import type { DockToolsRequest } from "../src/core/dock-tools.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { createPiSystemTemplateProvider } from "../src/pi/system-template-provider.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -31,9 +32,7 @@ test("TUI and native Agent tools choose, read and explicitly save systems before
   await Promise.all([home, workerHome, agentDir, uiCwd, peerCwd, sourceCwd].map((path) => mkdir(path, { recursive: true })));
   await mkdir(join(uiCwd, ".pi"));
   await writeFile(join(uiCwd, ".pi", "SYSTEM.md"), "# NATIVE-START\n\n" + "Native readable line\n\n".repeat(80) + "NATIVE-END\n");
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: workerHome, USERPROFILE: workerHome, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1",
-    XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"), XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state"),
-    TMPDIR: root, TEMP: root, TMP: root, STATE_DIRECTORY: "" };
+  const env = isolatedProcessEnvironment(workerHome, { PI_CODING_AGENT_DIR: agentDir, npm_config_cache: join(workerHome, ".npm"), TMPDIR: root, TEMP: root, TMP: root, STATE_DIRECTORY: "" });
   const received: Array<{ messages: Array<{ role: string; content?: string }> }> = [];
   let script: Array<{ name: string; arguments: object }> = [];
   const model = createServer(async (request, response) => {
@@ -190,6 +189,27 @@ test("TUI and native Agent tools choose, read and explicitly save systems before
   assert.equal(registry.list().length, 4);
   await assert.rejects(port.invokeDockTool(source.id, { ...request, name: "Changed intent" }), { code: "operation_conflict" });
   await assert.rejects(port.invokeDockTool(source.id, { type: "create", operationId: "unknown-machine", cwd: peerCwd, machine: "Missing machine" }));
+  // A fresh directory on this machine has no saved default. The tools do not need a prior discovery.
+  const fresh = join(root, "fresh"); await mkdir(fresh);
+  await writeFile(join(home, ".aludock", "work-system-default.json"), JSON.stringify({ selection: { kind: "dock-template", name: "chosen.json" } }));
+  script = [
+    { name: "dock_system", arguments: { cwd: fresh } },
+    { name: "dock_create", arguments: { cwd: fresh, name: "Implicit top-level" } },
+    { name: "dock_spawn", arguments: { cwd: fresh, name: "Implicit child", task: "Read the assigned system." } },
+  ];
+  await client.prompt(source.id, "Create both Works with the machine's default.", "prompt", "host-default-tools");
+  await until(async () => (await client.list()).some(i => i.name === "Implicit child") && registry.getSnapshot(source.id).execution === "idle", "both tools created Works");
+  for (const name of ["Implicit top-level", "Implicit child"]) await context.test(`${name} starts on the machine's chosen template`, async () => {
+    const work = (await client.list()).find(i => i.name === name)!;
+    assert.ok((await client.resources(work.id)).resources.some(item => item.path === join(home, ".aludock", "systems", "chosen.json")));
+  });
+  await context.test("dock_system identifies the effective default by name and origin", () => {
+    assert.ok(received.some(request => request.messages.some(message => message.role === "tool" && message.content?.includes("chosen.json (Host setting)"))));
+  });
+  await rm(savedPath, { force: true });
+  await pty("default", ["new"]);
+  const tuiWork = registry.list().find(item => item.cwd === uiCwd)!;
+  assert.ok((await client.resources(tuiWork.id)).resources.some(item => item.path === join(home, ".aludock", "systems", "chosen.json")));
   assert.equal(pids.every((pid) => pid !== process.pid), true);
   console.log(`Agent: real dock_create native fallback → dock_system catalog/content → explicit named Machine/create/save → implicit Host default; ${pids.length} independent Workers, collaboration enabled by default with explicit source off/on; duplicate intent retained.`);
 });

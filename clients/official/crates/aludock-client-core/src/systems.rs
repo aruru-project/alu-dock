@@ -4,7 +4,9 @@ use uuid::Uuid;
 
 use crate::{
     DockClient, ResourceContentResult, Result,
-    capabilities::{INSTANCE_ASSISTANT_V1, SYSTEM_TEMPLATES, with_assistant_choice},
+    capabilities::{
+        HOST_SYSTEM_DEFAULT, INSTANCE_ASSISTANT_V1, SYSTEM_TEMPLATES, with_assistant_choice,
+    },
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -30,6 +32,54 @@ pub struct SystemCandidate {
     pub warning: Option<String>,
 }
 
+/// A machine-wide choice is independent of any one directory's candidate IDs.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum HostSystemRef {
+    GlobalSystem,
+    DockTemplate {
+        name: String,
+    },
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum LoadedSystemSource {
+    ProjectSystem,
+    GlobalSystem,
+    DockTemplate {
+        name: String,
+    },
+    PiBuiltin,
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostSystemOption {
+    pub selection: HostSystemRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostSystemDefaultSetting {
+    pub selection: Option<HostSystemRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostSystemDefaultResult {
+    pub selection: Option<HostSystemRef>,
+    pub options: Vec<HostSystemOption>,
+    pub warnings: Vec<String>,
+    pub revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<SystemCatalogCursor>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SystemCatalogCursor {
     pub revision: String,
@@ -46,6 +96,8 @@ pub struct SystemCatalogResult {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_selection: Option<SystemCandidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<SystemCatalogCursor>,
     /// This directory opens new Works as the assistant unless the creator says otherwise.
@@ -101,6 +153,48 @@ struct DefaultParams<'a> {
 }
 
 impl DockClient {
+    pub async fn host_system_default(
+        &self,
+        host_id: Option<&str>,
+        cursor: Option<&SystemCatalogCursor>,
+    ) -> Result<HostSystemDefaultResult> {
+        let mut params = serde_json::Map::new();
+        if let Some(id) = host_id {
+            params.insert("hostId".into(), id.into());
+        }
+        if let Some(cursor) = cursor {
+            params.insert("cursor".into(), serde_json::json!(cursor));
+        }
+        self.request(
+            "system.host-default.get",
+            &params,
+            HOST_SYSTEM_DEFAULT,
+            None,
+        )
+        .await
+    }
+
+    pub async fn set_host_system_default(
+        &self,
+        host_id: Option<&str>,
+        selection: Option<&HostSystemRef>,
+        operation_id: Option<&str>,
+    ) -> Result<HostSystemDefaultSetting> {
+        let generated = Uuid::new_v4().to_string();
+        let id = operation_id.unwrap_or(&generated);
+        let mut params = serde_json::json!({"operationId":id, "selection":selection});
+        if let Some(host) = host_id {
+            params["hostId"] = host.into();
+        }
+        self.request(
+            "system.host-default.set",
+            &params,
+            HOST_SYSTEM_DEFAULT,
+            Some(id),
+        )
+        .await
+    }
+
     pub async fn system_catalog(
         &self,
         cwd: &str,

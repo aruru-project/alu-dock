@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { Eye, EyeOff, ListChecks, Plus, Server, X } from '@lucide/vue'
+import { Eye, EyeOff, FileText, ListChecks, Plus, Server, X } from '@lucide/vue'
 import { getChildModels } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { useModelListEditor } from '../lib/modelListEditor'
@@ -10,8 +10,9 @@ import { useSurfacesStore, type MachineSettingsSection } from '../stores/surface
 import { useModelCatalogStore } from '../stores/model-catalog'
 import { useModelListsStore } from '../stores/model-lists'
 import MachineSettingsResults from './MachineSettingsResults.vue'
+import HostSystemSettings from './HostSystemSettings.vue'
 
-// Both lists exist only on Main (card #303); every machine shares them, so no machine is chosen.
+// Both model lists exist on Main; the system section instead edits the selected machine.
 const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
 const app = useAppStore()
 const surfaces = useSurfacesStore()
@@ -19,6 +20,9 @@ const submissions = useModelListsStore()
 const catalog = useModelCatalogStore()
 
 const section = ref<MachineSettingsSection>(surfaces.machineSettingsSection)
+const openedSystem = ref(false)
+const systemDirty = ref(false)
+watch(section, value => { if (value === 'system') openedSystem.value = true }, { immediate: true })
 const shownQuery = ref('')
 const hiddenQuery = ref('')
 const availableQuery = ref('')
@@ -58,7 +62,7 @@ const listedRows = computed(() => childColumns.value.listed.filter((row) => mode
 const childLimit = computed(() => children.result?.limit ?? 0)
 const childListFull = computed(() => !!children.result && children.draft.length >= childLimit.value)
 
-watch(() => hidden.dirty || children.dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
+watch(() => hidden.dirty || children.dirty || systemDirty.value, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
 
 watch([
   () => app.connectionContext?.connectionId,
@@ -101,7 +105,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
       <span class="machine-settings-mark"><Server :size="20" /></span>
       <div>
         <h2 id="machine-settings-title">Host 设置</h2>
-        <p>所有机器共用 Main 上的设置</p>
+        <p>{{ section === 'system' ? '每台机器分别设置' : '所有机器共用 Main 上的模型设置' }}</p>
       </div>
     </div>
     <button class="machine-settings-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
@@ -112,8 +116,10 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
       <span class="machine-settings-nav-label">Host</span>
       <button type="button" class="machine-settings-nav-item" :class="{ 'is-active': section === 'hidden' }" :aria-current="section === 'hidden' ? 'page' : undefined" @click="section = 'hidden'"><EyeOff :size="16" /><span>模型显示</span></button>
       <button type="button" class="machine-settings-nav-item" :class="{ 'is-active': section === 'children' }" :aria-current="section === 'children' ? 'page' : undefined" @click="section = 'children'"><ListChecks :size="16" /><span>子 Work 模型</span></button>
+      <button type="button" class="machine-settings-nav-item" :class="{ 'is-active': section === 'system' }" :aria-current="section === 'system' ? 'page' : undefined" @click="section = 'system'"><FileText :size="16" /><span>默认 system</span></button>
     </nav>
 
+    <HostSystemSettings v-if="openedSystem" v-show="section === 'system'" :shown="section === 'system'" @dirty="systemDirty = $event" />
     <main v-if="section === 'hidden'" class="machine-settings-content">
       <div class="machine-settings-intro">
         <h3>模型显示</h3>
@@ -156,7 +162,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
       </template>
     </main>
 
-    <main v-else class="machine-settings-content">
+    <main v-else-if="section === 'children'" class="machine-settings-content">
       <div class="machine-settings-intro">
         <h3>子 Work 模型</h3>
         <p>你让 Agent 给子 Work 换模型时，它在这份名单里找准确的模型名。名单不限制子 Work 能用哪个模型。所有机器共用 Main 上这一份，最多 {{ childLimit }} 个。</p>
@@ -198,7 +204,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
     </main>
   </div>
 
-  <footer class="machine-settings-footer">
+  <footer v-if="section !== 'system'" class="machine-settings-footer">
     <span class="machine-settings-footer-status" :class="{ 'machine-settings-error': active.submission?.state === 'failed' && !active.dirty }" :role="active.submission?.state === 'failed' && !active.dirty ? 'alert' : 'status'">{{ active.status }}</span>
     <button type="button" class="button secondary" :disabled="active.saving || (!active.changes && active.submission?.state !== 'failed' && active.submission?.state !== 'unknown')" @click="active.discard">放弃改动</button>
     <button type="button" class="button primary" :disabled="!active.canSave" @click="save">{{ active.saving ? '正在保存…' : '保存' }}</button>

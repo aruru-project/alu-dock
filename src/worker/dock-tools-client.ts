@@ -120,7 +120,11 @@ export function renderDockToolsResult(result: DockToolsResult, context: RenderCo
     const lines = ["[Dock systems]"];
     for (const candidate of catalog.candidates) lines.push(`│ id=${candidate.id} · ${inline(candidate.name)} · ${candidate.kind} · ${inline(candidate.path, 500)}${candidate.warning ? ` · ${inline(candidate.warning, 500)}` : ""}`);
     for (const warning of catalog.warnings) lines.push(`│ warning: ${inline(warning, 500)}`);
-    if (catalog.defaultSelection) lines.push(`Directory default id=${catalog.defaultSelection.id}`);
+    if (catalog.defaultSelection) {
+      const origin = catalog.defaultSource === "host" ? "Host setting" : "directory default";
+      lines.push(`Default for a new Work: ${inline(catalog.defaultSelection.name)} (${origin}), id=${catalog.defaultSelection.id}`);
+    } else if (catalog.defaultSource === "pi") lines.push("No Dock default; Pi chooses the system for this directory.");
+    else if (catalog.defaultSource) lines.push(`The ${catalog.defaultSource === "host" ? "Host setting" : "directory default"} is unavailable; an implicit creation will fail.`);
     if (catalog.nextCursor) lines.push(`Read more with dock_system cursor=${JSON.stringify(catalog.nextCursor)}`);
     return lines.join("\n");
   }

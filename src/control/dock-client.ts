@@ -9,7 +9,7 @@ import { receiveClientFile, receiveLegacyClientFile, FileCapabilityMissingError,
 import { FileChannel } from "./file-channel.js";
 import { sendFile, FileReceiver, FileTransferSourceError } from "./file-transfer.js";
 import { FILE_TRANSFER_CAPABILITY, parseFileTransferFrame, parseFileDownloadResult, parsePublishedFileDto, parseDeliverableDto, parseWorkspaceEntryDto, type PublishedFileTransferResult, type DeliverableDownloadResult, ProtocolHelloRejectedError, type FileTransferRequest } from "./protocol.js";
-import { SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
+import { HOST_SYSTEM_DEFAULT_CAPABILITY, type HostSystemRef, parseHostSystemDefaultSetting, parseHostSystemDefaultResult, SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
 import { ASSISTANT_CONTEXT_DEFAULT_SPAN } from "../core/assistant.js";
 import { ASSISTANT_CAPABILITY, INSTANCE_ASSISTANT_CAPABILITY, parseAssistantContextResult, parseAssistantDocument, parseAssistantEpisode, parseAssistantInfo, parseAssistantMemory, parseAssistantMemoryDetail, parseAssistantMemoryList, parseAssistantPreview, parseAssistantSearchResult, parseAssistantReorganizeResult, parseAssistantSettings, parseAssistantTimelineList, type AssistantContextResult, type AssistantDocument, type AssistantDocumentName, type AssistantEpisode, type AssistantInfo, type AssistantMemory, type AssistantMemoryDetail, type AssistantMemoryList, type AssistantPreview, type AssistantReorganizeResult, type AssistantSearchResult, type AssistantSettings, type AssistantTimelineList } from "./protocol.js";
 import type { AssistantMemoryAddRequest, AssistantMemoryListRequest, AssistantMemoryUpdateRequest, AssistantModelRef, AssistantSettingsEdit, AssistantTimelineListRequest, AssistantTimelineUpdateRequest } from "../core/assistant.js";
@@ -645,6 +645,12 @@ export class DockClient {
     });return {entry:metadata,...summary};
   }
 
+  hostSystemDefault(hostId?: string, cursor?: SystemCatalogCursor, limit = MAX_SYSTEM_CATALOG_ITEMS) {
+    return this.request("system.host-default.get", { hostId, cursor, limit }, HOST_SYSTEM_DEFAULT_CAPABILITY, parseHostSystemDefaultResult);
+  }
+  setHostSystemDefault(selection: HostSystemRef | null, hostId?: string, operationId = this.createRequestId()) {
+    return this.request("system.host-default.set", { hostId, operationId, selection }, HOST_SYSTEM_DEFAULT_CAPABILITY, parseHostSystemDefaultSetting);
+  }
   systemCatalog(cwd:string,hostId?:string,cursor?:SystemCatalogCursor,limit=MAX_SYSTEM_CATALOG_ITEMS):Promise<SystemCatalogResult>{return this.request("system.catalog",{cwd,hostId,cursor,limit},SYSTEM_TEMPLATES_CAPABILITY,parseSystemCatalogResult);}
   systemContent(cwd:string,id:string,hostId?:string,offset?:number,revision?:string):Promise<ResourceContentResult>{return this.request("system.content",{cwd,id,hostId,offset,revision},SYSTEM_TEMPLATES_CAPABILITY,parseResourceContentResult);}
   /** `id` may be left out only with `assistant: true`: she takes no system, and the directory keeps its system for other Works. */

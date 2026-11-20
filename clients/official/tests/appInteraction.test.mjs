@@ -45,7 +45,7 @@ let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, childModelsNative, saveChildModelsNative
-let settingsNative, updateSettingNative
+let hostSystemNative, settingsNative, updateSettingNative
 // Card #295: Main keeps the assistant; the spare Host is an older Main without her.
 let assistantNative = (command, args) => {
   if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
@@ -114,7 +114,8 @@ const invoke = async (command, args = {}) => {
   if (command === 'clear_workspace_file_state') return
   if (command === 'run_shell_command') return { receipt: { operationId: args.operationId, instanceId: args.instanceId, startedAt: '2026-11-13T10:00:00Z' }, instance: atHost(work) }
   if (command === 'new_session') throw { code: 'busy', message: '这次没有新建 Session，请稍后重试。' }
-  if (command === 'get_resources') return { resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
+  if (command === 'host_system_default' || command === 'set_host_system_default') return hostSystemNative(command, args)
+  if (command === 'get_resources') return { systemSource: { kind: 'dock-template', name: 'loaded.json' }, resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
   if (command === 'get_settings') return settingsNative ? settingsNative(args) : { settings: [] }
   if (command === 'update_setting') return updateSettingNative(args)
   if (command === 'respond_extension_interaction') return respondNative(args)
@@ -1376,6 +1377,34 @@ try {
     assert.equal(all(find(dialog(), item => item.props['aria-label'] === '显示中的模型'), item => item.type === 'button' && String(item.props.class).includes('model-row')).length, 2)
     await click(dialog(), '关闭')
     console.log('PASS: Host settings child Work models: second section keeps its draft, saves the list on Main, reports after closing, stops at 50')
+
+    machinesFixture = [{ hostId: 'main', name: '工作站', kind: 'main', available: true }, { hostId: 'sub', name: '笔记本', kind: 'subhost', available: true }]
+    const chosen = { kind: 'dock-template', name: 'review.json' }
+    const savedSystems = new Map([['sub', { kind: 'global-system' }]])
+    let supports = true, problem = false
+    hostSystemNative = async (command, args) => {
+      const key = args.targetHostId ?? 'main'
+      if (!supports) throw { code: 'capability_missing', details: { missing: ['system.host-default.v1'] } }
+      if (command === 'set_host_system_default') { savedSystems.set(key, args.selection); problem = false; return { selection: args.selection } }
+      return { selection: savedSystems.get(key) ?? null, options: [{ selection: chosen }, { selection: { kind: 'global-system' } }], warnings: problem ? ['已保存的 lost.json 无法使用，请重新选择。'] : [], revision: 'r' }
+    }
+    await click(container, 'Host 设置'); await click(dialog(), '默认 system'); await click(dialog(), '机器'); await click(dialog(), '笔记本')
+    assert.ok(text(dialog()).includes('全局 SYSTEM.md'))
+    await click(dialog(), '选择默认 system'); await click(dialog(), 'review.json'); await click(dialog(), '保存')
+    assert.deepEqual(savedSystems.get('sub'), chosen); assert.equal(savedSystems.has('main'), false)
+    assert.ok(text(dialog()).includes('只对之后新建的 Work 生效'))
+    await click(dialog(), '选择默认 system'); await click(dialog(), '不指定（由 Pi 决定）'); await click(dialog(), '保存')
+    assert.equal(savedSystems.get('sub'), null)
+    await click(dialog(), '关闭'); problem = true; savedSystems.set('main', { kind: 'dock-template', name: 'lost.json' })
+    await click(container, 'Host 设置'); await click(dialog(), '默认 system'); assert.ok(text(dialog()).includes('lost.json 无法使用'))
+    await click(dialog(), '选择默认 system'); await click(dialog(), '不指定（由 Pi 决定）'); await click(dialog(), '保存')
+    assert.equal(savedSystems.get('main'), null)
+    await click(dialog(), '关闭'); supports = false
+    await click(container, 'Host 设置'); await click(dialog(), '默认 system'); assert.ok(text(dialog()).includes('还不支持设置默认 system'))
+    await click(dialog(), '关闭'); machinesFixture = []
+    await click(container, '查看项目状态'); assert.ok(text(container).includes('当前 system') && text(container).includes('Dock 模板 · loaded.json'))
+    await click(find(container, el => el.props.role === 'dialog' && el.props['aria-label'] === '项目状态'), '关闭')
+    console.log('PASS: select and clear the SubHost system; inspect the running Work’s actual source')
   }
   // Card #295: the assistant's page from the sidebar: what she reads, her persona and notes, her conversations.
   {

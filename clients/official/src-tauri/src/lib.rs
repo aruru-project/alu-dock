@@ -242,6 +242,8 @@ pub fn run() {
             work::list_machines,
             work::model_visibility,
             work::set_model_visibility,
+            work::host_system_default,
+            work::set_host_system_default,
             work::child_models,
             work::set_child_models,
             work::assistant_info,
