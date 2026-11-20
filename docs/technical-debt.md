@@ -355,3 +355,15 @@ Main 的 `forgotten` 查询按会话从新到旧最多返回 2,000 个已隐藏�
 ### 何时重访
 
 实际需要从同一会话的上下文清除超过 2,000 个遗忘条目，或发现较早的已忘原话仍进入模型上下文时。
+
+## 手动恢复带过期提醒的助手会话时，回执可能是「结果未知」
+
+### 已知边界
+
+助手 Worker 在激活时启动提醒，已过期的提醒立即触发并开始一轮回复。Host 要等打开完成、写好目录后才拍回执快照，而 `instance.reopen` 的回执要求 Work 处于 idle。手动 reopen 一个带过期提醒的会话时，提醒可能抢在回执之前开始回复，客户端收到 `effect_unknown`；刷新后状态正常，提醒照常送达。Main 启动时自动恢复常驻助手不经过这条回执，不受影响。Worker 没有「打开已完成」的现成时机，挪动提醒需要调整 Host 与 Worker 的启动顺序。
+
+代码入口：`src/worker/create-worker-instance.ts` 的 `activate`、`src/assistant-agent/reminders.ts`、`src/control/dock-host.ts` 的 reopen 回执、`src/control/protocol.ts` 的 `parseReopenResult`。
+
+### 何时重访
+
+手动 reopen 助手会话变得常见，或需要调整 Worker 激活与 Host 打开完成的先后顺序时。
