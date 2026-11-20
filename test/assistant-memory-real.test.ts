@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { DockClient } from "../src/control/dock-client.js";
@@ -19,6 +21,10 @@ test("what she hears becomes a memory and a timeline line her next session start
     assistantTiming: { idleMs: 1_000, tickMs: 100, quietMs: 0, dreamChanges: 1_000_000, dreamIntervalMs: 1e15 },
   });
   const { coordinator, memory } = team.providers;
+  const modelsFile = join(team.agentDir, "models.json");
+  const models = JSON.parse(await readFile(modelsFile, "utf8"));
+  Object.assign(models.providers.memory.models[0], { contextWindow: 100_000, maxTokens: 32_768 });
+  await writeFile(modelsFile, JSON.stringify(models));
   const client = await team.startHost();
   // Card #295: without a chosen model nothing is extracted, and the owner is told so.
   assert.equal((await client.assistantInfo()).extraction?.state, "off");
@@ -30,6 +36,7 @@ test("what she hears becomes a memory and a timeline line her next session start
   await settled(client, alu.id);
 
   const reading = await memory.request(0);
+  assert.equal(Reflect.get(reading.body, "max_completion_tokens"), 32_768, "Memory extraction uses the model's output budget");
   const read = JSON.stringify(reading.body.messages);
   assert.ok(read.includes("主人：我不吃香菜，以后点外卖记得避开。"), "Extraction reads what the owner said");
   assert.ok(read.includes("助手：记住啦，香菜退散～"), "Extraction reads what she answered");
