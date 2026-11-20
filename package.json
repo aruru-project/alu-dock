@@ -1,6 +1,5 @@
 {
   "name": "alu-dock",
-  "version": "0.2.0",
   "private": true,
   "description": "Host-owned Pi SDK runtime dock for SSH workflows",
   "license": "Apache-2.0",
@@ -8,17 +7,11 @@
   "bin": {
     "aludock": "dist/src/cli.js"
   },
-  "files": [
-    "dist/src",
-    "docs",
-    "skills",
-    "README.md"
-  ],
   "engines": {
     "node": ">=24.22.1"
   },
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/write-dock-version.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "test:sdk-upgrade": "npm run build && node --test dist/test/pi-sdk-compat/**/*.compat.js",
@@ -35,7 +28,6 @@
     "client:check": "cd clients/official && corepack pnpm check && corepack pnpm build",
     "client:package:linux": "cd clients/official && corepack pnpm package:linux",
     "package:windows": "cd clients/official && corepack pnpm package:windows",
-    "prepack": "npm run build",
     "install:local": "node scripts/ensure-locked-dependencies.mjs && npm run build && node dist/scripts/install-local.js"
   },
   "dependencies": {

@@ -12,6 +12,12 @@ test("a formal release builds only the artifacts that contain its changed produc
     android: false,
     windowsMode: "reuse",
   });
+  assert.deepEqual(plan(["scripts/write-dock-version.mjs"]), {
+    linux: false,
+    windows: true,
+    android: false,
+    windowsMode: "reuse",
+  });
   assert.deepEqual(plan(["clients/official/src/App.vue"]), {
     linux: true,
     windows: true,

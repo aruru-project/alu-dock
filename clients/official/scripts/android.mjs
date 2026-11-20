@@ -308,11 +308,7 @@ function stagingSigningEnvironment() {
 
 function buildStagingApk(androidEnvironment) {
   const signingEnvironment = stagingSigningEnvironment();
-  const version = resolveReleaseVersion({
-    cwd: repositoryRoot,
-    explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
-    fallbackVersion: JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version,
-  });
+  const version = resolveReleaseVersion();
   rmSync(androidJniLibrariesPath, { recursive: true, force: true });
   runTauriAndroid(
     ["build", "--apk", "--target", "aarch64", "--ci", "--config", JSON.stringify({ version })],
@@ -321,6 +317,7 @@ function buildStagingApk(androidEnvironment) {
       environment: {
         ...androidEnvironment.environment,
         ...signingEnvironment,
+        ALUDOCK_RELEASE_VERSION: version,
       },
     },
   );

@@ -10,6 +10,7 @@ const ROOT_RUNTIME_FILES = new Set([
   "package-lock.json",
   "tsconfig.json",
   "scripts/clean-dist.mjs",
+  "scripts/write-dock-version.mjs",
 ]);
 const WINDOWS_BUILD_FILES = new Set([
   "clients/official/scripts/package-windows.mjs",

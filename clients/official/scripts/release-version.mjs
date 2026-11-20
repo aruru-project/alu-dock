@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import clientManifest from "../package.json" with { type: "json" };
 
 const RELEASE_VERSION_PATTERN = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-rc\.(0|[1-9][0-9]*))?$/u;
 
@@ -10,7 +12,11 @@ export function parseReleaseTag(tag) {
   return { version, prerelease: version.includes("-rc.") };
 }
 
-export function resolveReleaseVersion({ cwd, explicitVersion, fallbackVersion }) {
+export function resolveReleaseVersion({ cwd, explicitVersion, fallbackVersion } = {
+  cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+  explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
+  fallbackVersion: clientManifest.version,
+}) {
   const configured = explicitVersion?.trim();
   if (configured) return requireReleaseVersion(configured);
 

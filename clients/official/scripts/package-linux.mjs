@@ -7,7 +7,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,14 +15,7 @@ import { fileURLToPath } from "node:url";
 import { resolveReleaseVersion } from "./release-version.mjs";
 
 const clientRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const packageJson = JSON.parse(
-  readFileSync(join(clientRoot, "package.json"), "utf8"),
-);
-const version = resolveReleaseVersion({
-  cwd: clientRoot,
-  explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
-  fallbackVersion: packageJson.version,
-});
+const version = resolveReleaseVersion();
 
 if (process.platform !== "linux" || process.arch !== "x64") {
   throw new Error("Linux 打包入口当前用于 x86_64 Linux。请在对应平台运行。");
@@ -41,6 +33,7 @@ function run(command, args, options = {}) {
   }
 }
 
+const buildEnvironment = { ...process.env, ALUDOCK_RELEASE_VERSION: version };
 const packageManager = process.env.npm_execpath;
 const tauriArguments = [
   "exec",
@@ -52,9 +45,9 @@ const tauriArguments = [
   JSON.stringify({ version }),
 ];
 if (packageManager) {
-  run(process.execPath, [packageManager, ...tauriArguments]);
+  run(process.execPath, [packageManager, ...tauriArguments], { env: buildEnvironment });
 } else {
-  run("pnpm", tauriArguments);
+  run("pnpm", tauriArguments, { env: buildEnvironment });
 }
 
 const executable = join(

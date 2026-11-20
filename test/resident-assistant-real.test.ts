@@ -1,13 +1,35 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import test from "node:test";
 
 import { DockClient } from "../src/control/dock-client.js";
+import { encodeJsonLine } from "../src/control/json-lines.js";
+import { parseHelloReply } from "../src/control/protocol.js";
 import type { DockEvent } from "../src/core/instance-dto.js";
 import type { CatalogProjection } from "../src/core/catalog.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
+
+test("a client connecting to Main sees the built Dock release in the handshake and in its assistant", async (context) => {
+  const { resolveReleaseVersion } = await import(new URL("../../clients/official/scripts/release-version.mjs", import.meta.url).href);
+  const expected = resolveReleaseVersion();
+  const team = await startNativeTeam(context, ["model"], { prefix: "alu-version-", assistant: true });
+  const client = await team.startHost();
+  const assistant = await client.status((await team.assistantWork()).id);
+  const socket = connect(join(team.root, "dock.sock"));
+  try {
+    const lines = createInterface({ input: socket });
+    socket.write(encodeJsonLine({ kind: "hello", requestId: "release", versions: [2], client: { name: "test", version: "1", clientId: "release" }, requiredCapabilities: [] }));
+    const { value } = await lines[Symbol.asyncIterator]().next();
+    const hello = parseHelloReply(JSON.parse(value), "release");
+    assert.deepEqual([hello.host.dockVersion, assistant.executor.version], [expected, expected]);
+  } finally {
+    socket.destroy();
+  }
+});
 
 // #670, owner decision 2026-11-13: one Alu opens with Main, Stop restarts her, and an
 // upgrade keeps the newest old assistant conversation instead of making another copy.

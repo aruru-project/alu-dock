@@ -10,6 +10,7 @@ import { win32 } from "node:path";
 import type { Socket } from "node:net";
 import { createServer, connect, type Server as TlsServer, type TLSSocket } from "node:tls";
 
+import { DOCK_VERSION } from "../version.js";
 import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
 import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { StaleRuntimeGenerationError, type InstanceSnapshot } from "../core/managed-instance.js";
@@ -733,7 +734,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
           kind: "hello",
           requestId: `machine-${streamId}`,
           versions: [2],
-          client: { name: "alu-dock-main", version: "0.2.0", clientId: this.mainId },
+          client: { name: "alu-dock-main", version: DOCK_VERSION, clientId: this.mainId },
           requiredCapabilities: stream.requiredCapabilities,
         }),
       });
