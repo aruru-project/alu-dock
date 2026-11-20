@@ -133,6 +133,53 @@ test("saved hand-over settings guide background writing while she answers, and s
   assert.equal((await reopened.status(resident.id)).extensionStatus["滚动整理"], undefined, "A healthy idle assistant leaves the chat status bar clear");
 });
 
+test("above the wait threshold, tool steps keep chatting during handoff backoff and the next step retries after it expires", { timeout: 60_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-handoff-backoff-", assistant: true });
+  // Advance only the isolated assistant Worker's clock, from an actual tool step. Network waits use real time.
+  const module = join(team.root, "clock-step.mjs");
+  await writeFile(module, `import { mock } from 'node:test';
+    export default async () => {
+      let clock;
+      return { tools: [{ name: 'step', description: 'Finish a fixture tool step.',
+        parameters: { type: 'object', properties: { pastCooldown: { type: 'boolean' } }, required: ['pastCooldown'] },
+        async execute({ pastCooldown }) {
+          if (pastCooldown) { const now = Date.now; clock = mock.method(Date, 'now', () => now() + 6 * 60_000); }
+          return { content: [{ type: 'text', text: '这一步完成了。' }] };
+        } }], dispose() { clock?.mock.restore(); } };
+    };`);
+  await writeFile(join(team.cwd, "extensions.json"), JSON.stringify([{ id: "clock-step", module, enabled: true, config: {} }]));
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  const provider = team.providers.coordinator;
+  const handoff = { startTokens: 10_000, keepRecentTokens: 200, prompt: "为这段对话写一份交接记录。" };
+  await client.setAssistantSettings({ handoff });
+  for (let index = 0; index < 2; index++) {
+    await client.prompt(alu.id, `资料 ${index}`, "auto", `backoff-data-${index}`);
+    (await provider.request(index)).text("收到。");
+    await settled(client, alu.id);
+  }
+  const failed = assert.rejects(client.compactSession(alu.id), { code: "compaction_failed", message: "模型没有写出交接记录" });
+  (await provider.request(2)).text(" ");
+  await failed;
+
+  const before = provider.requests.length;
+  const isWrite = (req: HeldChatRequest) => req.body.messages?.some(message => (message.role === "system" || message.role === "developer") && message.content === handoff.prompt);
+  await client.prompt(alu.id, `请按步骤核对这些资料：${LONG_PASTE.slice(0, 80_000)}`, "auto", "backoff-long-turn");
+  for (let index = 0; index < 4; index++) {
+    const turn = await provider.request(before + index);
+    assert.equal(provider.requests.slice(before).filter(isWrite).length, 0, `Unexpected summary request above the wait threshold during backoff (step ${index + 1})`);
+    assert.ok(turn.toolNames.includes("step"));
+    turn.tools({ id: `step-${index}`, name: "step", arguments: { pastCooldown: index === 3 } });
+  }
+  const retry = await provider.request(before + 4);
+  assert.ok(isWrite(retry), "The first tool step after the retry time must write a record before continuing");
+  retry.text("资料的较早部分已交接。");
+  const next = await provider.request(before + 5);
+  assert.ok(next.toolNames.includes("step") && given(next).includes("资料的较早部分已交接。"));
+  next.text("核对完了。");
+  await settled(client, alu.id);
+});
+
 test("manual compaction writes below the threshold, keeps chatting, and returns only an adopted record", { timeout: 60_000 }, async context => {
   const { client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-manual-handoff-");
   const handoff = { startTokens: 55_000, keepRecentTokens: 100, prompt: "把较早的对话写成交接记录。" };

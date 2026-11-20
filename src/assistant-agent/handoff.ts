@@ -158,12 +158,14 @@ export class Handoff {
   private limits(): HandoffLimits { return handoffLimits(this.deps.contextWindow(), this.settings); }
 
   mustWait(tokens: number): boolean {
-    return !this.stopped && this.settings !== undefined && tokens >= this.limits().mustTokens;
+    if (this.stopped || this.settings === undefined || tokens < this.limits().mustTokens) return false;
+    // During backoff an existing write or ready record still takes its normal place; do not start another.
+    return this.writing !== undefined || this.record !== undefined || this.failures === 0 || (this.deps.now ?? Date.now)() >= this.retryAt;
   }
 
   /**
    * Before a request to the model: past `mustTokens` she cannot go on without a record, so this
-   * waits for the one under way or writes one now. Otherwise it returns at once.
+   * waits for the one under way or writes one now unless a failed write is cooling down.
    */
   async require(tokens: number): Promise<void> {
     // No valid configuration yet: keep the whole conversation, never guess a prompt.
@@ -171,7 +173,7 @@ export class Handoff {
     const epoch = this.epoch;
     // Only the existing high-water wait can wait for settings; ordinary requests never do.
     await this.refresh();
-    if (this.stopped || epoch !== this.epoch || tokens < this.limits().mustTokens || this.record !== undefined || this.adopting !== undefined) return;
+    if (epoch !== this.epoch || !this.mustWait(tokens) || this.record !== undefined || this.adopting !== undefined) return;
     if (this.writing === undefined) this.start(false);
     await this.writing?.promise;
   }
