@@ -20,13 +20,8 @@ import { resolveReleaseVersion } from "./release-version.mjs";
 
 const clientRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectRoot = resolve(clientRoot, "..", "..");
-const clientManifest = JSON.parse(readFileSync(join(clientRoot, "package.json"), "utf8"));
 const dockManifest = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
-const version = resolveReleaseVersion({
-  cwd: projectRoot,
-  explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
-  fallbackVersion: clientManifest.version,
-});
+const version = resolveReleaseVersion();
 const packageMode = process.env.ALUDOCK_WINDOWS_PACKAGE_MODE || "full";
 if (packageMode !== "full" && packageMode !== "reuse") {
   throw new Error("ALUDOCK_WINDOWS_PACKAGE_MODE must be full or reuse");
@@ -105,7 +100,7 @@ try {
     schemaVersion: 2,
     productVersion: version,
     target: windowsTarget,
-    dockVersion: dockManifest.version,
+    dockVersion: version,
     nodeRequirement,
     desktop: "AluDock.exe",
     cli: "aludock.cmd",
@@ -324,7 +319,7 @@ function runNpm(runtime, args, cwd) {
 }
 
 function runtimeEnvironment(nodePath) {
-  const environment = { ...process.env };
+  const environment = { ...process.env, ALUDOCK_RELEASE_VERSION: version };
   const inheritedPathKey = Object.keys(environment).find((key) => key.toLowerCase() === "path");
   const inheritedPath = inheritedPathKey ? environment[inheritedPathKey] || "" : "";
   for (const key of Object.keys(environment)) {

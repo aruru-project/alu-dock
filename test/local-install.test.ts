@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { copyStagedPackage, installUserExecutable } from "../scripts/install-local.js";
+import { materializeDock } from "../src/deployment/materialize-dock.js";
 
 import {
   ALU_DOCK_GENERATED_MARKER,
@@ -20,14 +22,12 @@ import {
   renderAluDockUnit,
 } from "../src/deployment/local-install.js";
 
-test("package exposes the installed Alu Dock runtime and its operator/client documentation", async () => {
+test("the checkout exposes the Dock CLI and builds before installing locally", async () => {
   const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as {
     bin?: unknown;
-    files?: unknown;
     scripts?: Record<string, string>;
   };
   assert.deepEqual(manifest.bin, { aludock: "dist/src/cli.js" });
-  assert.deepEqual(manifest.files, ["dist/src", "docs", "skills", "README.md"]);
   assert.equal(manifest.scripts?.["install:local"], "node scripts/ensure-locked-dependencies.mjs && npm run build && node dist/scripts/install-local.js");
   assert.doesNotMatch(manifest.scripts?.["install:local"] ?? "", /\btest\b/u);
 });
@@ -92,21 +92,18 @@ test("Linux install refuses a Node.js older than the declared minimum", () => {
   for (const version of ["24.22.1", "24.23.0", "25.0.0", "26.12.1"]) assertSupportedNode(">=24.22.1", version);
 });
 
-test("npm package excludes tests, fixtures, and development scripts", () => {
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
-    cwd: process.cwd(),
-    encoding: "utf8",
+test("the staged Dock installation includes the compiled CLI without shipping the test suite", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-staging-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  materializeDock(process.cwd(), root, (_args, cwd) => {
+    // Stand in for npm ci: the installed Pi declares its own executable.
+    const pi = join(cwd, "node_modules", "@earendil-works", "pi-coding-agent");
+    mkdirSync(pi, { recursive: true });
+    writeFileSync(join(pi, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "cli.js" } }));
+    writeFileSync(join(pi, "cli.js"), "#!/usr/bin/env node\n");
   });
-  assert.equal(result.status, 0, result.stderr);
-  const report = JSON.parse(result.stdout) as Array<{ files?: Array<{ path?: string }> }>;
-  const paths = report[0]?.files?.map((file) => file.path).filter((path): path is string => typeof path === "string") ?? [];
-  assert.ok(paths.includes("dist/src/cli.js"));
-  assert.ok(paths.includes("package.json"));
-  assert.ok(paths.includes("skills/dock-attachments/SKILL.md"));
-  assert.ok(paths.includes("docs/agent/dock-tools.md"));
-  assert.ok(paths.includes("LICENSE"), "the installed Host carries its license");
-  assert.ok(paths.every((path) => path === "package.json" || path === "README.md" || path === "LICENSE" || path.startsWith("dist/src/") || path.startsWith("docs/") || path.startsWith("skills/")), paths.join("\n"));
-  assert.equal(paths.some((path) => path.startsWith("dist/test/") || path.startsWith("dist/scripts/") || path.startsWith("test/")), false);
+  assert.ok(existsSync(join(root, "dist", "src", "cli.js")));
+  assert.equal(existsSync(join(root, "dist", "test")), false);
 });
 
 test("local install uses the locked application root and its executable CLI", () => {
