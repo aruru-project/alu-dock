@@ -149,6 +149,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   function editor(document: AssistantDocumentName): Readonly<AssistantDocumentEditor> {
     return editors.get(editorKey(app.activeConnectionId ?? '', document)) ?? untouched
   }
+  const hasDrafts = computed(() => editor('persona').draft !== null || editor('notes').draft !== null
+    || (identity.value.draft !== null && identity.value.draft !== identity.value.current))
   /** Reads the Host's version. An unchanged editor shows it; a draft keeps its base and learns of a newer version. */
   async function loadDocument(document: AssistantDocumentName) {
     const context = app.connectionContext
@@ -264,7 +266,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   return {
     infos, available, info, current, loadInfo,
     identity, identityValue, loadIdentity, editIdentity, saveIdentity,
-    editor, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
+    editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
   }
 })

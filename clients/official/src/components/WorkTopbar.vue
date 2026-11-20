@@ -26,7 +26,7 @@ const { openHostSettings } = useHostStore()
 const { openAppSettings } = usePlatformStore()
 const surfaces = useSurfacesStore()
 const { deliveryOpen, dockToolsTrigger, dockToolsOpen } = storeToRefs(surfaces)
-const { openControlCenter, openDockTools, openAssistant } = surfaces
+const { openControlCenter, openDockTools } = surfaces
 const deliveries = useDeliveriesStore()
 const { pendingDeliverableCount } = storeToRefs(deliveries)
 const { openDeliveryTray } = deliveries
@@ -47,7 +47,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     <div class="alu-navbar-left">
       <img :src="dockIconUrl" class="alu-navbar-avatar session-dot" alt="Alu Dock" />
       <ConnectionStatus v-if="selected && selected.lifecycle === 'active'" :state="observationStatus" :label="connectionLabel" :busy="refreshing" @reconnect="refreshCurrent" @settings="openHostSettings" @works="app.workDrawerOpen = true" />
-      <button type="button" class="alu-navbar-breadcrumb" :title="resident ? '人设、记忆和设置' : '查看项目状态'" :aria-label="resident ? '助手设置' : '查看项目状态'" :disabled="!selected" @click="resident ? openAssistant() : openControlCenter('resources')">
+      <button type="button" class="alu-navbar-breadcrumb" :title="resident ? '查看助手状态' : '查看项目状态'" :aria-label="resident ? '查看助手状态' : '查看项目状态'" :disabled="!selected" @click="openControlCenter('resources')">
         <span v-if="!app.needsPairing && !resident" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
         <span v-if="!app.needsPairing && !resident" class="alu-nav-sep">/</span>
         <Sparkles v-if="!app.needsPairing && resident" :size="16" class="alu-nav-assistant-mark" aria-hidden="true" />
