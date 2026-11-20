@@ -60,7 +60,7 @@ Fixture 扮演协议对端，使用满足契约的最少行为。
 
 生产 Worker 的 login-shell bootstrap 按系统账户重新设定 HOME，因此仅修改测试进程的 HOME，或指定 fixture `workerEntry`，不足以隔离它。普通 Pi runtime 测试通过既有 `workerEnvironment` 入口（可复用 `test/fixtures/isolated-pi-instance.ts`）传入明确的临时环境；外层测试进程仍需隔离 HOME/XDG/Pi/npm 路径与凭据。不要在个人开发环境直接以 CLI `serve --dev` 启动后创建 Worker 来代替这个入口。CLI 专属的此类场景须在账户本身也是一次性环境时验证，未运行时明确列出，不记为全套通过。出处：card #271 隔离联调实际发现登录 Shell 恢复真实账户 HOME。
 
-测试启动的 Host 进程、TUI 客户端和 Pi Worker（`workerEnvironment`）的环境用 `test/support/isolated-process-environment.ts` 构造，不从 `...process.env` 展开：在 Dock 管理的 Pi 里跑测试时，当前进程带着真实的 `PI_CODING_AGENT_DIR` 和导出的凭据。需要真实 Worker 的机器间场景，CLI Host 只承担不创建 Worker 的部分，Work 放在测试进程内的 Host 或 `test/fixtures/subhost-machine.ts` 上。出处：card #351，CLI 启动的 SubHost 每跑一次在真实 `~/.pi/agent/sessions` 留下一个空目录。
+测试启动的 Host 进程、TUI 客户端和 Pi Worker（`workerEnvironment`）的环境用 `test/support/isolated-process-environment.ts` 构造，不从 `...process.env` 展开：在 Dock 管理的 Pi 里跑测试时，当前进程带着真实的 `PI_CODING_AGENT_DIR` 和导出的凭据。需要真实 Worker 的机器间场景，CLI Host 只承担不主动创建 Pi Work 的部分，Work 放在测试进程内的 Host 或 `test/fixtures/subhost-machine.ts` 上。出处：card #351，CLI 启动的 SubHost 每跑一次在真实 `~/.pi/agent/sessions` 留下一个空目录。
 
 ## 用户能看到的东西
 
@@ -106,7 +106,7 @@ git diff --check
 
 新增可选能力接入已有用户入口时，须核对新旧 Client/Host 的组合，不让新增查询成为基础操作的错误前置。出处：system 列表接入新建时遗漏“新 Client→旧 Host”，同版本成功和“旧 Client→新 Host”默认测试未覆盖这个实际回归。常驻回归保护明确的缺能力结果及真实入口；旧发布版本的隔离联调记录其原始代码、锁和实际验证边界，不把模拟错误或同版本组件测试称为四组合联调。
 
-根目录 `npm run test:client-protocol` 是 Linux 原生跨语言门：它在完全隔离的临时 HOME/XDG/Pi/state 路径启动 production CLI Host，使用官方 Rust core 的 public local-connection API 显式选择 Main 并读取一个静态 saved session。它证明 Host 与实际 Rust reader 的 Protocol V2 兼容，不替代 Android/WebView、mTLS、Windows lifecycle 或真机验收；非 Linux 环境会明确失败而不是静默跳过。
+根目录 `npm run test:client-protocol` 是 Linux 原生跨语言门：官方 Rust core 通过本机连接从 CLI Main 分页读取保存的会话，并读写助手资料与机器默认 system。CLI 的 HOME/XDG/Pi/state 指向测试临时目录；常驻助手经登录 shell 启动时的只读范围见[技术债](technical-debt.md#cli-main-测试的助手会读取真实账户的-shell-配置和-skill)。门内另有 Host 入口验证创建缺失目录。它证明 Host 与实际 Rust reader 的 Protocol V2 兼容，不替代 Android/WebView、mTLS、Windows lifecycle 或真机验收；非 Linux 环境会明确失败而不是静默跳过。
 
 ### Worker 与 Agent adapter
 

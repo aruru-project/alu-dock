@@ -88,7 +88,7 @@ npm run client:install
 npm run package:windows
 ```
 
-Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。源码 checkout 默认使用当前分支可达的最新版本 tag，正式构建可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 供后续构建复用 Desktop/DLL；仅 Host/Worker/Pi 改动时无需重编译 Desktop，用户安装仍使用 Setup.exe。
+Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。版本与 Host 共用[构建时的发行版本](../../docs/agent_maps/deployment.md#本地安装与-windows-发行)，可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 供后续构建复用 Desktop/DLL；仅 Host/Worker/Pi 改动时无需重编译 Desktop，用户安装仍使用 Setup.exe。
 
 发布标签支持 `v0.2.14` 和 `v0.2.14-rc.1` 这两种格式；不是任意文本后缀。RC 会标为 GitHub 预发布，不替换最新正式版，也不作为 Windows 组件复用的基准。同一基础版本的正式版优先于 RC，RC 序号按数字排序。
 

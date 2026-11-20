@@ -98,7 +98,7 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 Host 设置按一条分界线开放：决定“谁能连进来、从哪连进来”的设置只在本机改，其余 Agent 工作相关的设置配对过的设备也能改。这是防君子不防小人：配对过的设备本就能通过 Worker 做任何事，这里只保证设置页上不能随手改掉信任关系。
 
 - 只在本机：Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，SubHost 加入 Main 的信任，以及本机 Dock 角色和 Main 地址。它们是本机 `aludock` Hub 的 service-management surface，不属于 Protocol V2，不通过本地 IPC 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin endpoint 中提供；远程客户端不能开启或延长连接窗口。既有的 `machine.remove` 仍对所有连接开放，收紧待单独处理。
-- 配对过的设备也能改：逐项以 Protocol V2 能力开放，当前是模型隐藏列表（`model.visibility.v1`）和子 Work 模型名单（`model.children.v1`），见下文。attachment storage directory 仍只在 Hub Settings 中提供。
+- 配对过的设备也能改：逐项以 Protocol V2 能力开放，包括 Main 的模型隐藏列表（`model.visibility.v1`）、子 Work 模型名单（`model.children.v1`），以及各机器的新建 Work 默认 system（`system.host-default.v1`），见下文。attachment storage directory 仍只在 Hub Settings 中提供。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。持久 record 的 `contentRef` 由 Agent 原生 session 与 entry identity 决定，append、refresh 和 Worker restart 不改变它；revision 与 cursor 只隔离一次分页 scan。
 
@@ -122,7 +122,7 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 
 `instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure` 和 adopt 不接受该创建配置；Agent-facing `dock_create` 只允许选择 system ID 和起始模型（`model: {provider,id}`），不开放 generic workerConfig 编辑。
 
-`workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
+`workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。浏览不创建目录，也不产生信任。`instance.create` 默认要求目录已经存在；只有明确传 `createDirectory: true`（`instance.create.directory.v1`）才在目标机器递归创建缺少的目录，然后执行原有 cwd 校验与 project trust。已存在的目录照常使用，已有文件不替换；后续创建未成功也不删除已建目录。`instance.ensure` 和 adopt 不提供这个选项。
 
 `workspace.files.v1` 是 active instance 的 Host workspace 只读能力。每次请求以受理时 snapshot 的 `cwd` 为根，path 使用 workspace-relative 形状且根为 `.`；`workspace.entry.list/get` 返回隐藏条目和不含 Host 绝对路径的 workspace metadata，`workspace.file.read` 在独立连接中按 ready/chunk/complete-or-error 顺序读取正文。Host 拒绝 absolute、`..` 与逃出根目录的符号链接，并在 open 后再次核对实际文件对象仍位于根内。安全的 contained symlink 可按目标类型读取或遍历；外部、断链或 loop symlink 仍可列出为 `targetKind: unavailable`，但不能打开。stop 后的新请求拒绝，reopen 后按普通 active instance 使用。
 
@@ -272,7 +272,7 @@ Dock tools 是 Host-owned、按来源 `instanceId` 绑定的工作能力。协�
 
 watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn；同一来源对同一目标至多一个。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 instance state，固定首次 terminal transition 的状态后删除 watch，再向当前来源 Worker 投递 target/reason/time。idle 指没有待处理输入的空闲；目标正常结束一轮时附上它最后一条已完成的回复全文（不超过一页 inspect 的长度，超过时截短并注明；放在 status 的 `reply` 里，旧 SubHost 会忽略未知 status 字段）。已发布的 SubHost 只接受 16,000 字符以内的 `reply`，更长的会让它断开整条 Main 连接，所以 Main 给 SubHost 上的 Work 的回复截到 16,000 字符并注明。watch 只用来盯别的 Work：子 Work 自己把结果发给父 Work，Host 不再替父 Work 登记等回复的 watch，`dock_cancel_watch` 也不影响父子消息。SubHost Work 的 sink 经 Dock tools port 挂在 Main 连接上。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、Dock tools 关闭会清理，目标 forget 按 unavailable 完成。cancel/off 与 completion delivery 在来源实例栅栏内排序；取消确认后，尚未交付的 completion 不能再次唤醒。watch 不跨 Host restart 恢复或补发。
 
-`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?,systemId?,saveDefault?,model?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议；除 system 与起始模型外不接受其他 Pi 启动参数；创建的都是普通 Work，常驻助手由 Main 维护，旧调用请求再开助手会被拒绝。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交加了来源标题的正文，并默认使用 `auto` delivery（由目标 Worker 原子判断：空闲立即开始，忙时下一步接入）；只有明确指定 `followUp` 才等当前轮结束。父子 Work 消息走专门的私有控制通道，同样在接收方下一步接入。`child.withParentContext: true` 时 Host 向父 Work 的 Worker 要它当前对话的副本，不接受外部传入的会话路径。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
+`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,createDirectory?,name?,machine?,systemId?,saveDefault?,model?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，`createDirectory` 随创建请求交给该机器，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议；除 system 与起始模型外不接受其他 Pi 启动参数；创建的都是普通 Work，常驻助手由 Main 维护，旧调用请求再开助手会被拒绝。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交加了来源标题的正文，并默认使用 `auto` delivery（由目标 Worker 原子判断：空闲立即开始，忙时下一步接入）；只有明确指定 `followUp` 才等当前轮结束。父子 Work 消息走专门的私有控制通道，同样在接收方下一步接入。`child.withParentContext: true` 时 Host 向父 Work 的 Worker 要它当前对话的副本，不接受外部传入的会话路径。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
 ## 资源正文阅读
 
@@ -303,22 +303,27 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 ## 创建前 system 选择
 
-`system.templates.v1` 提供 directory-scoped 能力，三条请求都接受绝对 `cwd` 和可选 `hostId`；Main/SubHost 复用 InstanceManager 的 directory routing，不创建临时 Work、不触发 trust 或加载 extensions。
+`system.templates.v1` 管理目录的候选与默认，三条请求都接受绝对 `cwd` 和可选 `hostId`；Main/SubHost 复用 InstanceManager 的 directory routing，不创建临时 Work、不触发 trust 或加载 extensions。
 
-- `system.catalog {cwd,hostId?,cursor?,limit?}` → `{cwd,candidates,total,revision,warnings,defaultSelection?,nextCursor?}`。候选按项目 `.pi/SYSTEM.md`、原生 agentDir 的 `SYSTEM.md`、目标 Host Home 下 `.aludock/systems/*.json` 文件名顺序返回。`nextCursor` 必须续读到缺省，不能只展示第一页；有效 `defaultSelection` 独立返回，即使不在当前页也可直接用于创建。
+- `system.catalog {cwd,hostId?,cursor?,limit?}` → `{cwd,candidates,total,revision,warnings,defaultSelection?,defaultSource?,nextCursor?}`。候选按项目 `.pi/SYSTEM.md`、原生 agentDir 的 `SYSTEM.md`、目标 Host Home 下 `.aludock/systems/*.json` 文件名顺序返回。`nextCursor` 必须续读到缺省，不能只展示第一页；`defaultSource` 指明默认来自 `directory`、`host` 或 `pi`。有效的目录或机器默认独立返回 `defaultSelection`，不受当前页限制；默认损坏时保留其来源，返回 warning 而不提供 `defaultSelection`；其他候选仍可显式选择。
 - 候选的唯一 DTO 是 `protocol.ts` 中的 `SystemCandidate`：`{id,name,kind,path,workerConfig,warning?}`；`kind` 为 `project-system | global-system | dock-template`。`id` 是 cwd-bound opaque identity，不是文件路径。`warning` 表示该候选当前不可使用；可以预览原文并让用户修复或重选。
 - `system.content {cwd,hostId?,id,offset?,revision?}` 只读当前目录候选，不接受任意路径。与 `resource.content` 共用 `readResourceContent` 和唯一的 `ResourceContentResult` parser：`{text,revision,nextOffset?}`，字节续读、UTF-8 和文件变化处理完全一致。
 - `system.default.set {cwd,hostId?,id?,operationId,assistant?}` → `{selection?}` 保留兼容的请求形状；当前 Host 要求提供普通 Work 的 system `id`，拒绝 `assistant: true`。这是独立的显式保存操作，复用 operation ledger，只写本目录 `.aludock/system-default.json` 的 `{id}`，不继承父目录、不保存正文。旧文件中的 `assistant: true` 可以读取，但不再决定创建身份；只有显式保存默认时才从文件中移除。普通查询和创建确认都不写这个文件。常驻助手由 Main 管理，不能存成目录默认（见[个人助手](#个人助手assistantv1)）。
 
-创建默认归实际创建 Worker 的 Host：`DockRegistry.createNew` 在 project trust 完成、cwd 规范化后解析最终 `workerConfig`，覆盖 `instance.create` 和 `instance.ensure` 新建。普通 Work 显式 system 选择优先；省略时使用本目录保存的默认；仅在未配置目录默认时使用 Pi 原生行为。Main 常驻助手走自己的启动入口，不应用目录的 system 默认。其他 `workerConfig` 字段不会关闭 system 默认。已配置但损坏、不可读或目标缺失时返回 `system_default_unavailable`，不静默换正文，新旧客户端一致。最终配置进入既有 creation/catalog 路径；同一创建操作不重选默认，ensure 命中已有 Work、adopt 和 reopen 不重新应用目录默认。
+`system.host-default.v1` 管理目标机器自己的默认，不需要 `cwd`：
+
+- `system.host-default.get {hostId?,cursor?,limit?}` → `{selection,options,warnings,revision,nextCursor?}`。候选只含该机器的全局 `SYSTEM.md`（`{kind:"global-system"}`）和 Dock 模板（`{kind:"dock-template",name}`），不含项目文件；`options` 可分页，损坏的设置或目标在 `warnings` 中说明。
+- `system.host-default.set {hostId?,operationId,selection}` → `{selection}`。选择文件时校验它；传 `null` 表示「不指定」。目标 Host 经 operation ledger 将 `{selection}` 写入自己 Home 下的 `.aludock/work-system-default.json`，不保存正文，也不改已有 Work 或目录默认。
+
+`DockRegistry.startNew` 在 project trust 完成、cwd 规范化后解析最终 `workerConfig`。普通 Work（含 `dock_spawn` 的子 Work）依次采用本次显式选择、本目录默认、目标机器默认；两级都未指定才交 Pi 原生发现。生效那一级的设置损坏、不可读或目标缺失时返回 `system_default_unavailable`，不退到下一级；显式选择可绕过坏默认。起始模型等其他配置不改变该顺序。规则适用于 `instance.create` 和 `instance.ensure` 新建；同一创建操作不重选默认，ensure 命中已有 Work、adopt 和 reopen 不重新应用。Main 常驻助手走自己的启动入口。
 
 客户端只在用户明确选择时，将候选 `workerConfig` 原样传给 `instance.create`；使用 Host 默认时省略选择，不把 catalog 的旧快照变成本次 override。显式选择、目标 Host/cwd 在 project trust continuation 中保留。预览、刷新、返回、取消均不创建 Work。坏默认在 catalog 中仍作为 warning 展示，让支持选择的客户端可以明确改选；不代替创建边界的报错。保存默认与 create 有各自的 operation/失败结果，不合并成一次成功提示。
 
-Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一实例；它拥有目录默认和 Dock 模板文件事实。Pi 原生来源、五字段模板校验、显式选择识别及 opaque workerConfig 合并由组合入口注入的 provider 负责。CLI 的 Main/SubHost 均使用已解析的原生 agentDir 与机器本地 Home。首次 catalog 发现触发初始化；默认解析、content 和 default.set 不初始化模板，不能通过读取缺失来源来复活它。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
+Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一实例；它读取本机的目录默认、机器默认和 Dock 模板文件。Pi 原生来源、五字段模板校验、显式选择识别及 opaque workerConfig 合并由组合入口注入的 provider 负责。CLI 的 Main/SubHost 均使用已解析的原生 agentDir 与机器本地 Home。首次 `system.catalog` 或 `system.host-default.get` 触发初始化；创建时解析默认、读取正文和保存默认不初始化模板，不能通过读取缺失来源来复活它。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
 
 `pi-default.json` 由 Dock 维护，始终是当前 Pi 的默认正文：CLI Host 启动时（在任何 Work reopen 之前）和首次 catalog 初始化时，内容与 `getDefaultSystemPromptBody()` 的序列化不同就整份替换，不判断是否由用户修改，也不提示；想保留自己的正文，另存为其他名字的模板。替换只发生在文件仍存在时，被删除的模板不会因此重建。用这份模板的 Work 在下次加载 resource（新建、reopen、reload）时读到新正文。
 
-官方 Client、Hub/direct new 保留选择和阅读界面；有效目录默认可直接进入创建，由 Host 在创建时应用，否则由用户明确选择。旧的助手目录标记不再算有效创建默认。官方客户端连接仍提供 `instance.assistant.v1` 的旧 Host 时保留旧选择；连接新 Host 时不显示创建助手入口。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
+不同入口展示同一份默认：Hub/direct new 对有效目录或机器默认直接创建；官方 Client 可对有效目录默认直接创建，机器默认则预选后请用户确认，见[官方 Client](official-client.md#改动入口与事实归属)。旧的助手目录标记不再算有效创建默认。官方客户端连接仍提供 `instance.assistant.v1` 的旧 Host 时保留旧选择；连接新 Host 时不显示创建助手入口。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
 
 ## 个人助手（`assistant.v1`）
 
@@ -327,12 +332,11 @@ Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一�
 - Main 启动后由 Registry 自动确保她在 `~/.aludock/assistant`。全局显示名来自 `assistant.settings.displayName`，默认 `alu`，独立于 Work 的会话标题；Host 经既有 `session.info_changed` 发布显示名，所有客户端读同一事实。名字读取不阻塞 Worker 启动：助手服务的 ready/自然恢复通知触发一次后台读取，失败保留已知名，Host 停止时退订并取消读取。常驻本身不调用模型；仅消息、提醒等实际事件叫醒她。
 - 升级时 Main 选择本机 catalog 中最近使用的助手对话，其余旧助手改为普通 Pi Work；SubHost 的旧助手全部改为普通 Pi Work。原会话文件与 Main 记忆库不删除。
 - 不再广告创建助手的 `instance.assistant.v1`。旧请求带 `assistant: true` 会被明确拒绝；新 `dock_create` 不再提供该参数。官方新建页继续按已有能力信息判断，因此连旧 Host 的原有选择仍可用，连新 Host 不出现选择。
-- 旧 `.aludock/system-default.json` 的助手标记只在读盘时兼容，不再生效；保存的普通 system 继续生效，下一次明确保存默认时去掉旧标记。
 - 她停止后保留 catalog 记录与同一个 Work ID，Host 打开新的 Worker 接续对话。`instance.stop` 仍返回旧 Worker 的 stopped 回执，正常重开在答复前完成；客户端保留选中的她，操作后刷新一次以绑定新 Worker。重开失败会说明原因、保留记录并重试，不把普通 Work 一起卡住。
 - Worker 出错后 Host 同样自动恢复，重试从 1 秒退避到最多 30 秒；旧进程是否已退出不确定时不能开第二个。Host 退出先取消恢复，再停止 Worker。她不能被 forget/prune 删除；她的子 Work 随她的旧 Worker 停止，不随她恢复。
-- 普通创建仍按目录 system 和项目信任规则；她不加载项目资源，自动打开她不代表给项目授信。
+- 普通创建仍按所在机器的 system 和项目信任规则；她不加载项目资源，自动打开她不代表给项目授信。
 - 人设、称呼、语言风格和工作约定均来自可编辑的 persona.md / notes.md。出厂示例只在 persona.md 不存在时写一次；Worker 不再在已编辑的人设后追加一段固定工作提示词。工具声明、记忆和每轮现状仍由实际能力和状态生成。
-- 官方客户端在侧栏 header 下提供唯一身份导航，不放进普通 Work 列表或计数，点聊天顶栏名字进入人设、记忆和设置。工具可查看，扩展由 Main 本地文件管理，Dock tools 总开关保留；她没有的 Pi 操作不展示。旧 `assistant: true` Pi Work 仍按真实 runtime 保留 Pi 操作与身份小标。每次被叫醒后的回复各成一轮，不让后来的提醒折掉前一次答复。
+- 官方客户端把常驻助手与普通 Work 分开；对话、状态与设置各自的入口见[助手身份、设置和扩展入口](official-client.md#助手身份设置和扩展入口)。工具可查看，扩展由 Main 本地文件管理，Dock tools 总开关保留；她没有的 Pi 操作不展示。旧 `assistant: true` Pi Work 仍按真实 runtime 保留 Pi 操作与身份小标。每次被叫醒后的回复各成一轮，不让后来的提醒折掉前一次答复。
 
 **助手资料（`assistant.v1`，只有 Main 提供）**
 
@@ -343,22 +347,22 @@ Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一�
 - `assistant.document.get {document}` → `{document,text,revision}`；`document` 为 `persona`（人设）或 `notes`（手写设定）。
 - `assistant.document.set {operationId,document,text,baseRevision}` → `{document,text,revision}`：整份替换，沿用 operation ledger。`baseRevision` 不是当前版本时返回 `assistant_document_changed`，内容不变；超过 `MAX_ASSISTANT_DOCUMENT_BYTES`（256 KiB）返回 `assistant_document_too_large`。她用工具按原文替换一段时，找不到原文为 `assistant_edit_not_found`，原文出现不止一次为 `assistant_edit_ambiguous`。
 - `assistant.search {query?,from?,to?,cursor?,limit}` → `{hits,nextCursor?}`：按关键词、时间或两者一起搜她经历过的对话。`query` 按空白分成几个词，全部出现才算命中；三个字及以上的词不分大小写，一两个字的词只有英文字母不分大小写；`from`/`to` 是时间范围，只写日期时按 Main 的本地日，`to` 含当天；没有 `query` 时必须给时间范围，列出这段时间里的全部条目。结果从新到旧，`limit` 最多 50，`nextCursor` 续读下一页。每条命中是 `{session,entryId,at,kind,snippet}`，`snippet` 是命中处前后最多 400 个 UTF-16 单位的原文（含省略号）。
-- `assistant.context {sessionId,entryId,before,after}` → `{session,entries,hasBefore,hasAfter}`：从这条往前读同一分支上的 `before` 条、往后读 `after` 条（各最多 50），`entries` 按时间从早到晚、包含这一条；放不进一条记录时从远处少给，`hasBefore`/`hasAfter` 说明两头还有没有。找不到这一条返回 `assistant_entry_not_found`。搜索或读前后文从提问起（含排队）15 秒没有结果时返回 `assistant_query_timeout`；同时排队的读太多时直接返回 `assistant_unavailable`。
+- `assistant.context {sessionId,entryId,before,after}` → `{session,entries,hasBefore,hasAfter}`：从这条往前读同一分支上的 `before` 条、往后读 `after` 条（各最多 50），`entries` 按时间从早到晚、包含这一条；放不进一条记录时从远处少给，`hasBefore`/`hasAfter` 说明两头还有没有。找不到这一条返回 `assistant_entry_not_found`。搜索或读前后文从提问起（含排队）15 秒没有结果时返回 `assistant_query_timeout`；读取队列已满时直接返回可重试的 `assistant_busy`。
 - `session` 是 `{sessionId,sessionFile?,cwd?,name?,workId?,machine?,startedAt,lastAt}`：`workId` 是说这句话时那个 Work 的 Main ID（那个 Work 可能已经停止），`machine` 是机器名；搜索命中里是这一条自己的，前后文里是最后一条的。助手相关的回答按 Protocol V2 的规矩忽略不认识的字段。条目 `{entryId,parentId?,at,kind,text,toolName?,toolCalls?,truncated?}` 的 `kind` 为 `user | assistant | tool_result | bash | summary | notice | work`（`work` 是别的 Work 对她说的话：子 Work 的消息、`dock_watch` 通知、别的 Work 用 `dock_send` 送进她输入的消息，从来不是主人的话）；助手自己的回复带她调用的工具名和参数（各截到 2,000 字符），超过 32,000 字符的正文截断并标 `truncated`，原文仍在 Agent 自己的会话文件里。
 - `assistant.memory.list {query?,topic?,state?,resident?,author?,from?,to?,cursor?,limit}` → `{memories,nextCursor?}`：她的记忆，按记下的先后从新到旧（最近新记住的就是第一页），`limit` 最多 100。`state` 省略时只列在用的（`active`），也可列 `retired`（作废）或 `forgotten`（忘掉）。`query` 按空白分词、全部出现才算命中。`from`/`to` 按说起的时间（`saidAt`）筛，写法和 `assistant.search` 一样。
 - `assistant.memory.get {id}` → `{memory,history}`：一条记忆和它最近 50 次改动（从新到旧，`{at,author,action,text?}`）。
 - `assistant.memory.add {operationId,topic,text,resident,sources?}` → `memory`：主人新写一条；`sources` 是 `{sessionId,entryId}`，指向记录过的对话，找不到时返回 `assistant_entry_not_found`。
 - `assistant.memory.update {operationId,id,revision,text?,topic?,resident?,state?}` → `memory`：改写、换分类、设常驻、作废（`retired`）、忘掉（`forgotten`）或恢复（`active`）。`revision` 不是当前版本时返回 `assistant_memory_changed`，什么都不改；编号不存在返回 `assistant_memory_not_found`；要忘掉的那条已经合并进一条仍在用的记忆时返回 `assistant_memory_merged`（说明合并进了哪一条，什么都不改），因为只忘掉它，同样的事还留在合并后的那条里。主人设置常驻与否（即使和原来一样）后，后台不再改这一条的常驻设置。
 - `assistant.settings.get {}`、`assistant.settings.set {operationId,displayName?,extractionModel?,extractionSpeed?,handoff?}` → `{displayName?,extractionModel?,extractionSpeed?,handoff?}`：省略的字段保留原值。`displayName` 是 Main 持久化的全局显示名字，不改人设或会话；旧 Host 没有字段时不提供改名控件。`extractionSpeed` 默认 standard，独立于聊天速度。`extractionModel` 是整理记忆用的模型 `{provider,id}`；`null` 停止整理（对话仍记录，选回模型时补读），换模型后重读之前跳过的段。
-- `handoff` 是 `{startTokens,keepRecentTokens,prompt}`：两个 token 数可为 `null`（自动）或正整数，两项都手填时保留量须小于启动值。`prompt` 是完整可编辑写作要求，出厂正文只在 core 定义一次，Main 返回并保存在 SQLite meta。旧 Host 不返回此项时客户端显示不支持。整理沿用当前聊天模型，Worker 计算实际采用值并显示状态，见 [runtime](runtime.md#个人助手)。
+- `handoff` 是 `{startTokens,keepRecentTokens,prompt}`：两个 token 数可为 `null`（自动）或正整数，两项都手填时保留量须小于启动值。`prompt` 是完整可编辑写作要求，出厂正文只在 core 定义一次，Main 返回并保存在 SQLite meta。旧 Host 不返回此项时客户端显示不支持。整理沿用当前聊天模型，Worker 根据当前模型的窗口计算实际采用值，见 [runtime](runtime.md#个人助手)。
 - 扩展配置已从 `assistant.settings` 移到 Main 助手工作区的 `extensions.json`；迁移保留旧参数与数据目录，文件冲突不覆盖用户文件。Worker 装载工具、命令和 Skill 声明，Host 不解释扩展业务配置；详情见[助手扩展 API](../agent/assistant-tool-extensions.md)。
 - `assistant.reorganize {operationId,extractionModel}` → `{extractionModel,retiredMemories,removedLines}`：主人用这个模型从头整理。后台整理出、主人和她都没碰过的记忆作废（记成后台作废的，`author: extraction`；能在已作废里逐条恢复），后台写的、主人和她都没手动改过的时间线行删掉（改过之后又被提炼延长的也算改过；随被忘掉的记忆一起收起的行留着，记忆恢复时照常回来；删掉的行号不再给新行用，客户端或会话里还拿着旧行号的改动不会落到新行上），所有对话从头重读，模型同时设成整理用的模型；主人或她写过、改过的记忆和行，以及主人定过是否常驻的记忆都留着。
-- 记忆 `memory` 是 `{id,topic,text,resident,state,author,createdAt,updatedAt,saidAt,revision,sources,sourceCount,supersededBy?}`。`topic` 为 `owner`（主人这个人）、`preferences`（喜好和习惯）、`relationship`（他们之间）、`events`（经历过的事）、`self`（她自己）；`resident` 为每次开会话都载入，否则只在她查的时候用；`author` 是最近一次改动的来源：`extraction`（从对话提炼）、`dreaming`（后台整理）、`assistant`（她在对话里改的）、`owner`（主人改的，客户端的改动都算主人的）；`saidAt` 是这件事被说起的时间：出处里最早一句的时间，没有出处才是写下的时间（`createdAt` 是提炼或写下的时间，不是事情的时间）；`sources` 是最早的至多 20 处出处 `{sessionId,entryId,at}`，共 `sourceCount` 处；`supersededBy` 是它被合并进去的那条。被忘掉的记忆不再载入，它的出处在搜索里也找不到，读前后文时只显示“这一条主人让我忘掉了”；她对这些出处的回答、之后给这段对话写的摘要同样读不到，覆盖这些话的时间线行也一起忘掉；恢复后都回来（期间被单独恢复或忘掉过的行按那次的决定）。别处另外提到同一件事的原话不受影响。被忘掉的，以及主人或她作废的记忆，后台重读对话时不会再记一遍。
+- 记忆 `memory` 是 `{id,topic,text,resident,state,author,createdAt,updatedAt,saidAt,revision,sources,sourceCount,supersededBy?}`。`topic` 为 `owner`（主人这个人）、`preferences`（喜好和习惯）、`relationship`（他们之间）、`events`（经历过的事）、`self`（她自己）；`resident` 为每次读取对话开头时都载入，否则只在她查的时候用；`author` 是最近一次改动的来源：`extraction`（从对话提炼）、`dreaming`（后台整理）、`assistant`（她在对话里改的）、`owner`（主人改的，客户端的改动都算主人的）；`saidAt` 是这件事被说起的时间：出处里最早一句的时间，没有出处才是写下的时间（`createdAt` 是提炼或写下的时间，不是事情的时间）；`sources` 是最早的至多 20 处出处 `{sessionId,entryId,at}`，共 `sourceCount` 处；`supersededBy` 是它被合并进去的那条。被忘掉的记忆不再载入，它的出处在搜索里也找不到，读前后文时只显示“这一条主人让我忘掉了”；她对这些出处的回答、之后给这段对话写的摘要同样读不到，覆盖这些话的时间线行也一起忘掉；恢复后都回来（期间被单独恢复或忘掉过的行按那次的决定）。别处另外提到同一件事的原话不受影响。被忘掉的，以及主人或她作废的记忆，后台重读对话时不会再记一遍。
 - `assistant.timeline.list {query?,from?,to?,state?,cursor?,limit}` → `{episodes,nextCursor?}`：她的时间线，一行是一个会话里的一段，写那段时间他们在做什么、聊什么，按开始时间从新到旧，`limit` 最多 100。`from`/`to` 的写法和 `assistant.search` 一样，列出和这段时间有重叠的行；`query` 按空白分词、全部出现才算命中；`state` 省略时只列在用的（`active`），也可列 `forgotten`。
 - `assistant.timeline.get {id}` → `episode`。
 - `assistant.timeline.update {operationId,id,revision,text?,state?}` → `episode`：改写一行、忘掉（`forgotten`）或恢复（`active`）。`revision` 不是当前版本时返回 `assistant_episode_changed`，什么都不改；编号不存在返回 `assistant_episode_not_found`。主人改过的行，后台不再改。
 - 时间线的一行 `episode` 是 `{id,session,entryId,fromAt,toAt,text,state,author,createdAt,updatedAt,revision}`：`session` 同上；`entryId` 是它覆盖的第一句，从那里能读到原话（`assistant.context`）；`fromAt`/`toAt` 是它覆盖的第一句和最后一句说出的时间；`author` 为 `extraction`、`assistant` 或 `owner`；`state` 为 `active` 或 `forgotten`。忘掉一行只是不再列出、不再载入，它覆盖的原话不受影响；一条记忆被忘掉时，覆盖它出处的行也跟着忘掉，因为那一行可能说着同一件事。
-- 助手服务没有运行时返回 `assistant_unavailable`。
+- 助手服务未运行或正在停止时返回可重试的 `assistant_unavailable`。
 
 ## 命令发现
 

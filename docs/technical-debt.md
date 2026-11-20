@@ -82,7 +82,7 @@
 
 ### 债务
 
-在请求已经到达 SubHost、但完整创建链路尚未成功时断线，SubHost 可能留下一个尚未工作的空实例。它不会自行调用模型、执行 Agent、发送用户内容或修改 workspace；后续由正常实例对账处理。最坏结果是多占用少量本机资源，并可能多出一条可清理的 Work。
+在请求已经到达 SubHost、但完整创建链路尚未成功时断线，SubHost 可能留下一个尚未工作的空实例。这个空实例不会自行调用模型、执行 Agent 或发送用户内容；后续由正常实例对账处理。若请求明确指定 `createDirectory: true`，已创建的工作目录也会留下。
 
 这项接受只适用于没有开始 Agent 工作的 `instance.create` 空实例，不扩大到 prompt、stop、forget 或其他已经产生用户业务结果的操作。
 
@@ -97,7 +97,7 @@
 
 - 运行证据显示创建断线和空实例残留已经成为常见现象；
 - 空实例明显干扰用户列表或形成可观测的资源压力；
-- 创建流程以后会自动启动 Agent、调用模型或修改 workspace；
+- 创建流程会自动启动 Agent、调用模型，或在用户要求创建的目录之外修改 workspace；
 - 产品开始要求创建失败后绝不能留下任何本机实例。
 
 未来重访时仍应保持：创建过程中断线对用户就是创建失败，不自动重放创建，也不把内部执行步骤暴露成新的用户状态。
@@ -295,3 +295,63 @@ Pi 现有机制已覆盖 Dock 自带扩展的需要；没有任何一个真实�
 ### 何时重访
 
 来源行的格式要改、出现主人的话被记成别的 Work 说的实例，或者父子之外的 Work 消息改用别的投递方式时，由主人决定是否换成结构化标记。
+
+## CLI Main 测试的助手会读取真实账户的 shell 配置和 Skill
+
+### 已知边界
+
+测试通过 CLI 启动 Main 时，Main 会自动打开常驻助手。助手 Worker 的 `agentDir`、会话和工作目录都在测试临时目录。Linux 的登录 shell 按系统账户设置 `HOME`，会读取真实账户的启动文件；随后助手会从真实 Home 的 `~/.aludock/skills` 和 `~/.agents/skills` 发现手册。测试不会往这些来源写入助手资料。
+
+代码入口：`test/client-protocol/official-rust-client.compat.ts`、`src/platform/workspace-shell-environment.ts` 和 `src/worker/agent-skills.ts`。
+
+### 何时重访
+
+需要在个人开发机上完全隔离 CLI 测试，连真实账户的 shell 启动文件和手册也不读取时。
+
+## Main 与 SubHost 的 Dock 工具请求要求一起升级
+
+### 已知边界
+
+机器连接不协商 `DockToolsRequest` 的字段版本。跨机器转发工具请求时，旧端按它认识的字段严格解析；例如新版 SubHost 向旧 Main 发带 `createDirectory: true` 的创建请求，旧 Main 会关闭整条机器连接，不只是拒绝创建。要使用这类新字段，Main 和 SubHost 需要一起升级。
+
+代码入口：`src/core/dock-tools-codec.ts` 的 `parseDockToolsRequest`、`src/control/machine-transport.ts` 的 `parseMachineRecord`。
+
+### 何时重访
+
+需要让 Main 和 SubHost 分批升级，且混版期间仍能跨机使用新增工具参数或保持机器连接时。
+
+## 助手不会按工作列表清理消失的子 Work 记录
+
+### 已知边界
+
+助手自己用 `dock_stop` 停止子 Work 时会移除记录；子 Work 从 Host 的工作列表消失时，没有对应的清理。助手每轮取的 `dock_list` 默认不含 `host_lost`，而且最多列 64 项，缺席不等于已被移除。未清掉的名称和最后一句话可能继续留在她会话的 `assistant-works` 记录里，不会让子 Work 重新运行。
+
+代码入口：`src/assistant-agent/works.ts` 的 `WorkDesk`、`src/control/instance-observation-service.ts` 的 `list`。
+
+### 何时重访
+
+实际积累的失效记录影响会话的保存或恢复，或 Host 能可靠告知助手哪些子 Work 已移除时。
+
+## 命令中心的「中止命令」也会出现在聊天确认问题上
+
+### 已知边界
+
+`interaction.requested` 告诉客户端哪个 Work 正在等回答，没有字段区分是命令还是聊天中的工具发问。命令中心只要看到当前 Work 有待答问题，就同时提供「回答问题」和「中止命令」。因此，助手聊天里弹出确认时，打开命令中心也会看到「中止命令」，即使没有执行命令。
+
+代码入口：`src/core/instance-dto.ts` 的 `interaction.requested`、`clients/official/src/components/ControlCenter.vue` 的 `commandQuestion`。
+
+### 何时重访
+
+需要针对命令和聊天分别显示或中止操作，或实际出现用户因这处文案中止了不想中止的回答时。
+
+## 助手一次只能取回最近 2,000 个遗忘条目
+
+### 已知边界
+
+Main 的 `forgotten` 查询按会话从新到旧最多返回 2,000 个已隐藏的对话条目，没有续页。Worker 靠这组编号从模型上下文里替换原话；同一会话超过上限时，仍在上下文里但不在这批编号中的较早条目可能未被替换。Main 的搜索和前后文仍按数据库里的全部遗忘标记过滤。
+
+代码入口：`src/assistant/store.ts` 的 `forgotten`、`src/assistant-agent/assistant-agent.ts` 的 `forgottenEntries`、`dropForgotten`。
+
+### 何时重访
+
+实际需要从同一会话的上下文清除超过 2,000 个遗忘条目，或发现较早的已忘原话仍进入模型上下文时。

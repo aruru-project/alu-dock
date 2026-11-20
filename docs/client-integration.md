@@ -175,7 +175,7 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 浏览初始位置可使用所选 `machine.list` 项的 `homePath`。跨文件系统导航使用同一项中 Host 权威提供的 `workspaceRoots`：客户端可以投影 `Computer` 或盘符选择页，但该虚拟位置不是 Host path；用户选择某个 root 后，再将该原生绝对路径传给 `workspace.list.v1`。Windows 客户端不得从 `C:\` 的 parent 猜测其他盘符，也不得自行扫描 A–Z；旧 Host 未提供 roots 时仍可保留绝对路径输入。
 
-浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会读取文件正文、改变进程 cwd 或授予 project trust。用户确认后仍调用 `instance.create(cwd)`。
+浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会创建目录、读取文件正文、改变进程 cwd 或授予 project trust。已有目录用 `instance.create(cwd)`；收到 `workspace_not_found` 时可让用户明确选择创建该目录和 Work，再要求 `instance.create.directory.v1` 并发送 `instance.create {cwd,operationId,createDirectory:true}`。目标 Host 创建缺少的各级目录，再做普通创建校验；权限或连接错误不是目录缺失。
 
 ## Adapter-owned Worker 创建配置
 
@@ -189,7 +189,7 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 不需要 adapter options 时省略该字段并继续只要求普通 instance catalog capability。`instance.ensure`、adopt、reopen 和 Agent-facing `dock_create` 没有该输入；reopen 自动复用最初 create 已持久化的对象。
 
-创建的默认规则始终由实际创建 Worker 的 Host 执行，不是 Client 读取 system 列表之后才成立。基础协议兼容时，四种组合保持同一合同：旧 Client→旧 Host 使用原有创建；旧 Client→新 Host 省略 system 选择，由 Host 应用目录默认、未配置才走 Pi 原生行为、配置损坏则报错；新 Client→旧 Host 明确不支持 `system.templates.v1` 时，原目录创建意图直接走不带选择的普通创建；新 Client→新 Host 保留正常默认和显式选择流程。
+默认规则由实际创建 Worker 的 Host 执行，不要求客户端先查 system 列表。客户端省略 system 选择时，新 Host 依次使用目录默认、该机器的默认和 Pi 原生行为；选中的默认损坏则报错。显式选择优先于两级默认。`system.catalog.defaultSource` 区分 `directory`、`host`、`pi`；旧 Host 可省略此字段。按机器读写默认用 `system.host-default.v1`，与目录默认分开，见[创建前 system 选择](agent_maps/control.md#创建前-system-选择)。
 
 system 查询的相关 `capability_missing` 及 `missing` 明细必须从 Rust/路由保留到界面，不能改说成网络不可达或空文件列表。仅首次目录创建且明确只缺 system 列表能力时可走普通创建；分页已开始、刷新、正文读取、显式选择、其他读取失败和结果未知均不能触发这条分流。只有成功读到空列表才显示“没有可用 system”。
 
