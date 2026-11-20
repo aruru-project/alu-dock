@@ -2,11 +2,10 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { buildSessionProjection, convertToLlm, estimateTokens, serializeConversation, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type { AssistantHandoffSettings } from "../core/assistant.js";
-import { localTime, shortLocalTime } from "../core/local-time.js";
+import { shortLocalTime } from "../core/local-time.js";
 import { DOCK_NOTE_TYPE, STATUS_NOTE_TYPE } from "./status.js";
 
 export const HANDOFF_STATUS_KEY = "滚动整理";
-export const HANDOFF_STATE_TYPE = "assistant-handoff-result";
 
 /** Where a hand-over record takes over from the conversation before it. */
 export interface HandoffRecord {
@@ -47,7 +46,6 @@ export interface HandoffDeps {
   settings(): Promise<AssistantHandoffSettings | undefined>;
   /** Brief attention/activity only. Full details are read on demand; results also stay in the session. */
   status(text: string | undefined): void;
-  rememberResult(text: string): void;
   /** One call to her model; rejects when it fails or is cancelled. */
   complete(system: string, prompt: string, signal: AbortSignal): Promise<string>;
   /** The entries of this conversation her owner had her forget, or undefined when Main does not answer. */
@@ -70,10 +68,8 @@ export class Handoff {
   private record: HandoffRecord | undefined;
   private settings: AssistantHandoffSettings | undefined;
   private reading: Promise<void> | undefined;
-  private settingsError = false;
-  private inUse: { settings: AssistantHandoffSettings; limits: HandoffLimits } | undefined;
-  private lastResult = "尚无整理结果。";
-  private activity = "等待整理。";
+  private settingsError: string | undefined;
+  private failureReason: string | undefined;
   private failedAt = 0;
   private failures = 0;
   private retryAt = 0;
@@ -82,12 +78,6 @@ export class Handoff {
   private epoch = 0;
 
   constructor(private readonly deps: HandoffDeps) {}
-
-  /** Last result belongs to this Work, not to Main's memory service. */
-  restore(result: unknown, lastCompactionAt?: string): void {
-    if (typeof result === "string") this.lastResult = result;
-    else if (lastCompactionAt !== undefined) this.lastResult = `最近采用交接记录：${localTime(new Date(lastCompactionAt))}。`;
-  }
 
   /** This never gates chatting or model selection. The first successful read enables writing. */
   refresh(): Promise<void> {
@@ -98,13 +88,13 @@ export class Handoff {
       if (this.stopped) return;
       if (settings === undefined) throw new Error("Main 尚未提供滚动整理设置");
       this.settings = settings;
-      this.settingsError = false;
-    }).catch(() => {
+      this.settingsError = undefined;
+    }).catch((error: unknown) => {
       if (this.stopped) return;
-      if (!this.settingsError) this.deps.tell(this.settings === undefined
+      if (this.settingsError === undefined) this.deps.tell(this.settings === undefined
         ? "暂时读不到滚动整理设置，完整对话会保留，聊天照常。之后会重新读取设置，再开始整理。"
         : "暂时读不到新的滚动整理设置，继续沿用上次读到的配置。聊天照常，之后会重新读取。");
-      this.settingsError = true;
+      this.settingsError = error instanceof Error ? error.message : String(error);
     }).finally(() => {
       this.reading = undefined;
       if (!this.stopped) this.showStatus();
@@ -167,49 +157,28 @@ export class Handoff {
     return record;
   }
 
-  applied(): void {
-    this.activity = "等待下一次整理。";
-    this.showStatus();
-  }
-
   /** A record that may tell something forgotten meanwhile is thrown away; the next look writes another. */
   discard(): void {
     this.epoch += 1;
     this.writing?.cancel.abort();
     this.record = undefined;
-    this.activity = "等待重新整理。";
     this.showStatus();
   }
 
   stop(): void { this.stopped = true; this.epoch += 1; this.writing?.cancel.abort(); }
 
-  get needsAttention(): boolean { return this.settingsError || this.failures > 0; }
+  get problem(): string | undefined {
+    if (this.settingsError !== undefined) return `滚动整理：${this.settingsError}`;
+    if (this.failureReason !== undefined) return `滚动整理失败原因：${this.failureReason}`;
+    return undefined;
+  }
 
   private showStatus(): void {
     if (this.stopped) return;
-    this.deps.status(this.settingsError ? "暂未读到整理设置，下次对话时重新读取"
+    this.deps.status(this.settingsError !== undefined ? "暂未读到整理设置，下次对话时重新读取"
       : this.writing !== undefined && this.failures > 0 ? `正在重试（${shortLocalTime(this.writing.startedAt)} 开始）`
       : this.failures > 0 ? `${shortLocalTime(new Date(this.failedAt))} 失败，最早 ${shortLocalTime(new Date(this.retryAt))} 后有对话时重试`
       : undefined);
-  }
-
-  /** Full details for the assistant's status page. */
-  details(): string {
-    const settings = this.inUse?.settings ?? this.settings;
-    if (settings === undefined) {
-      return `${this.settingsError ? "暂未读到" : "正在读取"}滚动整理设置，暂不整理，完整对话保留；聊天照常。\n${this.lastResult}`;
-    }
-    const limits = this.inUse?.limits ?? this.limits();
-    const parts = [this.activity, this.lastResult,
-      `${this.inUse ? "本次采用" : "当前采用"}：${limits.startTokens} token 开始整理，保留最近原话约 ${limits.keepRecentTokens} token（按整轮保留）。`];
-    if (settings.keepRecentTokens !== null && settings.keepRecentTokens !== limits.keepRecentTokens) parts.push(`保存的保留量 ${settings.keepRecentTokens} token 超过当前整理预算，运行时已收敛为 ${limits.keepRecentTokens}；保存值未改。`);
-    if (this.settingsError) parts.push("未读到新设置，沿用上次有效配置；之后会重新读取。");
-    return parts.join("\n");
-  }
-
-  private result(text: string): void {
-    this.lastResult = text;
-    this.deps.rememberResult(text);
   }
 
   private start(background: boolean): void {
@@ -218,17 +187,14 @@ export class Handoff {
     const limits = this.limits();
     const prepared = prepareHandoff(this.deps.branch(), limits.keepRecentTokens);
     if (prepared === undefined) return;
-    this.inUse = { settings, limits };
     const startedAt = new Date((this.deps.now ?? Date.now)());
-    this.activity = `正在后台整理（${localTime(startedAt)} 开始），聊天照常。`;
     const cancel = new AbortController();
     const promise = this.write(prepared, settings.prompt, cancel.signal).then((record) => {
       if (cancel.signal.aborted) return;
       this.failures = 0;
       this.toldFailure = false;
       this.record = record;
-      this.activity = "交接记录已写好，在后续请求或两轮回复之间采用。";
-      this.result(`上次整理成功：${localTime(new Date((this.deps.now ?? Date.now)()))}。`);
+      this.failureReason = undefined;
       if (background) this.deps.ready();
     }, (error: unknown) => {
       if (cancel.signal.aborted) return;
@@ -237,13 +203,12 @@ export class Handoff {
       this.failedAt = at;
       this.retryAt = at + RETRY_MINUTES[Math.min(this.failures, RETRY_MINUTES.length - 1)]! * 60_000;
       this.failures += 1;
-      this.activity = `原对话保留。${localTime(new Date(this.retryAt))} 之后的下一次对话会自动重试；对话超过 ${this.limits().mustTokens} token 时，每次请求模型前都会先重试。也可以运行 /retry-handoff 立即重试。`;
-      this.result(`上次整理失败：${localTime(new Date(at))}（${reason}）。`);
+      this.failureReason = reason;
       if (this.toldFailure) return;
       this.toldFailure = true;
       this.deps.tell(`对话整理没有成功（${reason}）。原对话保留，下次对话时会自动重试，也可以在助手设置的“滚动整理对话”里立即重试。`);
     }).finally(() => {
-      if (this.writing?.promise === promise) { this.writing = undefined; this.inUse = undefined; }
+      if (this.writing?.promise === promise) this.writing = undefined;
       this.showStatus();
     });
     this.writing = { promise, cancel, startedAt };

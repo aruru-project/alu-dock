@@ -131,10 +131,7 @@ export class AssistantToolExtensions {
     ]);
     const tools: AgentTool[] = [];
     for (const setting of settings) {
-      if (!setting.enabled) {
-        this.diagnostics.push({ severity: "info", message: `工具扩展 ${setting.id}：已停用。` });
-        continue;
-      }
+      if (!setting.enabled) continue;
       const source: SourceDto = { kind: "extension", package: setting.id, path: setting.module };
       this.resources.push(documentResource("extension", setting.id, isAbsolute(setting.module) ? setting.module : undefined, source));
       let extension: AssistantExtension | undefined;
@@ -224,7 +221,6 @@ export class AssistantToolExtensions {
           });
         }
         this.loaded.push({ id: setting.id, extension });
-        this.diagnostics.push({ severity: "info", message: `工具扩展 ${setting.id}：已加载，${ownNames.size} 个工具${ownNames.size ? `（${[...ownNames].join("、")}）` : ""}、${ownCommands.size} 个命令。` });
         for (const problem of commandProblems) this.diagnostics.push({ severity: "error", message: `工具扩展 ${setting.id}：${problem}` });
         // Manuals are independent of tool/command registration: malformed or missing skills only
         // produce resource diagnostics, and cannot roll back working tools or commands.

@@ -69,7 +69,7 @@ import { dockAttachmentTools } from "../worker/dock-attachment-tools.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
 import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
-import { HANDOFF_STATE_TYPE, HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
+import { HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
 import { memoryTools } from "./memory-tools.js";
 import { AssistantToolExtensions, type AssistantBuiltinExtensions } from "./tool-extensions.js";
 import { AssistantOpening } from "./opening.js";
@@ -251,7 +251,6 @@ class AssistantAgent implements WorkerAgent {
       contextWindow: () => this.model?.contextWindow ?? 0,
       settings: async () => (await port.call({ op: "settings_get" })).handoff,
       status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
-      rememberResult: (text) => this.saveState(HANDOFF_STATE_TYPE, text),
       complete: (system, prompt, signal) => this.complete(system, prompt, signal),
       forgotten: () => this.forgottenEntries(),
       ready: () => { if (this.running === undefined) this.settleSoon(); },
@@ -405,8 +404,9 @@ class AssistantAgent implements WorkerAgent {
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
       case "resource.get": {
-        const diagnostics: DiagnosticDto[] = [...this.skills.diagnostics, ...this.extensions.diagnostics,
-          { severity: this.handoff.needsAttention ? "warning" : "info", message: `滚动整理：${this.handoff.details().split(/\r?\n/u).join(" ")}` }];
+        const diagnostics: DiagnosticDto[] = [...this.skills.diagnostics, ...this.extensions.diagnostics];
+        const problem = this.handoff.problem;
+        if (problem !== undefined) diagnostics.push({ severity: "warning", message: problem });
         return projectResources(this.getDocumentResources(), diagnostics.map(fitDiagnostic));
       }
       // Commands run directly for her owner; no model turn is involved.
@@ -763,8 +763,6 @@ class AssistantAgent implements WorkerAgent {
     for (const [type, state] of latest) this.savedState.set(type, JSON.stringify(state));
     this.desk.restore(latest.get(WORKS_STATE_TYPE));
     this.reminders.restore((latest.get(REMINDERS_STATE_TYPE) as { reminders?: unknown } | undefined)?.reminders);
-    const lastCompaction = this.session.getBranch().findLast((entry) => entry.type === "compaction");
-    this.handoff.restore(latest.get(HANDOFF_STATE_TYPE), lastCompaction?.timestamp);
   }
 
   private clearQueue(): ClearedAgentQueue {
@@ -920,7 +918,6 @@ class AssistantAgent implements WorkerAgent {
     }
     this.session.appendCompaction(record.summary, record.firstKeptEntryId, record.tokensBefore);
     cleanupSessionResources(this.session.getSessionId());
-    this.handoff.applied();
     if (!insideReply) await this.dropForgotten(forgotten);
     this.opening.refresh();
     this.contextReady = false;

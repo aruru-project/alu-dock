@@ -221,6 +221,7 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   old.appendMessage({ role: "user", content: "看看有哪些文件", timestamp: 2 });
   old.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "ls-1", name: "bash", arguments: { command: "ls" } }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "toolUse", timestamp: 3, usage: ZERO_USAGE });
   old.appendMessage({ role: "toolResult", toolCallId: "ls-1", toolName: "bash", content: [{ type: "text", text: "README.md" }], isError: false, timestamp: 4 });
+  old.appendCustomEntry("assistant-handoff-result", "旧版内部整理结果");
   old.appendCustomMessageEntry("assistant-dock-note", "[步数上限] 这是最后一步。", false);
   old.appendMessage({ role: "assistant", content: [{ type: "text", text: "只有一个 README.md。" }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "stop", timestamp: 5, usage: ZERO_USAGE });
 
@@ -235,6 +236,8 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   const system = (asked.body.messages ?? []).filter((message) => message.role === "system" || message.role === "developer").map((message) => JSON.stringify(message.content)).join("\n");
   assert.ok(system.includes("你是**阿露**") && !system.includes("You are an expert coding assistant."), "Her opening leads the request in place of the old prompt");
   assert.ok(given(asked).includes("只有一个 README.md。"), "She has the old conversation");
+  assert.ok(!given(asked).includes("旧版内部整理结果"));
+  assert.ok((await client.history(alu.id)).entries.filter(entry => entry.customType === "assistant-handoff-result").every(entry => entry.visibility === "metadata"));
   assert.ok(!given(asked).includes("[步数上限]"), "A persisted internal closing instruction no longer tells her to stop");
   asked.text("README.md。");
   await settled(client, alu.id);

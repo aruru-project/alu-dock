@@ -61,8 +61,6 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   assert.deepEqual((await client.commands(assistant.id, "local-")).commands.map(command => command.name), ["local-echo"]);
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "legacy_local_tool"));
 
-  assert.ok((await client.resources(assistant.id)).diagnostics.some(item => item.severity === "info" && item.message === "工具扩展 echo：已加载，0 个工具、1 个命令。"));
-
   const args = 'a  "b c"\n第二行';
   const receipt = await client.prompt(assistant.id, `/local-echo ${args}`, "auto", "local-first");
   assert.equal(receipt.receipt.kind, "extension_command");

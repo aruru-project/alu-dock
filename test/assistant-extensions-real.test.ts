@@ -95,7 +95,7 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   const local = resources.resources.find(item => item.kind === "extension" && item.name === "private-kanban");
   assert.equal(local?.path, module);
   assert.equal((await client.resourceContentAll(assistant.id, local!.contentRef!)).text, await readFile(module, "utf8"));
-  assert.ok(resources.diagnostics.some(item => item.severity === "info" && item.message === "工具扩展 private-kanban：已加载，1 个工具（local_schedule）、0 个命令。"));
+  assert.deepEqual(resources.diagnostics, []);
 
   await client.prompt(assistant.id, "读一下本机日程，再看记忆整理设置。", "auto", "local-extension");
   const first = await team.providers.coordinator.request(0);
@@ -125,7 +125,7 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   assert.equal(await strip(), undefined);
   const disabled = await client.resources(assistant.id);
   assert.ok(!disabled.resources.some(item => item.kind === "extension"));
-  assert.ok(disabled.diagnostics.some(item => item.severity === "info" && item.message === "工具扩展 private-kanban：已停用。"));
+  assert.deepEqual(disabled.diagnostics, []);
   assert.equal((await client.status(assistant.id)).extensionStatus[DOCK_TOOLS_STATUS_KEY], "on");
   await client.prompt(assistant.id, "继续聊。", "auto", "after-disable");
   const after = await team.providers.coordinator.request(3);
