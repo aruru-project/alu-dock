@@ -59,11 +59,8 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
     </div>
     <button v-if="resident || (app.connectionContext && assistant.available)" type="button" class="alu-assistant-identity" :class="{ 'is-selected': resident && resident.id === selected?.id }" :aria-label="resident ? `打开${resident.displayName}的对话` : '助手'" :aria-current="resident && resident.id === selected?.id ? 'page' : undefined" @click="openResident">
-      <span class="alu-assistant-icon" aria-hidden="true"><Sparkles :size="22" /></span>
-      <span class="alu-assistant-heading">
-        <span class="alu-assistant-name">{{ resident?.displayName || assistant.identity.current || 'alu' }}</span>
-        <span v-if="resident" class="alu-instance-state" :class="`is-${workPresence(resident).tone}`" aria-hidden="true" />
-      </span>
+      <span class="alu-assistant-icon" :class="resident ? `is-${workPresence(resident).tone}` : undefined" aria-hidden="true"><Sparkles :size="22" /></span>
+      <span class="alu-assistant-name">{{ resident?.displayName || assistant.identity.current || 'alu' }}</span>
       <span class="alu-assistant-model"><template v-if="resident?.executor.model">{{ resident.executor.model.provider }}/<wbr><span>{{ resident.executor.model.id }}</span></template><template v-else>{{ resident ? '未选择模型' : '正在读取…' }}</template></span>
     </button>
     <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="pairingInProgress" @click="openDirectory">＋ 新建工作</button></div>
@@ -126,7 +123,15 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-assistant-identity.is-selected { background: var(--alu-nav-bg); }
 .alu-assistant-identity.is-selected::before { content: ''; position: absolute; top: 14px; bottom: 14px; left: 0; width: 2px; background: var(--alu-highlight); border-radius: 0 2px 2px 0; }
 .alu-assistant-icon { grid-row: 1 / 3; display: grid; place-items: center; color: var(--alu-accent); }
-.alu-assistant-heading { display: flex; min-width: 0; align-items: center; }
+/* 她的图标就是状态灯：空闲保持原色，其余与列表状态灯同色同节奏。 */
+.alu-assistant-icon.is-running { color: var(--alu-running); filter: drop-shadow(0 0 6px var(--alu-running-glow)); animation: aluInstancePulse 1.6s ease-in-out infinite; }
+.alu-assistant-icon.is-waiting { color: var(--alu-waiting); filter: drop-shadow(0 0 6px var(--alu-waiting-glow)); }
+.alu-assistant-icon.is-compacting { color: var(--alu-warning); animation: aluInstancePulse 1.6s ease-in-out infinite; }
+.alu-assistant-icon.is-stopping { color: var(--alu-warning); }
+.alu-assistant-icon.is-failed,
+.alu-assistant-icon.is-error { color: var(--alu-danger); }
+.alu-assistant-icon.is-lost { color: var(--alu-accent-dim); }
+.alu-assistant-icon.is-stopped { color: var(--alu-text-faint); }
 .alu-assistant-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; min-width: 0; padding: 2px 0; color: var(--alu-text); font-size: 14px; font-weight: 650; line-height: 1.5; text-align: left; overflow-wrap: anywhere; }
 .alu-assistant-model { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; grid-column: 2; min-width: 0; padding: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.5; text-align: left; overflow-wrap: anywhere; }
 .alu-assistant-model span { color: var(--alu-model-name); }
@@ -199,7 +204,9 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-instance-state.is-lost { background: var(--alu-accent-dim); }
 @media (prefers-reduced-motion: reduce) {
   .alu-instance-state.is-running,
-  .alu-instance-state.is-compacting {
+  .alu-instance-state.is-compacting,
+  .alu-assistant-icon.is-running,
+  .alu-assistant-icon.is-compacting {
     animation: none;
   }
 }

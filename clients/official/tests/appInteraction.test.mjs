@@ -3447,6 +3447,9 @@ try {
     const drawer = find(assistantView, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
     assert.equal(!!find(drawer, item => item.type === 'button' && /查看状态$/u.test(item.props['aria-label'] ?? '')), false)
     assert.ok(!!find(group('当前工作'), item => item.props.class === 'alu-instance-state is-idle'))
+    const identityButton = button(drawer, '打开alu的对话')
+    assert.ok(!!find(identityButton, item => item.props.class === 'alu-assistant-icon is-idle'), 'her icon carries her presence')
+    assert.equal(!!find(identityButton, item => String(item.props.class).includes('alu-instance-state')), false, 'no separate light next to her name')
     for (const area of ['alu-assistant-name', 'alu-assistant-model', 'alu-assistant-identity']) {
       assistantApp.selectWork('work'); await nextTick()
       button(assistantView, '打开工作列表').props.onClick(); await nextTick()
