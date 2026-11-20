@@ -3568,6 +3568,7 @@ try {
     assert.ok(paletteLabels().includes('Rename Session'), 'session naming stays separate from the global identity label')
     // Seen in the real Desktop trial: state and resources had become two identical entries.
     assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
+    assert.ok(paletteLabels().includes('扩展和 Skills') && text(dialog('命令中心')).includes('查看她加载的工具扩展、Skills 和加载问题'))
     await click(dialog('命令中心'), '刷新助手（Reload）重新读入人设、手写设定、记忆和工具扩展，对话接着原来的')
     assert.ok(!!dialog('刷新助手（Reload）'), 'Reload stays available with her meaning')
     await click(dialog('刷新助手（Reload）'), '取消')

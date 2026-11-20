@@ -52,7 +52,8 @@ export function workControlCommands(residentAssistant = false, displayName = '�
     if (command.name === 'reload') return { ...command, label: '刷新助手（Reload）', description: '重新读入人设、手写设定、记忆和工具扩展，对话接着原来的' }
     if (command.name === 'tools') return { ...command, label: '她能用的工具', description: '查看实际注册的工具、扩展来源和可用状态' }
     if (command.section === 'compact-session') return { ...command, label: '立即整理对话', description: '现在就把较早的对话整理成交接记录，不等对话变长' }
-    if (command.section === 'resources') return { ...command, label: command.name === 'resources' ? '已发现 Skills' : '助手状态', description: '查看她的模型、对话用量、工具和可用 Skills' }
+    if (command.name === 'resources') return { ...command, label: '扩展和 Skills', description: '查看她加载的工具扩展、Skills 和加载问题' }
+    if (command.section === 'resources') return { ...command, label: '助手状态', description: '查看她的模型、对话用量、工具和可用 Skills' }
     return command
   })
 }
