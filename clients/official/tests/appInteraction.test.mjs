@@ -3617,9 +3617,8 @@ try {
     const her = { ...otherWork, id: 'command-assistant', displayName: '助手', assistant: true, execution: 'idle', runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
     const savedCatalog = catalogNative, savedAbort = abortNative
     extraListed = [her]
-    let commands = [
+    const commands = [
       { referenceId: 'extension-echo', name: 'local-echo', source: { kind: 'extension', package: 'local' }, description: '扩展回显' },
-      { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情', argumentCompletions: false },
       { referenceId: 'retry-handoff', name: 'retry-handoff', source: { kind: 'built-in' }, description: '立即重试滚动整理（对话整理失败后用）', argumentCompletions: false },
     ]
     catalogNative = () => ({ commands: structuredClone(commands), total: commands.length, truncated: false })
@@ -3860,45 +3859,48 @@ try {
     await click('关闭')
 
     commandApp.selectWork('work'); await nextTick()
-    const openHandoffSettings = async () => {
-      button('打开工作列表').props.onClick(); await nextTick()
-      button('助手').props.onClick(); await nextTick()
-      button('设置').props.onClick(); await nextTick()
-      return find(view, item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
-    }
-    const handoffSection = await openHandoffSettings()
-    assert.equal(!!button('立即重试'), false)
-    const handoffWarning = () => find(handoffSection, item => item.props.role === 'status' && item.props.class === 'assistant-note is-warning')
-    assert.equal(!!handoffWarning(), false)
-    const warning = '10:00 整理失败：模型的回答被截断了。原对话保留，最早 10:05 后下次对话时自动重试，也可在助手设置里立即重试。'
-    her.extensionStatus = { '滚动整理': warning }
-    commandApp.applyWorkSnapshot(atHost(her)); await nextTick()
-    assert.equal(text(handoffWarning()), warning, 'assistant settings show the resident failure even while a different Work is selected')
-    const details = '滚动整理\n最近一次完成：2026-11-16 10:00\n当前采用：100000 token 开始整理，保留最近原话约 20000 token。\n\n工具扩展\nlocal：已加载，1 个工具、1 个命令。'
-    const retryReply = '已开始重新整理，聊天照常。完成或失败都会显示在状态栏。'
-    runCatalogNative = args => {
-      snapshot()
-      notify(args.operationId, args.name === 'assistant-status' ? details : retryReply)
-      event('command.handled', { operationId: args.operationId })
-      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
-    }
-    for (const [action, name, label, result] of [['立即重试', 'retry-handoff', '运行', retryReply], ['查看运行详情', 'assistant-status', '刷新', details]]) {
-      if (name === 'assistant-status') { commandApp.selectWork('work'); await nextTick(); await openHandoffSettings() }
-      const before = calls.length
-      button(action).props.onClick()
+    button('打开工作列表').props.onClick(); await nextTick()
+    button('助手').props.onClick(); await nextTick()
+    const until = async (predicate, message) => {
       const deadline = Date.now() + 3_000
-      while (!dialog() || !text(dialog()).includes(result)) {
-        assert.ok(Date.now() < deadline, `The result of /${name} did not appear after clicking ${action}`)
-        await new Promise(resolve => setImmediate(resolve))
-      }
-      assert.equal(commandApp.selectedWorkId, her.id)
-      assert.deepEqual(calls.slice(before).filter(call => call.command === 'run_catalog_command').map(({ args }) => [args.instanceId, args.name, args.arguments]), [[her.id, name, '']])
-      assert.equal(!!parameters(), false)
-      assert.equal(text(find(dialog(), item => item.props.class === 'cmd-center-run')), label)
-      assert.equal(text(find(dialog(), item => item.props.class === 'cmd-palette-footer cmd-center-footer')), 'Esc 关闭')
-      if (name === 'retry-handoff') { button('关闭').props.onClick(); await nextTick() }
+      while (!predicate()) { assert.ok(Date.now() < deadline, message); await new Promise(resolve => setImmediate(resolve)) }
     }
-    assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
+    const lists = () => calls.filter(call => call.command === 'work_catalog').length
+    const retries = () => calls.filter(call => call.command === 'run_catalog_command' && call.args.name === 'retry-handoff')
+    const warning = '10:00 失败，最早 10:05 后有对话时重试'
+    const initialLists = lists()
+    her.extensionStatus = { '滚动整理': warning }
+    button('设置').props.onClick(); await nextTick()
+    const handoffSection = find(view, item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
+    await until(() => text(handoffSection).includes(warning), 'Settings did not refresh the unselected resident status')
+    assert.equal(lists(), initialLists + 1)
+    let finishRetry
+    runCatalogNative = args => new Promise(resolve => { finishRetry = () => resolve({ receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }) })
+    button('立即重试').props.onClick(); await nextTick()
+    assert.equal(button('正在请求…').props.disabled, true)
+    assert.deepEqual(retries().map(({ args }) => [args.instanceId, args.arguments]), [[her.id, '']])
+    her.extensionStatus = {}
+    finishRetry()
+    await until(() => text(handoffSection).includes('已请求重试。整理结果会显示在她对话上方的状态里。') && !button('立即重试'), 'Settings did not show the receipt and refreshed status')
+    assert.equal(commandApp.selectedWorkId, 'work')
+    assert.equal(lists(), initialLists + 2)
+    await click('关闭')
+    commandApp.selectWork(her.id); await nextTick(); snapshot(); await nextTick()
+    event('extension.status_changed', { key: '滚动整理', text: warning }); await nextTick()
+    const strip = find(view, item => item.type === 'button' && item.props.class === 'alu-extension-status')
+    assert.equal(strip.props['aria-label'], '查看助手状态')
+    strip.props.onClick(); await nextTick()
+    const statusPage = find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '助手状态')
+    assert.ok(text(statusPage).includes('Loaded Resources') && text(statusPage).includes(warning))
+    runCatalogNative = () => { throw { code: 'connection_failed', message: '没有连上，请重试。' } }
+    button('立即重试').props.onClick()
+    await until(() => !!find(statusPage, item => item.props.role === 'alert' && text(item).includes('重试')), 'The retry error did not appear on the status page')
+    runCatalogNative = args => ({ receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) })
+    button('立即重试').props.onClick(); await nextTick()
+    event('extension.status_changed', { key: '滚动整理' }); await nextTick()
+    assert.equal(retries().length, 3)
+    assert.equal(!!button('立即重试'), false)
+    assert.equal(text(statusPage).includes('已请求重试'), false)
     await click('关闭')
 
     // P3 re-review: a new runtime retires old command results; its late failure stays natively available.
@@ -3922,11 +3924,6 @@ try {
     const retiredResults = find(view, item => item.props['aria-label'] === '当前 Work 操作结果')
     find(retiredResults, item => item.type === 'details').open = true
     await find(retiredResults, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
-    commands = []
-    commandApp.selectWork('work'); await settle()
-    actions.openAssistantStatus(); await settle()
-    assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
-    await click('关闭')
     // A fresh page has no command owner; cached errors must remain readable there.
     mounted.unmount(); await settle()
     const rebuiltPinia = createPinia()
@@ -3935,7 +3932,7 @@ try {
     rebuiltApp.selectWork('work'); await settle(); snapshot([unrelated], work); await settle()
     assert.ok(text(view).includes('本机命令失败，请重试。'), 'a page without the command center owner still shows the cached error')
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
-    console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
+    console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and direct handoff retry from settings and the status strip')
     console.log('PASS: command failures stay with their command center across close, Work switch, temporary SubHost outage, late reply and replay; unclaimed and Host errors remain visible')
     console.log('PASS: failed Queue handoff remains visible after its receipt and replay; cross-Host success stays successful and keeps later parameters; a retired command leaves its late failure in Work results')
   }

@@ -297,22 +297,6 @@ watch(() => props.section, (section) => {
   if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
 })
 
-const requestedCommandUnavailable = computed(() => {
-  const requested = surfaces.requestedCommand
-  return props.section === 'commands' && requested?.workId === props.work.id
-    && (catalog.state === 'ready' || catalog.state === 'truncated')
-    && !catalog.commands.some(item => item.name === requested.name && item.source.kind === requested.source)
-})
-watch([() => surfaces.requestedCommand, () => catalog.state, () => props.work.id, () => props.section], () => {
-  const requested = surfaces.requestedCommand
-  if (props.section !== 'commands' || requested?.workId !== props.work.id || !['ready', 'truncated'].includes(catalog.state)) return
-  const command = catalog.commands.find(item => item.name === requested.name && item.source.kind === requested.source)
-  if (!command) return
-  openCommandRunner(command)
-  surfaces.requestedCommand = null
-  if (requested.run) void runSelectedCommand()
-}, { immediate: true })
-
 async function closeResource() {
   const contentRef = selectedResource.value?.contentRef
   selectedResource.value = null
@@ -672,7 +656,6 @@ function isCurrentModel(model: ModelInfo) {
     <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
 
     <template v-else-if="section === 'commands'">
-      <div v-if="requestedCommandUnavailable" class="alu-dialog-error">没有读到助手运行详情命令，请重新读取命令列表。<button type="button" class="alu-link-button" @click="loadSection('commands', true)">重新读取命令</button></div>
       <div v-if="commandAbortError" class="alu-dialog-error">{{ commandAbortError }}<button type="button" class="alu-link-button" :disabled="workActions.aborting" @click="cancelCommand">重试中止</button></div>
       <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>{{ commandQuestion ? '有问题等待你回答。' : '命令正在执行。' }}</span><button v-if="commandQuestion" type="button" class="button secondary" @click="$emit('close')">回答问题</button><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
       <template v-if="!commandDetailMode">
@@ -717,7 +700,7 @@ function isCurrentModel(model: ModelInfo) {
       <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
         <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ residentAssistant && selectedCommand.source.kind === 'built-in' ? '内置' : catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-if="!parameterlessBuiltin" ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button ref="commandRunButton" class="cmd-center-run" :disabled="!!pending">{{ parameterlessBuiltin && selectedCommand.name === 'assistant-status' ? (pending ? '正在读取…' : '刷新') : (pending ? '运行中…' : '运行') }}</button></form>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-if="!parameterlessBuiltin" ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button ref="commandRunButton" class="cmd-center-run" :disabled="!!pending">{{ pending && !parameterlessBuiltin ? '运行中…' : '运行' }}</button></form>
         <div v-if="argumentCompletionsLoading || argumentCompletions.length" class="cmd-center-completions" role="listbox" aria-label="参数候选">
           <button v-for="(item, index) in argumentCompletions" :key="`${item.value}:${index}`" type="button" class="cmd-center-completion" @click="chooseArgumentCompletion(item)"><strong>{{ item.label }}</strong><span v-if="item.description">{{ item.description }}</span></button>
           <div v-if="argumentCompletionsLoading && !argumentCompletions.length" class="cmd-center-completion-loading">正在读取参数候选…</div>
@@ -795,7 +778,7 @@ function isCurrentModel(model: ModelInfo) {
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
       <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="!residentAssistant && handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
-      <p v-if="residentAssistant" class="alu-project-status-note">下面列出助手实际注册的工具。扩展由 Main 本机的配置管理，修改后用 Reload 载入；加载问题可通过命令中心查看助手运行详情。</p>
+      <p v-if="residentAssistant" class="alu-project-status-note">下面列出助手实际注册的工具。扩展由 Main 本机的 extensions.json 管理，修改后用 Reload 载入；每个扩展的加载结果见下方 Diagnostics。</p>
       <div v-if="tools?.truncated" class="alu-project-status-note">{{ residentAssistant ? '工具列表未完整返回。' : '工具列表未完整返回，暂时不能切换工具。' }}</div>
       <div class="ui-dialog-options"><component :is="residentAssistant ? 'div' : 'button'" v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': !residentAssistant && tool.active, 'is-cursor': !residentAssistant && optionCursor === index }" :disabled="residentAssistant ? undefined : !!pending || !!tools?.truncated" @click="!residentAssistant && toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">{{ residentAssistant ? '可用' : 'ACTIVE' }}</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span><span v-if="tool.source" class="ui-dialog-option-meta">{{ tool.source.kind === 'extension' ? `extension / ${tool.source.package ?? '扩展'}` : '内置' }}</span></span></span></component></div>
     </section>
@@ -821,11 +804,18 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回</div>
       </section>
       <section class="alu-project-status-section">
-        <h3>{{ residentAssistant ? '已发现 Skills' : 'Loaded Resources' }}</h3>
+        <h3>Loaded Resources</h3>
         <div v-if="loadErrors.resources" class="alu-dialog-error">{{ loadErrors.resources }}<button type="button" @click="loadSection('resources', true)">重试读取资源</button></div>
         <div v-else-if="!resources" class="alu-dialog-loading">正在读取资源…</div>
         <template v-if="resources">
         <div v-for="group in resourceGroups" :key="group.kind" class="alu-project-status-resource-group"><h4>{{ group.label }} <span class="alu-project-status-count">{{ group.items.length }}</span></h4><div class="alu-project-status-chips"><template v-for="(resource, index) in group.items" :key="resource.contentRef || `${resource.kind}:${resource.name}:${index}`"><button v-if="resource.contentRef" type="button" class="alu-project-status-chip resource-read-button" :id="`resource-${resource.contentRef}`" :aria-label="`阅读 ${resource.name}`" @click="selectedResource = resource">{{ resource.name }} <ChevronRight :size="11" /></button><span v-else class="alu-project-status-chip">{{ resource.name }}</span></template><span v-if="!group.items.length" class="alu-project-status-empty">—</span></div></div>
+        </template>
+        <div v-if="residentAssistant && work.extensionStatus['滚动整理']" class="alu-project-status-resource-group alu-handoff-retry">
+          <span>{{ work.extensionStatus['滚动整理'] }}</span>
+          <button type="button" class="alu-link-button" :disabled="workActions.handoffRetryPending" @click="workActions.retryAssistantHandoff()">{{ workActions.handoffRetryPending ? '正在请求…' : '立即重试' }}</button>
+        </div>
+        <p v-if="residentAssistant && workActions.handoffRetryError" class="alu-dialog-error" role="alert">{{ workActions.handoffRetryError }}</p>
+        <template v-if="resources">
         <div v-if="filteredDiagnostics.length" class="alu-project-status-resource-group"><h4>Diagnostics <span class="alu-project-status-count">{{ resources?.diagnosticTotal ?? filteredDiagnostics.length }}</span></h4><div v-for="(diagnostic, index) in filteredDiagnostics" :key="index" class="alu-project-status-diagnostic" :class="`is-${diagnostic.severity}`">{{ diagnostic.message }}</div></div>
         <div v-if="resources.resourcesTruncated || resources.diagnosticsTruncated" class="alu-project-status-note">资源或诊断列表未完整返回</div>
         </template>
@@ -926,6 +916,8 @@ function isCurrentModel(model: ModelInfo) {
 .alu-project-status-metric dd { overflow: hidden; margin: 3px 0 0; color: var(--alu-text-dim); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .alu-project-status-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .alu-project-status-chip { padding: 3px 7px; border: 1px solid var(--alu-border); border-radius: 6px; color: var(--alu-text-dim); background: var(--alu-bg); font-size: var(--alu-micro-size); }
+.alu-handoff-retry { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.alu-handoff-retry > span { font-size: var(--alu-meta-size); }
 .alu-project-status-resource-group + .alu-project-status-resource-group { margin-top: 12px; }
 .alu-project-status-empty,
 .alu-project-status-note {

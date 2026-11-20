@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { RefreshCw } from '@lucide/vue'
 import { assistantTime, extractionStateLabel } from '../lib/assistant'
@@ -24,6 +24,15 @@ const handoffStatus = computed(() => {
 const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
 const actions = useWorkActionsStore()
+onMounted(() => { void app.refreshWorksQuietly() })
+const retryRequested = ref(false)
+async function retryHandoff() {
+  retryRequested.value = false
+  if (await actions.retryAssistantHandoff()) {
+    retryRequested.value = true
+    await app.refreshWorksQuietly()
+  }
+}
 const { settings, restart } = memory
 const { extraction, models, handoff, handoffValues, speedChoice } = storeToRefs(memory)
 const handoffSaving = computed(() => handoff.value.save?.state === 'pending')
@@ -150,7 +159,9 @@ function choose(value: string) {
     <h4 id="assistant-handoff-settings">滚动整理对话</h4>
     <p class="assistant-setting-text">对话变长时，用聊天模型整理较早的内容，保留最近的原话。原始记录不会删除。</p>
     <p v-if="handoffStatus" class="assistant-note is-warning" role="status">{{ handoffStatus }}</p>
-    <button v-if="handoffStatus" type="button" class="button secondary" @click="actions.retryAssistantHandoff()">立即重试</button>
+    <button v-if="handoffStatus" type="button" class="button secondary" :disabled="actions.handoffRetryPending" @click="retryHandoff">{{ actions.handoffRetryPending ? '正在请求…' : '立即重试' }}</button>
+    <p v-if="actions.handoffRetryError" class="assistant-error" role="alert">{{ actions.handoffRetryError }}</p>
+    <p v-else-if="retryRequested" class="assistant-setting-saved" role="status">已请求重试。整理结果会显示在她对话上方的状态里。</p>
     <details v-if="handoffValues && handoff.current" class="assistant-handoff-options">
       <summary>整理参数与提示词<span v-if="handoff.draft" class="assistant-handoff-dirty">未保存</span></summary>
       <div class="assistant-handoff-form">
@@ -174,8 +185,6 @@ function choose(value: string) {
     <p v-else-if="settings.current" class="assistant-note">这台 Dock 尚不支持滚动整理设置。请更新 Main 后再编辑。</p>
     <p v-else class="assistant-status">{{ settings.loading ? '正在读取整理设置…' : '暂时没有读到整理设置，请重试读取助手设置。' }}</p>
     <p v-if="handoff.save" class="assistant-setting-saved" :class="{ 'is-error': handoff.save.state === 'failed', 'is-pending': handoffSaving }" :role="handoff.save.state === 'failed' ? 'alert' : 'status'">{{ handoff.save.message }}</p>
-    <button type="button" class="alu-link-button assistant-handoff-auto" @click="actions.openAssistantStatus()">查看运行详情</button>
-    <p v-if="actions.assistantStatusError" class="assistant-error" role="alert">{{ actions.assistantStatusError }}</p>
   </section>
 </template>
 
