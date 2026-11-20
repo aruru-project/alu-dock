@@ -88,7 +88,7 @@ export type DockToolsRequest =
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
   /** `assistant` is only accepted from older callers so they receive a clear refusal: Main already keeps one assistant. */
-  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
+  | { type: "create"; operationId: string; cwd: string; createDirectory?: boolean; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
   /** A child Work omits target: it can only message its parent, and `done` says whether this is its final result. */
   | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
   /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, parse } from "node:path";
+import { basename, isAbsolute, join, parse } from "node:path";
 import test from "node:test";
 
 import { AttachmentService } from "../src/control/attachment-service.js";
@@ -124,7 +124,10 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   };
 
   const firstMain = await createMain();
+  const subRoot = join(root, "sub");
+  await mkdir(subRoot, { recursive: true });
   const child = spawn(process.execPath, [new URL("./fixtures/subhost-machine.js", import.meta.url).pathname, subCatalog, workspace, "::1", String(port), joinPath], {
+    cwd: subRoot,
     stdio: ["ignore", "pipe", "pipe"],
     env: isolatedProcessEnvironment(root, { XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data") }),
   });
@@ -151,6 +154,14 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   assert.ok(main.homePath && isAbsolute(main.homePath));
   assert.ok(main.workspaceRoots?.includes(nativeRoot(main.homePath)));
   assert.equal(remote.hostId, subHostId);
+  // A relative path makes the two Hosts' filesystems distinguishable even on this one machine.
+  const relative = join(basename(root), "new-project");
+  const created = await client.create(relative, "New project", undefined, undefined, subHostId, undefined, undefined, undefined, true);
+  assert.equal(created.cwd, join(subRoot, relative));
+  assert.equal(created.hostId, subHostId);
+  assert.equal(created.lifecycle, "active");
+  assert.ok((await stat(join(subRoot, relative))).isDirectory());
+  await assert.rejects(stat(relative), { code: "ENOENT" });
   const ensuredRemote = await client.ensure("one-global-key", workspace, "Remote keyed work", "ensure-remote-key", undefined, subHostId);
   const ensuredWithoutPlacement = await client.ensure("one-global-key", workspace, "Ignored placement", "ensure-existing-key-local");
   const ensuredWithDifferentPlacement = await client.ensure("one-global-key", workspace, "Ignored placement", "ensure-existing-key-main", undefined, mainHostId);

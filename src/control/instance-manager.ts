@@ -1,8 +1,5 @@
 import type { AttachmentService } from "./attachment-service.js";
-import type { ProjectTrustChoice } from "./project-trust.js";
-import type { DockChildSelection } from "../core/dock-tools.js";
 import type { ImagePathDto } from "../core/instance-dto.js";
-import type { JsonObject } from "../core/json-value.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { MachineDto } from "../core/machine-dto.js";
 import { InstanceNotFoundError, type DockRegistry } from "./dock-registry.js";
@@ -49,17 +46,7 @@ export interface RemoteInstanceDirectory {
   stop(): Promise<void>;
 }
 
-export interface CreateInstanceMutation {
-  child?: DockChildSelection;
-  operationId: string;
-  cwd: string;
-  name?: string;
-  trustChallengeId?: string;
-  projectTrustDecision?: ProjectTrustChoice;
-  workerConfig?: JsonObject;
-  /** Omitted: the directory's saved default decides (card #295). */
-  assistant?: boolean;
-}
+export type CreateInstanceMutation = Omit<Extract<ControlRequest, { type: "instance.create" }>["params"], "hostId">;
 
 export interface SubmitCommandMutation {
   operationId: string;

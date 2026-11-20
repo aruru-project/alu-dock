@@ -83,7 +83,8 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: "system", ...input, ...(machine === undefined ? {} : { machine }) };
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model", "assistant"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model", "assistant", "createDirectory"], "Dock create request");
+    if (value.createDirectory !== undefined && typeof value.createDirectory !== "boolean") throw new Error("createDirectory must be boolean");
     if (value.assistant !== undefined && typeof value.assistant !== "boolean") throw new Error("assistant must be boolean");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
@@ -95,6 +96,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     const model = value.model === undefined ? undefined : parseModelRef(value.model, "Dock create model", "invalid_request");
     return {
       type: "create",
+      ...(value.createDirectory ? { createDirectory: true } : {}),
       ...(systemId === undefined ? {} : { systemId }),
       ...(value.saveDefault === undefined ? {} : { saveDefault: value.saveDefault }),
       ...(model === undefined ? {} : { model }),

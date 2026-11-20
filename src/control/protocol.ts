@@ -257,6 +257,7 @@ export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
 export const COMPACTION_PROMPTS_CAPABILITY = "session.compaction-prompts.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
 export const COLLABORATION_CAPABILITY = "instance.collaboration.v1" as const;
+export const CREATE_DIRECTORY_CAPABILITY = "instance.create.directory.v1" as const;
 export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 /** `session.inventory` accepts the `nextCursor` of an earlier page to continue the same listing. */
 export const SESSION_INVENTORY_PAGES_CAPABILITY = "session.inventory.pages.v1" as const;
@@ -318,6 +319,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "host.info",
   "instance.catalog",
   WORKER_CONFIG_CAPABILITY,
+  CREATE_DIRECTORY_CAPABILITY,
   COLLABORATION_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
@@ -393,7 +395,7 @@ export type ControlRequest =
   | Request<"machine.list", Record<string, never>>
   | Request<"machine.remove", { operationId: string; hostId: string }>
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; child?: DockChildSelection; assistant?: boolean }>
+  | Request<"instance.create", { operationId: string; cwd: string; createDirectory?: boolean; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; child?: DockChildSelection; assistant?: boolean }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
@@ -932,18 +934,19 @@ export function requestOptionCapabilities(request: ControlRequest): string[] {
   }
   if ((request.type === "interaction.respond" || request.type === "extension.widget_viewport.set") && request.params.leaseToken === undefined) return [SHARED_INTERACTIONS_CAPABILITY];
   if (request.type === "session.inventory" && request.params.cursor !== undefined) return [SESSION_INVENTORY_PAGES_CAPABILITY];
-  if (request.type === "instance.create") {
-    return [
-      ...(request.params.child === undefined ? [] : [COLLABORATION_CAPABILITY]),
-      // Only opening as the assistant needs a Host that knows her; `false` means what a Host without
-      // her does anyway, and Main drops it for such a SubHost.
-      ...(request.params.assistant === true ? [INSTANCE_ASSISTANT_CAPABILITY] : []),
-    ];
-  }
+  if (request.type === "instance.create") return createOptionCapabilities(request.params);
   if (request.type === "system.default.set" && request.params.assistant === true) return [INSTANCE_ASSISTANT_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
+}
+export function createOptionCapabilities(params: Extract<ControlRequest, { type: "instance.create" }>["params"]): Capability[] {
+  return [
+    ...(params.createDirectory === true ? [CREATE_DIRECTORY_CAPABILITY] : []),
+    ...(params.child === undefined ? [] : [COLLABORATION_CAPABILITY]),
+    // `false` is already what a Host without the assistant does.
+    ...(params.assistant === true ? [INSTANCE_ASSISTANT_CAPABILITY] : []),
+  ];
 }
 function conversationView(params: Record<string, unknown>): { view?: "references" } {
   return params.view === undefined ? {} : { view: enumeration(params.view, "params.view", ["references"] as const, "invalid_request") };
@@ -996,7 +999,7 @@ export function requiredCapabilities(capability: Capability): string[] {
   return [...new Set<Capability>([
     "core.v2",
     ...(capability === EVENTS_FOLLOW_CAPABILITY ? [INSTANCE_READ_CAPABILITY] : []),
-    ...((capability === WORKER_CONFIG_CAPABILITY || capability === COLLABORATION_CAPABILITY) ? ["instance.catalog" as const] : []),
+    ...((capability === WORKER_CONFIG_CAPABILITY || capability === COLLABORATION_CAPABILITY || capability === CREATE_DIRECTORY_CAPABILITY) ? ["instance.catalog" as const] : []),
     ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY, INSTANCE_DISPLAY_NAME_CAPABILITY] : []),
     ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
@@ -1020,6 +1023,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === INSTANCE_READ_CAPABILITY
     || capability === COLLABORATION_CAPABILITY
     || capability === WORKER_CONFIG_CAPABILITY
+    || capability === CREATE_DIRECTORY_CAPABILITY
     || capability === "instance.catalog"
     || capability === "models.v1"
     || capability === "queue.control.v1"
@@ -1167,7 +1171,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...(uploadInstanceId === undefined ? {} : { instanceId: uploadInstanceId }), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
-      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "child", "assistant"], "invalid_request");
+      exact(params, ["operationId", "cwd", "createDirectory", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "child", "assistant"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
@@ -1177,11 +1181,12 @@ export function parseControlRequest(input: unknown): ControlRequest {
         try { workerConfig = cloneWorkerConfig(params.workerConfig, "params.workerConfig"); }
         catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.workerConfig is invalid"); }
       }
+      const createDirectory = params.createDirectory !== undefined && boolean(params.createDirectory, "params.createDirectory", "invalid_request");
       const child = params.child === undefined ? undefined : parseChildSelection(params.child);
       const assistant = params.assistant === undefined ? undefined : boolean(params.assistant, "params.assistant", "invalid_request");
       // A child Work never carries the assistant's memory (card #295).
       if (child !== undefined && assistant === true) throw validation("invalid_request", "A child Work cannot be opened as the assistant");
-      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(child === undefined ? {} : { child }), ...(assistant === undefined ? {} : { assistant }) } };
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(createDirectory ? { createDirectory } : {}), ...(workerConfig === undefined ? {} : { workerConfig }), ...(child === undefined ? {} : { child }), ...(assistant === undefined ? {} : { assistant }) } };
     }
     case "instance.ensure": {
       exact(params, ["operationId", "key", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");

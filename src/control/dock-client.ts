@@ -38,7 +38,7 @@ import {
   ATTACHMENTS_CAPABILITY,
   MACHINES_CAPABILITY,
   WORKER_CONFIG_CAPABILITY,
-  COLLABORATION_CAPABILITY,
+  createOptionCapabilities,
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
   GIT_BRANCH_CAPABILITY,
@@ -396,7 +396,12 @@ export class DockClient {
     });
   }
 
-  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string,workerConfig?:JsonObject,child?:DockChildSelection,assistant?:boolean):Promise<InstanceSnapshot>{const capabilities=[...(child===undefined?[]:[COLLABORATION_CAPABILITY]),...(workerConfig===undefined?[]:[WORKER_CONFIG_CAPABILITY]),...(assistant===true?[INSTANCE_ASSISTANT_CAPABILITY]:[])];const result=await this.request("instance.create",{operationId,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision,workerConfig,child,assistant},capabilities.length===0?"instance.catalog":capabilities,parseCreateResult);return result.instance;}
+  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string,workerConfig?:JsonObject,child?:DockChildSelection,assistant?:boolean,createDirectory?:boolean):Promise<InstanceSnapshot>{
+    const params = {operationId,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision,workerConfig,child,assistant,...(createDirectory ? {createDirectory} : {})};
+    const capabilities = createOptionCapabilities(params);
+    if (workerConfig !== undefined) capabilities.push(WORKER_CONFIG_CAPABILITY);
+    return (await this.request("instance.create",params,capabilities.length===0?"instance.catalog":capabilities,parseCreateResult)).instance;
+  }
   ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
   async getByKey(key:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
   adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
