@@ -143,6 +143,7 @@ pub use workspace_files::{
 };
 
 pub use systems::{
+    HostSystemDefaultResult, HostSystemDefaultSetting, HostSystemRef, LoadedSystemSource,
     SystemCandidate, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
     SystemSourceKind,
 };

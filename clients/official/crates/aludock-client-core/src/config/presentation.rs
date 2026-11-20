@@ -82,6 +82,8 @@ pub struct SafeResource {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafeResourcesResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_source: Option<crate::LoadedSystemSource>,
     pub resources: Vec<SafeResource>,
     pub diagnostics: Vec<SafeDiagnostic>,
     pub resource_total: u64,
@@ -160,6 +162,7 @@ pub fn project_tools(result: ToolsResult) -> SafeToolsResult {
 
 pub fn project_resources(result: ResourcesResult) -> SafeResourcesResult {
     SafeResourcesResult {
+        system_source: result.system_source,
         resources: result
             .resources
             .into_iter()

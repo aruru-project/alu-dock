@@ -51,7 +51,7 @@ import type {
   SavedDeliverableLocation,
   ResourcesResult,
   ResourceContentResult,
-  SystemCatalogCursor,
+  HostSystemDefaultResult, HostSystemDefaultSetting, HostSystemRef, SystemCatalogCursor,
   SystemCatalogResult,
   SystemDefaultSetResult,
   SelectedAttachment,
@@ -639,6 +639,13 @@ export async function listWorkspace(
   return native<WorkspacePage>('list_workspace', {
     ...context, path, targetHostId: targetHostId ?? null, cursor: cursor ?? null,
   })
+}
+
+export function getHostSystemDefault(context: ConnectionContext, targetHostId?: string, cursor?: SystemCatalogCursor) {
+  return native<HostSystemDefaultResult>('host_system_default', { ...context, targetHostId: targetHostId ?? null, cursor: cursor ?? null })
+}
+export function setHostSystemDefault(selection: HostSystemRef | null, context: ConnectionContext, targetHostId?: string) {
+  return native<HostSystemDefaultSetting>('set_host_system_default', { ...context, targetHostId: targetHostId ?? null, selection })
 }
 
 export async function systemCatalog(cwd: string, context: ConnectionContext, targetHostId: string, cursor?: SystemCatalogCursor): Promise<SystemCatalogResult> {

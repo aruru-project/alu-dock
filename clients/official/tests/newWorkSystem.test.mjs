@@ -139,12 +139,12 @@ try {
   console.log('PASS: directory creation offered only for a missing path on a supporting Main; model, target and creation intent survive trust')
 
   // A missing optional Host feature must not block the existing creation contract.
-  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
+  for (const scenario of ['host-default', 'host-override', 'legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
     const store = await createStore()
     const calls = [], created = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false })
     let lateResolve, lateReject
-    let currentDefault = scenario === 'default' ? template : undefined
+    let currentDefault = scenario === 'default' || scenario.startsWith('host-') ? template : undefined
     let machineModels = [fastModel, hiddenModel]
     let machineHidden = [{ provider: hiddenModel.provider, id: hiddenModel.id }]
     let holdModelRead
@@ -172,7 +172,7 @@ try {
         if (scenario.startsWith('late-')) return new Promise((resolve, reject) => { lateResolve = resolve; lateReject = reject })
         return args.cursor
           ? { cwd: args.cwd, candidates: [template], total: 2, revision: 'r', warnings: [] }
-          : { cwd: args.cwd, candidates: [project], total: 2, revision: 'r', warnings: scenario === 'bad-default' ? ['默认文件损坏，请重新选择。'] : [], nextCursor: { revision: 'r', offset: 1 }, ...(currentDefault ? { defaultSelection: currentDefault } : {}) }
+          : { cwd: args.cwd, candidates: [project], total: 2, revision: 'r', warnings: scenario === 'bad-default' ? ['默认文件损坏，请重新选择。'] : [], nextCursor: { revision: 'r', offset: 1 }, ...(currentDefault ? { defaultSelection: currentDefault } : {}), ...(scenario.startsWith('host-') ? { defaultSource: 'host' } : {}) }
       }
       if (command === 'system_content' && scenario === 'read-failure') throw { code: 'resource_unavailable', message: '文件已删除，请重新选择。' }
       if (command === 'system_content' && scenario.startsWith('body-')) return new Promise(resolve => { lateResolve = resolve })
@@ -249,6 +249,14 @@ try {
     if (['partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing'].includes(scenario)) {
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0, 'only absence of the optional system capability allows ordinary creation')
       assert.equal(text(container).includes('没有可用的 system'), scenario === 'catalog-empty', 'empty state requires a successful empty catalog')
+      app.unmount(); continue
+    }
+    if (scenario.startsWith('host-')) {
+      assert.equal(created.length, 0, 'a machine default stays visible and can be overridden before creation');
+      assert.ok(text(container).includes('Host 默认：选择的模板'))
+      if (scenario === 'host-override') { await click('项目 SYSTEM'); assert.ok(text(container).includes('本次指定：项目 SYSTEM')) }
+      await click('确认并创建')
+      assert.deepEqual(calls.find(c => c.command === 'create_work').args.workerConfig, scenario === 'host-default' ? null : project.workerConfig)
       app.unmount(); continue
     }
     if (scenario === 'default') {

@@ -27,7 +27,7 @@ import { modelKey } from '../lib/modelLists'
 import { replyLost } from '../lib/operationBinding'
 import { useSavedSessionPages } from '../lib/savedSessions'
 import type { DirectoryPage } from '../lib/workspaceBrowser'
-import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
+import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, SystemCatalogResult, Work, WorkspaceCursor } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import { useModelCatalogStore } from '../stores/model-catalog'
@@ -84,6 +84,11 @@ const systemPreview = ref<SystemCandidate | null>(null)
 const systemLoading = ref(false)
 const systemCatalogState = ref<'idle' | 'ready' | 'unsupported' | 'failed'>('idle')
 const saveDefault = ref(false)
+const catalogDefault = ref<SystemCandidate>()
+const defaultSource = ref<SystemCatalogResult['defaultSource']>()
+const explicitSystem = ref(false)
+const implicitHostSystem = computed(() => defaultSource.value === 'host' && !!catalogDefault.value
+  && systemSelection.value?.id === catalogDefault.value.id && !explicitSystem.value && !chooseFirst.value && !saveDefault.value)
 // What a save on this page made the directory remember: `{ id }` a system, `{}` opening as the assistant.
 const savedDefault = ref<{ id?: string } | null>(null)
 const saveFailed = ref(false)
@@ -215,6 +220,9 @@ function resetSystems() {
   systemCandidates.value = []
   systemWarnings.value = []
   systemSelection.value = null
+  catalogDefault.value = undefined
+  defaultSource.value = undefined
+  explicitSystem.value = false
   systemPreview.value = null
   systemPath.value = ''
   saveDefault.value = false
@@ -227,7 +235,8 @@ function resetSystems() {
 
 async function chooseDirectory(path: string, refresh = false) {
   if (!isTauri || actionBusy.value || !machine.value?.available) return
-  const selectedId = refresh ? systemSelection.value?.id : undefined
+  const keepExplicit = refresh && explicitSystem.value
+  const selectedId = refresh && (keepExplicit || defaultSource.value !== 'host') ? systemSelection.value?.id : undefined
   const shouldSave = refresh && saveDefault.value
   const previouslySaved = refresh ? savedDefault.value : null
   // Reading the list again keeps the user's switch as it is.
@@ -246,6 +255,7 @@ async function chooseDirectory(path: string, refresh = false) {
     const warnings: string[] = []
     let cursor: SystemCatalogCursor | undefined
     let defaultSelection: SystemCandidate | undefined
+    let source: SystemCatalogResult['defaultSource']
     let defaultAssistant = false
     let takesAssistant = false
     do {
@@ -254,7 +264,7 @@ async function chooseDirectory(path: string, refresh = false) {
       receivedCatalog = true
       candidates.push(...page.candidates)
       for (const warning of page.warnings) if (!warnings.includes(warning)) warnings.push(warning)
-      defaultSelection ??= page.defaultSelection
+      if (!cursor) { defaultSelection = page.defaultSelection; source = page.defaultSource }
       defaultAssistant ||= page.defaultAssistant === true
       takesAssistant ||= page.assistantChoice === true
       cursor = page.nextCursor
@@ -273,8 +283,11 @@ async function chooseDirectory(path: string, refresh = false) {
     // assistant, who needs no system; the Host applies the directory's saved choices, so none is sent.
     // Asked to choose first, the page stays with that default selected, and confirming says the choice outright.
     const usableDefault = defaultSelection && !defaultSelection.warning ? defaultSelection : undefined
-    if (!refresh && usableDefault) systemSelection.value = usableDefault
-    if (!refresh && !chooseFirst.value && (usableDefault || (takesAssistant && defaultAssistant))) await createAt(path, hostId)
+    catalogDefault.value = usableDefault
+    defaultSource.value = source ?? (usableDefault ? 'directory' : undefined)
+    explicitSystem.value = keepExplicit && !!selectedId && systemSelection.value?.id === selectedId
+    if (usableDefault && (!refresh || (source === 'host' && !explicitSystem.value))) systemSelection.value = usableDefault
+    if (!refresh && !chooseFirst.value && ((usableDefault && source !== 'host') || (takesAssistant && defaultAssistant))) await createAt(path, hostId)
   } catch (cause) {
     if (epoch !== systemEpoch) return
     const failure = cause as { code?: string; details?: { missing?: unknown } }
@@ -296,6 +309,7 @@ async function chooseDirectory(path: string, refresh = false) {
 function selectSystem(candidate: SystemCandidate) {
   if (actionBusy.value) return
   systemSelection.value = candidate
+  explicitSystem.value = true
   saveFailed.value = false
   clearError()
 }
@@ -348,7 +362,7 @@ async function confirmSystem() {
       pending.value = ''
     }
   }
-  if (epoch === systemEpoch) await createAt(path, hostId, { workerConfig: selection?.workerConfig, assistant: asAssistant })
+  if (epoch === systemEpoch) await createAt(path, hostId, { workerConfig: implicitHostSystem.value ? undefined : selection?.workerConfig, assistant: asAssistant })
 }
 
 function clearError() {
@@ -583,7 +597,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
       <section v-if="view === 'launcher'" class="new-work-launcher">
         <label class="new-work-choose-first">
           <input v-model="chooseFirst" type="checkbox" :disabled="actionBusy" />
-          <span><strong>创建前先选 system</strong><small>不勾时，有可用默认设置的目录会直接创建。</small></span>
+          <span><strong>创建前先选 system</strong><small>不勾时，有可用目录默认的 Work 会直接创建。</small></span>
         </label>
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
@@ -637,6 +651,12 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
             <span><strong>以助手身份打开</strong><small>{{ openAsAssistant ? '她的人设和记忆代替 system，对话会记进她的记忆。' : '这个 Work 和助手的记忆无关。' }}创建后不能更改。</small></span>
           </label>
           <div v-if="systemWarnings.length && !asHer" class="alu-dialog-error" role="alert"><span v-for="warning in systemWarnings" :key="warning">{{ warning }}</span><span>请修复文件后重新读取，或选择其他可用 system。</span></div>
+          <div v-if="systemCatalogState === 'ready' && !asHer" class="system-choice-note" role="status">
+            <span v-if="catalogDefault">{{ defaultSource === 'host' ? 'Host 默认' : '目录默认' }}：{{ catalogDefault.name }}</span>
+            <span v-else-if="defaultSource === 'pi'">未指定时由 Pi 决定</span>
+            <span v-if="systemSelection && (explicitSystem || saveDefault)">本次指定：{{ systemSelection.name }}</span>
+            <span v-else-if="systemSelection && !catalogDefault">本次选择：{{ systemSelection.name }}</span>
+          </div>
           <div v-if="savedDefault" class="cmd-palette-footer" role="status">目录默认已保存。{{ error ? '' : '创建 Work 是另一步操作。' }}</div>
           <div v-if="saveFailed" class="alu-dialog-error">还没有创建 Work。可以重试保存，或取消勾选只用于这一次。</div>
           <div v-if="asHer" class="new-work-her-system" role="note">以助手身份打开时不用选 system。Pi 自带的工具说明和这个目录的 AGENTS.md 照常载入。</div>
@@ -725,6 +745,8 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .directory-confirm { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
 .directory-confirm > span { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .directory-confirm > button { flex-shrink: 0; min-height: 40px; }
+.system-choice-note { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 9px 14px; overflow-wrap: anywhere; background: var(--alu-bg-raised); color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.system-choice-note:empty { display: none; }
 .system-option { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid var(--alu-border); }
 .system-option .ui-dialog-option { flex: 1; min-width: 0; border-bottom: 0; }
 .system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-highlight-bg); }

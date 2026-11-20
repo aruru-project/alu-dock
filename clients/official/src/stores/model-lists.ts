@@ -1,25 +1,28 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
-import { setChildModels, setModelVisibility } from '../lib/bridge'
-import type { ConnectionContext, ModelRef } from '../lib/types'
+import { reactive, ref } from 'vue'
+import { setChildModels, setHostSystemDefault, setModelVisibility } from '../lib/bridge'
+import type { ConnectionContext, HostSystemRef, ModelRef } from '../lib/types'
 import { userErrorMessage } from '../lib/userError'
 import { useModelCatalogStore } from './model-catalog'
 
 /** Which of Main's lists a save replaces: the hidden models, or the child Work models. */
 export type ModelListKind = 'hidden' | 'children'
 
-export interface ModelListSave {
-  key: string
-  list: ModelListKind
+interface HostSettingSave {
   connectionId: string
   label: string
-  models: ModelRef[]
+  key: string
   state: 'pending' | 'succeeded' | 'failed' | 'unknown'
   message: string
   acknowledged: boolean
 }
 
-const outcomes: Record<ModelListKind, { saved: string; failed: string }> = {
+type ModelListSave = HostSettingSave & { list: ModelListKind; models: ModelRef[] }
+type SystemSave = HostSettingSave & { list: 'system'; targetHostId?: string; selection: HostSystemRef | null }
+type SettingSave = ModelListSave | SystemSave
+
+const outcomes: Record<SettingSave['list'], { saved: string; failed: string }> = {
+  system: { saved: '已保存，只对之后新建的 Work 生效。', failed: '默认 system 没有保存成功，请稍后重试。' },
   hidden: { saved: '已保存，下次打开模型选择时生效。', failed: '隐藏列表没有保存成功，请稍后重试。' },
   children: { saved: '已保存，Agent 下次查找模型时生效。', failed: '子 Work 模型名单没有保存成功，请稍后重试。' },
 }
@@ -27,15 +30,23 @@ const outcomes: Record<ModelListKind, { saved: string; failed: string }> = {
 /** Submitted Host settings outlive the editor, but are not Work operations or a notification history. */
 export const useModelListsStore = defineStore('model-lists', () => {
   const catalog = useModelCatalogStore()
-  const saves = ref(new Map<string, ModelListSave>())
+  const saves = ref(new Map<string, SettingSave>())
   /** Confirmed hidden-list saves per connection; Main's other lists offer models by that list. */
   const hiddenSaved = ref(new Map<string, number>())
   const keyFor = (connectionId: string, list: ModelListKind) => JSON.stringify([connectionId, list])
   function forHidden(connectionId: string) {
-    return saves.value.get(keyFor(connectionId, 'hidden'))
+    const save = saves.value.get(keyFor(connectionId, 'hidden')); return save?.list === 'hidden' ? save : undefined
   }
   function forChildren(connectionId: string) {
-    return saves.value.get(keyFor(connectionId, 'children'))
+    const save = saves.value.get(keyFor(connectionId, 'children')); return save?.list === 'children' ? save : undefined
+  }
+  const systemKey = (connectionId: string, targetHostId?: string) => JSON.stringify([connectionId, 'system', targetHostId ?? null])
+  function forSystem(connectionId: string, targetHostId?: string) {
+    const save = saves.value.get(systemKey(connectionId, targetHostId)); return save?.list === 'system' ? save : undefined
+  }
+  function saveSystem(context: ConnectionContext, targetHostId: string | undefined, label: string, selection: HostSystemRef | null) {
+    return runSave({ key: systemKey(context.connectionId, targetHostId), connectionId: context.connectionId, label, list: 'system', targetHostId, selection },
+      async save => { save.selection = (await setHostSystemDefault(selection, context, targetHostId)).selection })
   }
 
   /** Both lists exist only on Main (card #303), so the connected Host saves them. */
@@ -62,15 +73,17 @@ export const useModelListsStore = defineStore('model-lists', () => {
     models: readonly ModelRef[],
     run: (models: ModelRef[]) => Promise<ModelRef[]>,
   ) {
+    return runSave({ ...identity, models: models.map(model => ({ ...model })) }, async save => { save.models = await run(save.models) })
+  }
+
+  async function runSave<T extends Omit<SystemSave, 'state' | 'message' | 'acknowledged'> | Omit<ModelListSave, 'state' | 'message' | 'acknowledged'>>(
+    identity: T, run: (submission: T) => Promise<void>,
+  ) {
     if (saves.value.get(identity.key)?.state === 'pending') return
-    saves.value.set(identity.key, {
-      ...identity,
-      models: models.map(model => ({ provider: model.provider, id: model.id })),
-      state: 'pending', message: '正在保存，关闭设置不会取消保存。', acknowledged: false,
-    })
-    const submission = saves.value.get(identity.key)!
+    const submission = reactive({ ...identity, state: 'pending', message: '正在保存，关闭设置不会取消保存。', acknowledged: false }) as T & HostSettingSave
+    saves.value.set(identity.key, submission)
     try {
-      submission.models = await run(submission.models)
+      await run(submission)
       submission.state = 'succeeded'
       submission.message = outcomes[identity.list].saved
     } catch (cause) {
@@ -97,5 +110,5 @@ export const useModelListsStore = defineStore('model-lists', () => {
   function discard(key: string) {
     if (saves.value.get(key)?.state !== 'pending') saves.value.delete(key)
   }
-  return { saves, hiddenSaved, forHidden, forChildren, saveHidden, saveChildren, markSuccessSeen, dismiss, discard }
+  return { saves, hiddenSaved, forHidden, forChildren, forSystem, saveSystem, saveHidden, saveChildren, markSuccessSeen, dismiss, discard }
 })
