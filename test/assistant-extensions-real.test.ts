@@ -48,17 +48,7 @@ test("Main migrates its private tools once, keeps their configuration and data, 
 
   let client = await team.startHost();
   const assistant = await team.assistantWork();
-  async function extensionDetails(operationId: string): Promise<string> {
-    let details: string | undefined;
-    const follower = await client.streamEvents(assistant.id, { onEvent: event => {
-      if (event.type === "extension.notification" && event.data.operationId === operationId) details = event.data.message;
-    } });
-    try {
-      await client.prompt(assistant.id, "/assistant-status", "auto", operationId);
-      await waitFor(() => details !== undefined, "Requested extension details did not reach the owner");
-      return details!;
-    } finally { follower.close(); await follower.done; }
-  }
+  const strip = async () => (await client.status(assistant.id)).extensionStatus["工具扩展"];
   assert.deepEqual(JSON.parse(await readFile(configFile, "utf8")), settings);
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try { assert.equal(database.prepare("SELECT value FROM meta WHERE key = 'tool_extensions'").get(), undefined); }
@@ -79,7 +69,14 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   assert.equal(catalog.tools.find(tool => tool.name === "local_schedule")?.source?.package, "private-kanban");
   assert.ok(catalog.tools.some(tool => tool.name === "web_search"));
   assert.ok(!JSON.stringify(catalog).includes(marker), "Tool declarations must not contain private configuration");
-  assert.equal((await client.status(assistant.id)).extensionStatus["工具扩展"], undefined, "Successful loads do not occupy the chat status strip");
+  assert.equal(await strip(), "3 个已加载");
+  const resources = await client.resources(assistant.id);
+  const web = resources.resources.find(item => item.kind === "extension" && item.name === "web");
+  assert.deepEqual(web, { kind: "extension", name: "web", source: { kind: "extension", package: "web", path: "builtin:web" } });
+  const local = resources.resources.find(item => item.kind === "extension" && item.name === "private-kanban");
+  assert.equal(local?.path, module);
+  assert.equal((await client.resourceContentAll(assistant.id, local!.contentRef!)).text, await readFile(module, "utf8"));
+  assert.ok(resources.diagnostics.some(item => item.severity === "info" && item.message === "工具扩展 private-kanban：已加载，1 个工具（local_schedule）、0 个命令。"));
 
   await client.prompt(assistant.id, "读一下本机日程，再看记忆整理设置。", "auto", "local-extension");
   const first = await team.providers.coordinator.request(0);
@@ -106,7 +103,10 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   await client.reloadSession(assistant.id);
   assert.ok(!(await client.tools(assistant.id)).tools.some(tool => tool.name === "local_schedule"));
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "assistant_memory"));
-  assert.equal((await client.status(assistant.id)).extensionStatus["工具扩展"], undefined, "Disabled extensions do not occupy the chat status strip");
+  assert.equal(await strip(), undefined);
+  const disabled = await client.resources(assistant.id);
+  assert.ok(!disabled.resources.some(item => item.kind === "extension"));
+  assert.ok(disabled.diagnostics.some(item => item.severity === "info" && item.message === "工具扩展 private-kanban：已停用。"));
   assert.equal((await client.status(assistant.id)).extensionStatus[DOCK_TOOLS_STATUS_KEY], "on");
   await client.prompt(assistant.id, "继续聊。", "auto", "after-disable");
   const after = await team.providers.coordinator.request(3);
@@ -119,8 +119,8 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   // errors can contain the input text; the UI must only show an actionable, sanitized failure.
   await writeFile(configFile, `{"secret":"${marker}" BROKEN`);
   await client.reloadSession(assistant.id);
-  await waitFor(async () => (await client.status(assistant.id)).extensionStatus["工具扩展"] !== undefined, "Missing configuration failure");
-  const failure = await extensionDetails("configuration-failure-details");
+  await waitFor(async () => await strip() === "0 个已加载，1 个失败", "Missing configuration failure");
+  const failure = (await client.resources(assistant.id)).diagnostics.find(item => item.severity === "error" && item.message.startsWith("工具扩展配置："))!.message;
   assert.ok(failure.includes(configFile));
   assert.ok(!failure.includes(marker));
   assert.ok(!(await client.tools(assistant.id)).tools.some(tool => ["local_schedule", "web_search"].includes(tool.name)));
@@ -129,8 +129,10 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   await writeFile(qqModule, 'export default async function(context) { throw new Error(context.config.token); }');
   await writeFile(configFile, JSON.stringify([settings[0], settings[2]]));
   await client.reloadSession(assistant.id);
-  await waitFor(async () => (await client.status(assistant.id)).extensionStatus["工具扩展"] !== undefined, "Missing extension failure");
-  const factoryFailure = await extensionDetails("factory-failure-details");
+  await waitFor(async () => await strip() === "1 个已加载，1 个失败", "Missing extension failure");
+  const failedResources = await client.resources(assistant.id);
+  assert.ok(failedResources.resources.some(item => item.kind === "extension" && item.name === "private-qq" && item.path === qqModule));
+  const factoryFailure = failedResources.diagnostics.find(item => item.severity === "error" && item.message.startsWith("工具扩展 private-qq："))!.message;
   assert.ok(factoryFailure.includes(configFile));
   assert.ok(!factoryFailure.includes("PRIVATE_QQ_TOKEN"));
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "web_search"));

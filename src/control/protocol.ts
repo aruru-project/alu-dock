@@ -218,7 +218,7 @@ export const MAX_WORKSPACE_ENTRY_NAME_CHARS = 1_024;
 export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
 export const MAX_CATALOG_PRUNE_ITEMS = 1_000;
 const MAX_TOOL_RESULT_TEXT = 256_000;
-const MAX_MESSAGE = 2_048;
+export const MAX_MESSAGE = 2_048;
 const MAX_COLLECTION = 2_000;
 
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;

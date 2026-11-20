@@ -74,7 +74,7 @@ export class Handoff {
   private inUse: { settings: AssistantHandoffSettings; limits: HandoffLimits } | undefined;
   private lastResult = "尚无整理结果。";
   private activity = "等待整理。";
-  private lastFailure: { at: number; reason: string } | undefined;
+  private failedAt = 0;
   private failures = 0;
   private retryAt = 0;
   private toldFailure = false;
@@ -183,15 +183,17 @@ export class Handoff {
 
   stop(): void { this.stopped = true; this.epoch += 1; this.writing?.cancel.abort(); }
 
+  get needsAttention(): boolean { return this.settingsError || this.failures > 0; }
+
   private showStatus(): void {
     if (this.stopped) return;
-    this.deps.status(this.settingsError ? "暂未读到整理设置，下次对话时重新读取。"
-      : this.writing !== undefined && this.failures > 0 ? `正在重试整理（${shortLocalTime(this.writing.startedAt)} 开始），聊天照常。`
-      : this.failures > 0 && this.lastFailure ? `${shortLocalTime(new Date(this.lastFailure.at))} 整理失败：${this.lastFailure.reason}。原对话保留，最早 ${shortLocalTime(new Date(this.retryAt))} 后下次对话时自动重试，也可在助手设置里立即重试。`
+    this.deps.status(this.settingsError ? "暂未读到整理设置，下次对话时重新读取"
+      : this.writing !== undefined && this.failures > 0 ? `正在重试（${shortLocalTime(this.writing.startedAt)} 开始）`
+      : this.failures > 0 ? `${shortLocalTime(new Date(this.failedAt))} 失败，最早 ${shortLocalTime(new Date(this.retryAt))} 后有对话时重试`
       : undefined);
   }
 
-  /** Read-only report for the command center, never a permanent chat banner. */
+  /** Full details for the assistant's status page. */
   details(): string {
     const settings = this.inUse?.settings ?? this.settings;
     if (settings === undefined) {
@@ -222,7 +224,6 @@ export class Handoff {
     const cancel = new AbortController();
     const promise = this.write(prepared, settings.prompt, cancel.signal).then((record) => {
       if (cancel.signal.aborted) return;
-      this.lastFailure = undefined;
       this.failures = 0;
       this.toldFailure = false;
       this.record = record;
@@ -233,7 +234,7 @@ export class Handoff {
       if (cancel.signal.aborted) return;
       const at = (this.deps.now ?? Date.now)();
       const reason = error instanceof Error ? error.message : String(error);
-      this.lastFailure = { at, reason };
+      this.failedAt = at;
       this.retryAt = at + RETRY_MINUTES[Math.min(this.failures, RETRY_MINUTES.length - 1)]! * 60_000;
       this.failures += 1;
       this.activity = `原对话保留。${localTime(new Date(this.retryAt))} 之后的下一次对话会自动重试；对话超过 ${this.limits().mustTokens} token 时，每次请求模型前都会先重试。也可以运行 /retry-handoff 立即重试。`;

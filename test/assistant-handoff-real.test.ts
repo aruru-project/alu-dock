@@ -31,8 +31,10 @@ async function assistantWithSmallWindow(context: test.TestContext, prefix: strin
 
 const records = async (client: DockClient, id: string) => (await client.history(id)).entries.filter((entry) => entry.kind === "compaction_summary");
 
-/** The owner asks for full details through the same command center notification path. */
-async function runtimeDetails(client: DockClient, id: string, command = "/assistant-status"): Promise<string> {
+const handoffDiagnostic = async (client: DockClient, id: string) => (await client.resources(id)).diagnostics.find(item => item.message.startsWith("滚动整理："))!;
+
+async function retryNow(client: DockClient, id: string): Promise<string> {
+  const command = "/retry-handoff";
   const operationId = randomUUID();
   let details: string | undefined;
   const follower = await client.streamEvents(id, { onEvent: event => {
@@ -72,8 +74,9 @@ test("saved hand-over settings guide background writing while she answers, and s
   assert.equal(writing.body.messages?.find((message) => message.role === "system" || message.role === "developer")?.content, handoff.prompt, "The entire saved instruction replaces the factory role and writing rules");
   // #671: routine background work is available on demand, not presented as a chat warning.
   assert.equal((await client.status(alu.id)).extensionStatus["滚动整理"], undefined);
-  const details = await runtimeDetails(client, alu.id);
-  assert.ok(details.includes("正在后台整理") && details.includes("55000 token") && details.includes("1200 token"), "Requested details show the effective hand-over settings");
+  const details = await handoffDiagnostic(client, alu.id);
+  assert.equal(details.severity, "info");
+  assert.ok(details.message.includes("正在后台整理") && details.message.includes("55000 token") && details.message.includes("1200 token"), "Requested details show the effective hand-over settings");
   assert.ok(given(writing).includes("交接记录") && given(writing).includes("周末去爬山，到时候记得提醒我带水壶。"), "The older part of the conversation is given to the model to write the record from");
   // She answers her owner meanwhile, from the whole conversation.
   await client.prompt(alu.id, "在吗？", "auto", "alu-there");
@@ -85,15 +88,20 @@ test("saved hand-over settings guide background writing while she answers, and s
   // What her owner changed since she started reaches her when the record takes its place.
   const notes = await client.assistantDocument("notes");
   await client.setAssistantDocument("notes", "主人的猫叫团子。", notes.revision);
-  writing.fail(400, "摘要请求失败");
+  writing.fail(400, "摘要请求失败" + "长".repeat(2_048));
   const status = async () => (await client.status(alu.id)).extensionStatus["滚动整理"];
-  await waitFor(async () => (await status())?.includes("摘要请求失败") === true, "The failure did not reach the status bar");
-  assert.match((await status())!, /^(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 整理失败：400: \{"message":"摘要请求失败","type":"server_error"\}。原对话保留，最早 (?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 后下次对话时自动重试，也可在助手设置里立即重试。$/u);
-  assert.match(await runtimeDetails(client, alu.id), /^原对话保留。\d{4}-\d{2}-\d{2} \d{2}:\d{2}（UTC[+-]\d{2}:\d{2}） 之后的下一次对话会自动重试；对话超过 82500 token 时，每次请求模型前都会先重试。也可以运行 \/retry-handoff 立即重试。$/mu);
-  assert.equal(await runtimeDetails(client, alu.id, "/retry-handoff"), "已开始重新整理，聊天照常。完成或失败都会显示在状态栏。");
+  await waitFor(async () => (await status())?.includes("失败") === true, "The failure did not reach the status bar");
+  assert.match((await status())!, /^(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 失败，最早 (?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 后有对话时重试$/u);
+  const failed = await handoffDiagnostic(client, alu.id);
+  assert.equal(failed.severity, "warning");
+  assert.equal(failed.message.length, 2_048);
+  assert.ok(failed.message.endsWith("…"));
+  assert.ok(failed.message.includes("摘要请求失败") && !failed.message.includes("\n"));
+  assert.match(failed.message, /滚动整理：原对话保留。\d{4}-\d{2}-\d{2} \d{2}:\d{2}（UTC[+-]\d{2}:\d{2}） 之后的下一次对话会自动重试；对话超过 82500 token 时，每次请求模型前都会先重试。也可以运行 \/retry-handoff 立即重试。/u);
+  assert.equal(await retryNow(client, alu.id), "已开始重新整理，聊天照常。完成或失败都会显示在状态栏。");
   const retry = await coordinator.request(4);
   assert.equal(system(retry), system(writing), "The new request is another hand-over write, without waiting for the cooldown");
-  assert.match((await status())!, /^正在重试整理（(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 开始），聊天照常。$/u);
+  assert.match((await status())!, /^正在重试（(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 开始）$/u);
   retry.text("主人周末要去爬山；她答应到时候提醒他带上要带的东西。");
   await waitFor(async () => (await records(client, alu.id)).length === 1, "The hand-over record did not take its place");
 
@@ -115,7 +123,7 @@ test("saved hand-over settings guide background writing while she answers, and s
   const reopened = await team.startHost();
   assert.deepEqual((await reopened.assistantSettings()).handoff, handoff, "Main keeps the saved parameters and full instruction after restarting");
   const resident = await team.assistantWork();
-  assert.ok((await runtimeDetails(reopened, resident.id)).includes("上次整理成功"), "Requested details restore the latest hand-over result after reopening");
+  assert.ok((await handoffDiagnostic(reopened, resident.id)).message.includes("上次整理成功"), "Requested details restore the latest hand-over result after reopening");
   assert.equal((await reopened.status(resident.id)).extensionStatus["滚动整理"], undefined, "A healthy idle assistant leaves the chat status bar clear");
 });
 

@@ -53,7 +53,7 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   const handled = async (operationId: string) => waitFor(() => events.some(event => event.type === "command.handled" && event.data.operationId === operationId), `Command ${operationId} did not finish`);
 
   const catalog = await client.commands(assistant.id);
-  assert.deepEqual(catalog.commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "retry-handoff"]);
+  assert.deepEqual(catalog.commands.map(command => command.name), ["dock-tools", "local-echo", "retry-handoff"]);
   assert.deepEqual(catalog.commands.find(command => command.name === "local-echo"), {
     name: "local-echo", description: "确定性本机回显", argumentHint: "<任意文字>", argumentCompletions: false,
     source: { kind: "extension", package: "echo", path: module },
@@ -61,16 +61,7 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   assert.deepEqual((await client.commands(assistant.id, "local-")).commands.map(command => command.name), ["local-echo"]);
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "legacy_local_tool"));
 
-  const beforeDetails = (await client.conversationHistory(assistant.id)).entries;
-  const detailsReceipt = await client.prompt(assistant.id, "/assistant-status", "auto", "assistant-details");
-  assert.equal(detailsReceipt.receipt.kind, "extension_command");
-  await handled("assistant-details");
-  await waitFor(() => notifications("assistant-details").length > 0, "Assistant details did not reach the command console");
-  const details = notifications("assistant-details").map(item => item.message).join("\n");
-  assert.match(details, /滚动整理/);
-  assert.match(details, /echo：已加载，0 个工具、1 个命令/);
-  assert.match(details, /legacy：已加载，1 个工具、0 个命令/);
-  assert.deepEqual((await client.conversationHistory(assistant.id)).entries, beforeDetails, "Reading runtime details keeps the conversation unchanged");
+  assert.ok((await client.resources(assistant.id)).diagnostics.some(item => item.severity === "info" && item.message === "工具扩展 echo：已加载，0 个工具、1 个命令。"));
 
   const args = 'a  "b c"\n第二行';
   const receipt = await client.prompt(assistant.id, `/local-echo ${args}`, "auto", "local-first");
@@ -138,20 +129,15 @@ test("the owner runs an assistant extension command, sees its result, and Reload
     }`);
   await writeFile(configFile, JSON.stringify([...settings,
     { id: "duplicate", module: conflict, enabled: true, config: { name: "local-echo" } },
-    { id: "builtin-conflict", module: conflict, enabled: true, config: { name: "assistant-status" } },
+    { id: "builtin-conflict", module: conflict, enabled: true, config: { name: "retry-handoff" } },
     { id: "platform-conflict", module: conflict, enabled: true, config: { names: localControls, keep: true } },
   ]));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "new-echo", "retry-handoff"]);
-  await waitFor(async () => (await client.status(assistant.id)).extensionStatus["工具扩展"] !== undefined, "Missing extension warning");
-  const conflictFollower = await client.streamEvents(assistant.id, { onEvent: event => { events.push(event); } });
-  try {
-    await client.prompt(assistant.id, "/assistant-status", "auto", "conflict-details");
-    await waitFor(() => notifications("conflict-details").length > 0, "Conflict details did not reach the command console");
-    const report = notifications("conflict-details").map(item => item.message).join("\n");
-    assert.ok(report.includes("/local-echo") && report.includes("/assistant-status"));
-    for (const name of localControls) assert.ok(report.includes(`/${name}`), `The requested report identifies /${name} for renaming`);
-  } finally { conflictFollower.close(); await conflictFollower.done; }
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["dock-tools", "local-echo", "new-echo", "retry-handoff"]);
+  assert.equal((await client.status(assistant.id)).extensionStatus["工具扩展"], "5 个已加载");
+  const report = (await client.resources(assistant.id)).diagnostics.filter(item => item.severity === "error").map(item => item.message).join("\n");
+  assert.ok(report.includes("/local-echo") && report.includes("/retry-handoff"));
+  for (const name of localControls) assert.ok(report.includes(`/${name}`), `Diagnostics identify /${name} for renaming`);
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "kept_local_tool" && tool.source?.package === "platform-conflict"), "The module's original tool remains registered");
   // Use the real terminal input, not direct command.submit: /new-echo must reach the Worker,
   // while /new, /help, /status and /follow retain their local behavior.
@@ -177,12 +163,12 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   await writeFile(module, source("renamed-echo"));
   await writeFile(configFile, JSON.stringify(settings));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "renamed-echo", "retry-handoff"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["dock-tools", "renamed-echo", "retry-handoff"]);
   await client.prompt(assistant.id, "/renamed-echo after-reload", "auto", "renamed");
   await waitFor(async () => JSON.parse(await readFile(marker, "utf8")).args === "after-reload", "Reload did not load the renamed handler");
   await writeFile(configFile, JSON.stringify(settings.map(setting => ({ ...setting, enabled: false }))));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "retry-handoff"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["dock-tools", "retry-handoff"]);
   assert.equal(team.providers.coordinator.requests.length, 0, "Reload and command execution remain local");
 
   // A removed or simply unregistered slash prefix is ordinary text, not an invalid command.

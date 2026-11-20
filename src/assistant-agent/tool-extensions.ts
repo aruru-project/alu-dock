@@ -7,9 +7,10 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Models } from "@earendil-works/pi-ai";
 import { ASSISTANT_EXTENSIONS_FILE, readAssistantExtensions } from "../assistant/extensions-config.js";
 import { parseCommandsResult } from "../control/protocol.js";
-import { compareCommandDtos, type CommandDto, type SourceDto } from "../core/config-projection.js";
+import { compareCommandDtos, type CommandDto, type DiagnosticDto, type ResourceDto, type SourceDto } from "../core/config-projection.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import { validateUiCapabilityArgs } from "../worker/worker-protocol.js";
+import { documentResource } from "../worker/resource-files.js";
 import type { AgentSkillDeclaration } from "../worker/agent-skills.js";
 import controlCommandNames from "../shared/local-control-command-names.json" with { type: "json" };
 
@@ -74,7 +75,9 @@ export class AssistantToolExtensions {
   readonly sources = new Map<string, SourceDto>();
   readonly skillDeclarations: AgentSkillDeclaration[] = [];
   private loaded: Array<{ id: string; extension: AssistantExtension }> = [];
-  private statuses = new Map<string, string>();
+  readonly resources: ResourceDto[] = [];
+  readonly diagnostics: DiagnosticDto[] = [];
+  private failures = 0;
   private lifetime = new AbortController();
   private readonly commands = new Map<string, { command: AssistantExtensionCommand; dto: CommandDto }>();
   private readonly calls = new Set<AbortController>();
@@ -102,26 +105,22 @@ export class AssistantToolExtensions {
 
   get commandCatalog(): CommandDto[] { return [...this.commands.values()].map(({ dto }) => dto); }
 
-  /** Requested details include successful loads without putting them back in the chat status bar. */
-  details(): string {
-    const loaded = this.loaded.map(({ id, extension }) => `${id}：已加载，${extension.tools?.length ?? 0} 个工具、${this.commandCatalog.filter(command => command.source.package === id).length} 个命令。`);
-    const failures = [...this.statuses].map(([id, text]) => `${id}：${text}`);
-    return [...loaded, ...failures].join("\n") || "没有已加载的工具扩展。";
-  }
-
   /** Only called at startup or an idle Reload; the built-in tools and commands are never replaced. */
   async load(reserved: readonly AgentTool[], reservedCommands: readonly CommandDto[] = []): Promise<AgentTool[]> {
     await this.dispose();
     this.lifetime = new AbortController();
-    this.statuses.clear();
-    this.showStatus();
+    this.resources.length = 0;
+    this.diagnostics.length = 0;
+    this.failures = 0;
     this.sources.clear();
     this.commands.clear();
     this.skillDeclarations.length = 0;
     let settings;
     try { settings = await readAssistantExtensions(this.cwd); }
     catch (error) {
-      this.status("配置", (error as Error).message);
+      this.failures++;
+      this.diagnostics.push({ severity: "error", message: `工具扩展配置：${(error as Error).message}` });
+      this.showStatus();
       return [];
     }
     const names = new Set(reserved.map(tool => tool.name));
@@ -131,7 +130,12 @@ export class AssistantToolExtensions {
     ]);
     const tools: AgentTool[] = [];
     for (const setting of settings) {
-      if (!setting.enabled) continue;
+      if (!setting.enabled) {
+        this.diagnostics.push({ severity: "info", message: `工具扩展 ${setting.id}：已停用。` });
+        continue;
+      }
+      const source: SourceDto = { kind: "extension", package: setting.id, path: setting.module };
+      this.resources.push(documentResource("extension", setting.id, isAbsolute(setting.module) ? setting.module : undefined, source));
       let extension: AssistantExtension | undefined;
       try {
         let factory: AssistantExtensionFactory | undefined;
@@ -158,7 +162,6 @@ export class AssistantToolExtensions {
         }
         const extensionTools = extension.tools ?? [];
         const extensionCommands = extension.commands ?? [];
-        const source: SourceDto = { kind: "extension", package: setting.id, path: setting.module };
         const ownNames = new Set<string>();
         for (const tool of extensionTools) {
           if (!tool || typeof tool.name !== "string" || !/^[a-zA-Z0-9_-]+$/u.test(tool.name) || typeof tool.description !== "string" || !tool.description.trim()
@@ -217,7 +220,8 @@ export class AssistantToolExtensions {
           });
         }
         this.loaded.push({ id: setting.id, extension });
-        if (commandProblems.length) this.status(setting.id, commandProblems.join("\n"));
+        this.diagnostics.push({ severity: "info", message: `工具扩展 ${setting.id}：已加载，${ownNames.size} 个工具${ownNames.size ? `（${[...ownNames].join("、")}）` : ""}、${ownCommands.size} 个命令。` });
+        for (const problem of commandProblems) this.diagnostics.push({ severity: "error", message: `工具扩展 ${setting.id}：${problem}` });
         // Manuals are independent of tool/command registration: malformed or missing skills only
         // produce resource diagnostics, and cannot roll back working tools or commands.
         this.skillDeclarations.push(
@@ -234,10 +238,12 @@ export class AssistantToolExtensions {
         // Unknown exceptions may contain credentials anywhere, including nested/custom properties.
         // Log only loader-owned facts; neither UI nor local diagnostics receive the exception.
         console.error(`Assistant extension ${setting.id} load_failed: Check extensions.json and the extension module, then Reload.`);
-        this.status(setting.id, error instanceof RegistrationConflict ? error.message
-          : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload。`);
+        this.failures++;
+        const reason = error instanceof RegistrationConflict ? error.message : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload。`;
+        this.diagnostics.push({ severity: "error", message: `工具扩展 ${setting.id}：${reason}` });
       }
     }
+    this.showStatus();
     return tools;
   }
 
@@ -288,11 +294,10 @@ export class AssistantToolExtensions {
 
   abortCommands(): void { for (const controller of this.calls) controller.abort(); }
 
-  /** Only actionable failures are re-published after activate/reload; normal tools stay quiet. */
   showStatus(): void {
-    this.ui.status("工具扩展", this.statuses.size ? "有扩展未完全加载，请在命令中心查看助手运行详情。" : undefined);
+    const loaded = this.loaded.length;
+    this.ui.status("工具扩展", this.failures ? `${loaded} 个已加载，${this.failures} 个失败` : loaded ? `${loaded} 个已加载` : undefined);
   }
-  private status(id: string, text: string): void { this.statuses.set(id, text); this.showStatus(); }
 
   async dispose(): Promise<string[]> {
     this.lifetime.abort();

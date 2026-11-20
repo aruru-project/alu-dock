@@ -40,7 +40,8 @@ import {
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
-import { compareCommandDtos, compareToolDtos, type CommandDto, type ResourceDto } from "../core/config-projection.js";
+import { MAX_MESSAGE } from "../control/protocol.js";
+import { compareCommandDtos, compareToolDtos, type CommandDto, type DiagnosticDto, type ResourceDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { projectJsonObject, type JsonObject } from "../core/json-value.js";
@@ -127,10 +128,12 @@ const BUILTIN_COMMANDS: readonly CommandDto[] = [{
   name: DOCK_TOOLS_COMMAND, source: { kind: "built-in" }, description: "开启、关闭或查看助手的 Dock tools（派 Work、联系别的 Work）",
   argumentHint: "on|off|status", argumentCompletions: false,
 }, {
-  name: "assistant-status", source: { kind: "built-in" }, description: "查看助手运行详情", argumentCompletions: false,
-}, {
   name: "retry-handoff", source: { kind: "built-in" }, description: "立即重试滚动整理（对话整理失败后用）", argumentCompletions: false,
 }];
+function fitDiagnostic(item: DiagnosticDto): DiagnosticDto {
+  return item.message.length <= MAX_MESSAGE ? item : { ...item, message: `${item.message.slice(0, MAX_MESSAGE - 1)}…` };
+}
+
 const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开会话、不切换或分叉。你可以直接继续说；要载入刚改过的人设和记忆，请用 Reload，重启也会保留这段对话。";
 
 /**
@@ -333,7 +336,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** The same current list authorizes resource.content. Other local context snapshots may join it. */
-  private getDocumentResources(): ResourceDto[] { return [...this.skills.resources]; }
+  private getDocumentResources(): ResourceDto[] { return [...this.skills.resources, ...this.extensions.resources]; }
 
   // ---- What the Host asks -------------------------------------------------------------------
 
@@ -399,7 +402,11 @@ class AssistantAgent implements WorkerAgent {
         this.modelSpeed.refresh();
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
-      case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);
+      case "resource.get": {
+        const diagnostics: DiagnosticDto[] = [...this.skills.diagnostics, ...this.extensions.diagnostics,
+          { severity: this.handoff.needsAttention ? "warning" : "info", message: `滚动整理：${this.handoff.details().split(/\r?\n/u).join(" ")}` }];
+        return projectResources(this.getDocumentResources(), diagnostics.map(fitDiagnostic));
+      }
       // Commands run directly for her owner; no model turn is involved.
       case "command.catalog": {
         const commands = [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog]
@@ -555,7 +562,6 @@ class AssistantAgent implements WorkerAgent {
       preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
       if (builtin?.name === DOCK_TOOLS_COMMAND) await this.switchDockTools(input![2]?.trim() || "status", operationId);
       else if (builtin?.name === "retry-handoff") this.tell(await this.handoff.retryNow(estimateContextTokens(convertToLlm(this.agent.state.messages)).tokens), "info", operationId);
-      else if (builtin?.name === "assistant-status") this.tell(`滚动整理\n${this.handoff.details()}\n\n工具扩展\n${this.extensions.details()}`, "info", operationId);
       else await this.extensions.executeCommand(command!.name, command!.args, operationId);
       return null;
     }

@@ -66,8 +66,8 @@ test("assistant extension failures keep Main authentication out of logs and owne
   // An idle Reload reaches the previous extension's dispose and then the failing factory.
   await writeFile(configFile, JSON.stringify(settings(true)));
   const reloaded = await client.reloadSession(work.id);
-  await client.prompt(work.id, "/assistant-status", "auto", "failure-details");
-  await waitFor(() => events.some(event => event.type === "command.handled" && event.data.operationId === "failure-details"), "The owner could not read extension failure details");
+  const resources = await client.resources(work.id);
+  assert.ok(resources.diagnostics.some(item => item.severity === "error" && item.message.includes("工具扩展 credential-errors：加载失败")));
   const status = await client.status(work.id);
   const history = await client.history(work.id);
   const commands = await client.commands(work.id);
@@ -82,10 +82,9 @@ test("assistant extension failures keep Main authentication out of logs and owne
   const notifications = events.filter((event): event is Extract<DockEvent, { type: "extension.notification" }> => event.type === "extension.notification");
   assert.ok(notifications.some(event => event.data.operationId === "failed-command" && event.data.level === "error"));
   assert.ok(notifications.some(event => event.data.level === "warning"));
-  assert.ok(notifications.some(event => event.data.operationId === "failure-details"));
   assert.equal(status.lifecycle, "active");
   assert.equal(status.execution, "idle");
-  assert.ok(!JSON.stringify({ receipt, reloaded, status, history, commands, tools, events, session }).includes(secret), "Credentials must stay out of owner results and saved conversation");
+  assert.ok(!JSON.stringify({ receipt, reloaded, status, history, commands, tools, events, session, resources }).includes(secret), "Credentials must stay out of owner results and saved conversation");
   // Do not allow removal of diagnostics to make the credential assertion pass vacuously.
   await waitFor(() => stderr.includes("credential-errors") && stderr.includes("load") && stderr.includes("dispose") && stderr.includes("command"), "Host did not receive safe extension failure diagnostics");
   assert.ok(!stderr.includes(secret), "Worker stderr forwarded to Host logs must not contain Main authentication");
