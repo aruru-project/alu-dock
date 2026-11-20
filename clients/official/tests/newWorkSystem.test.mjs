@@ -13,7 +13,7 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const directory = await mkdtemp(join(root, '.system-check-'))
 const stateKey = '__aluSystemCheck'
 const node = (type, text = '') => ({ type, text, props: {}, children: [], parent: null, checked: false,
-  focus() {}, select() {}, addEventListener(name, handler) { this[name] = handler }, removeEventListener() {},
+  getRootNode() { return globalThis.document }, focus() {}, select() {}, addEventListener(name, handler) { this[name] = handler }, removeEventListener() {},
   querySelectorAll() { return [] },
 })
 const detach = (item) => {
@@ -48,6 +48,8 @@ Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { cl
 globalThis.window = { clearTimeout, setTimeout,
   matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
+globalThis.Document = class Document {}
+globalThis.ShadowRoot = class ShadowRoot {}
 globalThis.document = { addEventListener() {}, removeEventListener() {} }
 const fastModel = { provider: 'fixture', id: 'fast', name: 'Fast', reasoning: false }
 const fasterModel = { provider: 'fixture', id: 'faster', name: 'Faster', reasoning: false }
@@ -66,18 +68,75 @@ try {
     plugins: [vue()],
   })
   const { default: NewWorkDialog, useAppStore, useModelListsStore } = await import(join(directory, 'component.mjs'))
-  async function createStore() {
+  async function createStore(supportsCreateDirectory = false) {
     setActivePinia(createPinia())
     const store = useAppStore()
     globalThis[stateKey] = { invoke: async command => {
       if (command === 'get_host_catalog') return { revision: 1, selectionGeneration: 1, hosts: [], activeTarget: { kind: 'host', hostId: 'connection-a' } }
-      if (command === 'bootstrap') return { connectionId: 'connection-a', selectionGeneration: 1, host: { hostEpoch: 'epoch-a' }, works: [], total: 0 }
+      if (command === 'bootstrap') return { connectionId: 'connection-a', selectionGeneration: 1, host: { hostEpoch: 'epoch-a', supportsCreateDirectory }, works: [], total: 0 }
       throw new Error(`Unexpected native setup call: ${command}`)
     } }
     await store.load()
     store.rememberCreatedWorkspace('target', '/project', 'linux')
     return store
   }
+
+  // The action is based on the current directory's actual error and the connected Main's hello.
+  for (const supports of [false, true]) {
+    await createStore(supports)
+    const attempts = [], created = []
+    const path = '/work/new/project'
+    const label = '创建这个目录并新建工作'
+    const machine = { hostId: 'target', name: 'Main', kind: 'main', available: true, homePath: '/work', platform: 'linux' }
+    globalThis[stateKey] = { invoke: async (command, args) => {
+      if (command === 'model_visibility') return { models: [fastModel], total: 1, truncated: false, hidden: [] }
+      if (command === 'list_workspace') {
+        if (args.path === path) throw { code: 'workspace_not_found' }
+        if (args.path === '/work/file') throw { code: 'workspace_not_directory' }
+        if (args.path === '/work/private') throw { code: 'workspace_permission_denied' }
+        return { path: args.path, revision: 'r', entries: [], total: 0, truncated: false }
+      }
+      if (command === 'create_work') {
+        attempts.push(args)
+        if (attempts.length === 1) throw { code: 'capability_missing' }
+        if (!args.trustChallengeId) throw { code: 'project_trust_required', details: { operationId: 'creating', challengeId: 'challenge' } }
+        return { id: 'created' }
+      }
+      throw new Error(`Unexpected call: ${command}`)
+    } }
+    const container = node('root')
+    const ui = renderer.createApp({ render: () => h(NewWorkDialog, { machines: [machine], machinesLoading: false, onCreated: work => created.push(work.id) }) })
+    const button = label => find(container, el => el.type === 'button' && (text(el).includes(label) || el.props['aria-label'] === label))
+    async function waitUntil(predicate, reason) {
+      const deadline = Date.now() + 2000
+      while (!predicate() && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+      assert.ok(Boolean(predicate()), reason)
+    }
+    ui.mount(container)
+    try {
+      await waitUntil(() => button('选择模型'), 'model selection'); button('选择模型').props.onClick()
+      await waitUntil(() => button('Fast'), 'available model'); button('Fast').props.onClick(); await nextTick()
+      button('选择其他目录').props.onClick(); await waitUntil(() => text(container).includes('可见项目'), 'existing directory loaded')
+      assert.ok(!button(label))
+      const search = find(container, el => el.type === 'input' && el.props.type === 'search')
+      async function go(value, message) {
+        search.value = value; search.input({ target: search }); await nextTick()
+        search.props.onKeydown({ key: 'Enter', preventDefault() {} }); await waitUntil(() => text(container).includes(message), `directory result for ${value}`)
+      }
+      await go('/work/file', '不是目录'); assert.ok(!button(label))
+      await go('/work/private', '权限'); assert.ok(!button(label))
+      await go(path, '这个目录不存在'); assert.equal(Boolean(button(label)), supports)
+      if (supports) {
+        button(label).props.onClick(); await waitUntil(() => text(container).includes('尚不支持这项功能'), 'old target rejection shown in the picker')
+        button(label).props.onClick(); await waitUntil(() => button('仅本次信任'), 'trust prompt')
+        button('仅本次信任').props.onClick(); await waitUntil(() => created.length === 1, 'created Work opened')
+        assert.deepEqual(attempts.map(a => [a.cwd, a.targetHostId, a.createDirectory, a.workerConfig]),
+          Array.from({ length: 3 }, () => [path, 'target', true, { model: { provider: 'fixture', id: 'fast' } }]))
+        assert.equal(attempts[2].operationId, 'creating')
+      }
+    } finally { ui.unmount() }
+  }
+  console.log('PASS: directory creation offered only for a missing path on a supporting Main; model, target and creation intent survive trust')
 
   // A missing optional Host feature must not block the existing creation contract.
   for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {

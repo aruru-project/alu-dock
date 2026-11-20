@@ -765,9 +765,11 @@ export async function createWork(
   workerConfig?: Record<string, unknown>,
   /** Open as the assistant (true) or, against a directory that does, not (false); omitted, the Host uses the directory's saved choice. */
   assistant?: boolean,
+  createDirectory?: boolean,
 ): Promise<Work> {
   return native<Work>('create_work', {
     ...context, cwd,
+    ...(createDirectory ? { createDirectory } : {}),
     workerConfig: workerConfig ?? null,
     assistant: assistant ?? null,
     name: name || null,

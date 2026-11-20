@@ -68,6 +68,7 @@ pub(crate) struct HostCatalog {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HostSummary {
+    pub(crate) supports_create_directory: bool,
     pub(crate) state: String,
     pub(crate) host_epoch: String,
     pub(crate) dock_version: String,
@@ -844,6 +845,7 @@ pub(crate) async fn bootstrap(
         selection_generation,
         max_attachments_per_message: MAX_ATTACHMENTS_PER_MESSAGE,
         host: HostSummary {
+            supports_create_directory: info.supports_create_directory,
             state: info.state,
             host_epoch: info.host.host_epoch,
             dock_version: info.host.dock_version,

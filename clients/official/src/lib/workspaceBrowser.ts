@@ -13,6 +13,7 @@ export interface WorkspaceDirectoryState {
   nextCursor?: WorkspaceFileCursor
   loading: boolean
   error: string
+  errorCode?: string
   diagnostic?: string
   diagnosticCopyState?: 'copied' | 'failed'
   loadToken: number
