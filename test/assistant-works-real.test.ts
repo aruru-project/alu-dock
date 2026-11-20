@@ -91,6 +91,34 @@ test("the assistant hands work to a child Work, answers her owner while it works
   await waitFor(async () => !(await client.list()).some((work) => work.id === child.id), "Her child Work outlived her");
 });
 
+test("the owner's steer and follow-up during a reply each renew the Work wake budget", { timeout: 90_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator", "implementer"], { prefix: "alu-owner-wake-", assistant: true });
+  const client = await team.startHost();
+  const assistant = await team.assistantWork();
+  const { coordinator, implementer } = team.providers;
+  const { handoff } = await client.assistantSettings();
+  await client.setAssistantSettings({ handoff: { ...handoff!, startTokens: 100_000 } });
+  await client.prompt(assistant.id, "派个 Work 跟我汇报进度", "auto", "start-progress");
+  (await coordinator.request(0)).tools({ id: "spawn", name: "dock_spawn", arguments: { name: "汇报进度", task: "持续报告进度。", model: { provider: "implementer", id: "fixture" } } });
+  (await coordinator.request(1)).text("派好了。");
+  await settled(client, assistant.id);
+  let reply = 2;
+  for (let report = 1; report <= 25; report++) {
+    (await implementer.request(report - 1)).tools({ id: `progress-${report}`, name: "dock_send", arguments: { done: report === 25, message: `第 ${report} 份进度` } });
+    const working = await coordinator.request(reply++);
+    if (report === 12 || report === 24) {
+      const mode = report === 12 ? "steer" : "followUp";
+      const words = `回复中主人的 ${mode} 插话`;
+      await client.prompt(assistant.id, words, mode, `owner-${mode}`);
+      working.text("进度收到。");
+      const inserted = await coordinator.request(reply++);
+      assert.ok(given(inserted).includes(words));
+      inserted.text("主人的消息也收到了。");
+    } else working.text("收到。");
+    await settled(client, assistant.id);
+  }
+});
+
 test("her next status stops following an ordinary Work after cancelling a watch and after it fires", { timeout: 60_000 }, async context => {
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-watch-", assistant: true });
   const client = await team.startHost();

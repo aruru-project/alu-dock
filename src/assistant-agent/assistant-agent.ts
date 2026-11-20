@@ -584,9 +584,11 @@ class AssistantAgent implements WorkerAgent {
       preflight({ success: false });
       throw new AgentQueueRejectedBeforeEffectError();
     }
+    const fromWork = isDockMessageText(message);
     if (context?.type === "defer_to_host") {
       if (delivery === "prompt") throw new Error("Host-deferred input requires queued delivery");
       preflight({ success: true, inputKind: "prompt", delivery, custody: "host" });
+      if (!fromWork) this.admit("owner");
       return null;
     }
     let content: Array<TextContent | ImageContent>;
@@ -608,8 +610,8 @@ class AssistantAgent implements WorkerAgent {
       ...(images === undefined ? {} : { images }), ...(attachments === undefined ? {} : { attachments }),
     });
     preflight({ success: true, inputKind: "prompt", delivery: actual, custody: "runtime" });
-    // Another top-level Work speaks to her through her input, with Dock's source line first.
-    const fromWork = isDockMessageText(message);
+    // A Host-queued owner's message already reset the count when it was accepted, not when replayed.
+    if (!fromWork && !handedOver) this.admit("owner");
     if (actual !== "prompt") {
       if (!fromWork) this.ownerWords.push(message);
       this.queue.push({ operationId, delivery: actual, text: modelText });
@@ -617,7 +619,7 @@ class AssistantAgent implements WorkerAgent {
       this.publishQueue();
       return null;
     }
-    if (!this.admit(fromWork ? "work" : "owner")) {
+    if (fromWork && !this.admit("work")) {
       // It joins the conversation without a reply: the Host shows the message as taken without a run.
       this.observe({ type: "message_start", message: userMessage });
       this.observe({ type: "message_end", message: userMessage });
@@ -668,7 +670,7 @@ class AssistantAgent implements WorkerAgent {
   /** Whether this may start a reply; says so once when Works have used up the replies they may start. */
   private admit(source: WakeSource, childId?: string): boolean {
     if (this.wake.admit(source)) {
-      if (source !== "work") this.toldWakesSpent = false;
+      if (source === "owner") this.toldWakesSpent = false;
       return true;
     }
     if (!this.toldWakesSpent) {
