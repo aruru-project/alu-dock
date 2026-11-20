@@ -128,6 +128,8 @@ const BUILTIN_COMMANDS: readonly CommandDto[] = [{
   argumentHint: "on|off|status", argumentCompletions: false,
 }, {
   name: "assistant-status", source: { kind: "built-in" }, description: "查看助手运行详情", argumentCompletions: false,
+}, {
+  name: "retry-handoff", source: { kind: "built-in" }, description: "立即重试滚动整理（对话整理失败后用）", argumentCompletions: false,
 }];
 const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开会话、不切换或分叉。你可以直接继续说；要载入刚改过的人设和记忆，请用 Reload，重启也会保留这段对话。";
 
@@ -246,7 +248,7 @@ class AssistantAgent implements WorkerAgent {
       settings: async () => (await port.call({ op: "settings_get" })).handoff,
       status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
       rememberResult: (text) => this.saveState(HANDOFF_STATE_TYPE, text),
-      complete: (system, prompt, maxTokens, signal) => this.complete(system, prompt, maxTokens, signal),
+      complete: (system, prompt, signal) => this.complete(system, prompt, signal),
       forgotten: () => this.forgottenEntries(),
       ready: () => { if (this.running === undefined) this.settleSoon(); },
       tell: (message) => this.tell(message, "warning"),
@@ -552,7 +554,8 @@ class AssistantAgent implements WorkerAgent {
       }
       preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
       if (builtin?.name === DOCK_TOOLS_COMMAND) await this.switchDockTools(input![2]?.trim() || "status", operationId);
-      else if (builtin) this.tell(`滚动整理\n${this.handoff.details()}\n\n工具扩展\n${this.extensions.details()}`, "info", operationId);
+      else if (builtin?.name === "retry-handoff") this.tell(await this.handoff.retryNow(estimateContextTokens(convertToLlm(this.agent.state.messages)).tokens), "info", operationId);
+      else if (builtin?.name === "assistant-status") this.tell(`滚动整理\n${this.handoff.details()}\n\n工具扩展\n${this.extensions.details()}`, "info", operationId);
       else await this.extensions.executeCommand(command!.name, command!.args, operationId);
       return null;
     }
@@ -920,11 +923,11 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** One request to her model outside the conversation. */
-  private async complete(system: string, prompt: string, maxTokens: number, signal: AbortSignal): Promise<string> {
+  private async complete(system: string, prompt: string, signal: AbortSignal): Promise<string> {
     const model = this.model;
     if (model === undefined) throw new Error("没有可用的模型");
     const reply = await this.models.completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      { signal, maxTokens: Math.min(maxTokens, model.maxTokens || maxTokens), onPayload: this.modelSpeed.wrap() });
+      { signal, onPayload: this.modelSpeed.wrap() });
     if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? "模型没有回答");
     if (reply.stopReason === "length") throw new Error("模型的回答被截断了");
     return reply.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
@@ -996,7 +999,7 @@ class AssistantAgent implements WorkerAgent {
       const texts = memories.filter((memory) => Date.parse(memory.updatedAt) > since).map((memory) => memory.text);
       if (texts.length === 0) return false;
       const { system, prompt } = rewriteWithoutPrompt(record.summary, texts);
-      const rewritten = (await this.complete(system, prompt, 4_096, new AbortController().signal)).trim();
+      const rewritten = (await this.complete(system, prompt, new AbortController().signal)).trim();
       if (rewritten.length === 0) return false;
       this.session.appendCompaction(rewritten, record.firstKeptEntryId, record.tokensBefore);
       cleanupSessionResources(this.session.getSessionId());

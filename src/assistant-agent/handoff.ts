@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { buildSessionProjection, convertToLlm, estimateTokens, serializeConversation, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type { AssistantHandoffSettings } from "../core/assistant.js";
-import { localTime } from "../core/local-time.js";
+import { localTime, shortLocalTime } from "../core/local-time.js";
 import { DOCK_NOTE_TYPE, STATUS_NOTE_TYPE } from "./status.js";
 
 export const HANDOFF_STATUS_KEY = "滚动整理";
@@ -38,7 +38,6 @@ export function handoffLimits(contextWindow: number, settings?: AssistantHandoff
 
 /** After a failed write the next one waits this long: 5, 15, 30, then 60 minutes. */
 const RETRY_MINUTES = [5, 15, 30, 60];
-const RECORD_TOKENS = 4_096;
 
 export interface HandoffDeps {
   /** The whole conversation, oldest first. */
@@ -50,7 +49,7 @@ export interface HandoffDeps {
   status(text: string | undefined): void;
   rememberResult(text: string): void;
   /** One call to her model; rejects when it fails or is cancelled. */
-  complete(system: string, prompt: string, maxTokens: number, signal: AbortSignal): Promise<string>;
+  complete(system: string, prompt: string, signal: AbortSignal): Promise<string>;
   /** The entries of this conversation her owner had her forget, or undefined when Main does not answer. */
   forgotten(): Promise<string[] | undefined>;
   /** A record written in the background is ready to take its place. */
@@ -67,7 +66,7 @@ export interface HandoffDeps {
  * fails loses nothing: the conversation stays whole and the next write waits a while.
  */
 export class Handoff {
-  private writing: { promise: Promise<void>; cancel: AbortController } | undefined;
+  private writing: { promise: Promise<void>; cancel: AbortController; startedAt: Date } | undefined;
   private record: HandoffRecord | undefined;
   private settings: AssistantHandoffSettings | undefined;
   private reading: Promise<void> | undefined;
@@ -75,6 +74,7 @@ export class Handoff {
   private inUse: { settings: AssistantHandoffSettings; limits: HandoffLimits } | undefined;
   private lastResult = "尚无整理结果。";
   private activity = "等待整理。";
+  private lastFailure: { at: number; reason: string } | undefined;
   private failures = 0;
   private retryAt = 0;
   private toldFailure = false;
@@ -123,6 +123,22 @@ export class Handoff {
     });
   }
 
+  async retryNow(tokens: number): Promise<string> {
+    if (this.stopped) return "助手正在停止，没有重试。";
+    await this.refresh();
+    if (this.settings === undefined) return "还没读到滚动整理设置，暂时不能整理。之后会自动重新读取。";
+    if (this.writing !== undefined) return "已经在整理，完成后状态栏会更新。";
+    if (this.record !== undefined) {
+      this.deps.ready();
+      return "交接记录已经写好，会在下一轮回复前采用。";
+    }
+    const { startTokens } = this.limits();
+    if (this.failures === 0 && tokens < startTokens) return `对话约 ${tokens} token，还没到开始整理的 ${startTokens} token，现在不用整理。`;
+    this.retryAt = 0;
+    this.start(true);
+    return this.writing === undefined ? "现在没有可以整理的较早对话。" : "已开始重新整理，聊天照常。完成或失败都会显示在状态栏。";
+  }
+
   private limits(): HandoffLimits { return handoffLimits(this.deps.contextWindow(), this.settings); }
 
   mustWait(tokens: number): boolean {
@@ -169,8 +185,9 @@ export class Handoff {
 
   private showStatus(): void {
     if (this.stopped) return;
-    this.deps.status(this.settingsError ? "暂未读到整理设置，稍后会重试。"
-      : this.failures > 0 ? "整理未完成，对话保留，稍后会重试。"
+    this.deps.status(this.settingsError ? "暂未读到整理设置，下次对话时重新读取。"
+      : this.writing !== undefined && this.failures > 0 ? `正在重试整理（${shortLocalTime(this.writing.startedAt)} 开始），聊天照常。`
+      : this.failures > 0 && this.lastFailure ? `${shortLocalTime(new Date(this.lastFailure.at))} 整理失败：${this.lastFailure.reason}。原对话保留，最早 ${shortLocalTime(new Date(this.retryAt))} 后下次对话时自动重试，也可在助手设置里立即重试。`
       : undefined);
   }
 
@@ -200,11 +217,12 @@ export class Handoff {
     const prepared = prepareHandoff(this.deps.branch(), limits.keepRecentTokens);
     if (prepared === undefined) return;
     this.inUse = { settings, limits };
-    this.activity = `正在后台整理（${localTime(new Date((this.deps.now ?? Date.now)()))} 开始），聊天照常。`;
-    this.showStatus();
+    const startedAt = new Date((this.deps.now ?? Date.now)());
+    this.activity = `正在后台整理（${localTime(startedAt)} 开始），聊天照常。`;
     const cancel = new AbortController();
     const promise = this.write(prepared, settings.prompt, cancel.signal).then((record) => {
       if (cancel.signal.aborted) return;
+      this.lastFailure = undefined;
       this.failures = 0;
       this.toldFailure = false;
       this.record = record;
@@ -213,18 +231,22 @@ export class Handoff {
       if (background) this.deps.ready();
     }, (error: unknown) => {
       if (cancel.signal.aborted) return;
-      this.retryAt = (this.deps.now ?? Date.now)() + RETRY_MINUTES[Math.min(this.failures, RETRY_MINUTES.length - 1)]! * 60_000;
+      const at = (this.deps.now ?? Date.now)();
+      const reason = error instanceof Error ? error.message : String(error);
+      this.lastFailure = { at, reason };
+      this.retryAt = at + RETRY_MINUTES[Math.min(this.failures, RETRY_MINUTES.length - 1)]! * 60_000;
       this.failures += 1;
-      this.activity = `对话保留，${localTime(new Date(this.retryAt))} 后会再试；对话过长时也会再试。`;
-      this.result(`上次整理失败：${localTime(new Date((this.deps.now ?? Date.now)()))}（${error instanceof Error ? error.message : String(error)}）。`);
+      this.activity = `原对话保留。${localTime(new Date(this.retryAt))} 之后的下一次对话会自动重试；对话超过 ${this.limits().mustTokens} token 时，每次请求模型前都会先重试。也可以运行 /retry-handoff 立即重试。`;
+      this.result(`上次整理失败：${localTime(new Date(at))}（${reason}）。`);
       if (this.toldFailure) return;
       this.toldFailure = true;
-      this.deps.tell("对话整理没有成功，原始对话仍然保留，稍后会自动重试。详细原因可在命令中心的助手状态中查看。");
+      this.deps.tell(`对话整理没有成功（${reason}）。原对话保留，下次对话时会自动重试，也可以在助手设置的“滚动整理对话”里立即重试。`);
     }).finally(() => {
       if (this.writing?.promise === promise) { this.writing = undefined; this.inUse = undefined; }
       this.showStatus();
     });
-    this.writing = { promise, cancel };
+    this.writing = { promise, cancel, startedAt };
+    this.showStatus();
   }
 
   private async write(prepared: PreparedHandoff, instruction: string, signal: AbortSignal): Promise<HandoffRecord> {
@@ -236,7 +258,7 @@ export class Handoff {
       ...(prepared.previousSummary === undefined ? [] : [`<上一份交接记录>\n${prepared.previousSummary}\n</上一份交接记录>`]),
       `<对话>\n${said}\n</对话>`,
     ].join("\n\n");
-    const summary = (await this.deps.complete(instruction, prompt, RECORD_TOKENS, signal)).trim();
+    const summary = (await this.deps.complete(instruction, prompt, signal)).trim();
     if (summary.length === 0) throw new Error("模型没有写出交接记录");
     return { summary, firstKeptEntryId: prepared.firstKeptEntryId, tokensBefore: prepared.tokensBefore, forgottenAtStart };
   }

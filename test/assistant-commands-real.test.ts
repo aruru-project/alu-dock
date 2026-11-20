@@ -53,7 +53,7 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   const handled = async (operationId: string) => waitFor(() => events.some(event => event.type === "command.handled" && event.data.operationId === operationId), `Command ${operationId} did not finish`);
 
   const catalog = await client.commands(assistant.id);
-  assert.deepEqual(catalog.commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo"]);
+  assert.deepEqual(catalog.commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "retry-handoff"]);
   assert.deepEqual(catalog.commands.find(command => command.name === "local-echo"), {
     name: "local-echo", description: "确定性本机回显", argumentHint: "<任意文字>", argumentCompletions: false,
     source: { kind: "extension", package: "echo", path: module },
@@ -142,7 +142,7 @@ test("the owner runs an assistant extension command, sees its result, and Reload
     { id: "platform-conflict", module: conflict, enabled: true, config: { names: localControls, keep: true } },
   ]));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "new-echo"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "new-echo", "retry-handoff"]);
   await waitFor(async () => (await client.status(assistant.id)).extensionStatus["工具扩展"] !== undefined, "Missing extension warning");
   const conflictFollower = await client.streamEvents(assistant.id, { onEvent: event => { events.push(event); } });
   try {
@@ -177,12 +177,12 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   await writeFile(module, source("renamed-echo"));
   await writeFile(configFile, JSON.stringify(settings));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "renamed-echo"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "renamed-echo", "retry-handoff"]);
   await client.prompt(assistant.id, "/renamed-echo after-reload", "auto", "renamed");
   await waitFor(async () => JSON.parse(await readFile(marker, "utf8")).args === "after-reload", "Reload did not load the renamed handler");
   await writeFile(configFile, JSON.stringify(settings.map(setting => ({ ...setting, enabled: false }))));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "retry-handoff"]);
   assert.equal(team.providers.coordinator.requests.length, 0, "Reload and command execution remain local");
 
   // A removed or simply unregistered slash prefix is ordinary text, not an invalid command.
