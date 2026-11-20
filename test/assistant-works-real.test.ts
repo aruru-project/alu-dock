@@ -6,7 +6,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { startNativeTeam } from "./support/native-team.js";
+import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -89,6 +89,78 @@ test("the assistant hands work to a child Work, answers her owner while it works
   // Stopping her stops the Work she handed things to.
   await client.stop(alu.id, "alu-stop");
   await waitFor(async () => !(await client.list()).some((work) => work.id === child.id), "Her child Work outlived her");
+});
+
+test("the owner's steer and follow-up during a reply each renew the Work wake budget", { timeout: 90_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator", "implementer"], { prefix: "alu-owner-wake-", assistant: true });
+  const client = await team.startHost();
+  const assistant = await team.assistantWork();
+  const { coordinator, implementer } = team.providers;
+  const { handoff } = await client.assistantSettings();
+  await client.setAssistantSettings({ handoff: { ...handoff!, startTokens: 100_000 } });
+  await client.prompt(assistant.id, "派个 Work 跟我汇报进度", "auto", "start-progress");
+  (await coordinator.request(0)).tools({ id: "spawn", name: "dock_spawn", arguments: { name: "汇报进度", task: "持续报告进度。", model: { provider: "implementer", id: "fixture" } } });
+  (await coordinator.request(1)).text("派好了。");
+  await settled(client, assistant.id);
+  let reply = 2;
+  for (let report = 1; report <= 25; report++) {
+    (await implementer.request(report - 1)).tools({ id: `progress-${report}`, name: "dock_send", arguments: { done: report === 25, message: `第 ${report} 份进度` } });
+    const working = await coordinator.request(reply++);
+    if (report === 12 || report === 24) {
+      const mode = report === 12 ? "steer" : "followUp";
+      const words = `回复中主人的 ${mode} 插话`;
+      await client.prompt(assistant.id, words, mode, `owner-${mode}`);
+      working.text("进度收到。");
+      const inserted = await coordinator.request(reply++);
+      assert.ok(given(inserted).includes(words));
+      inserted.text("主人的消息也收到了。");
+    } else working.text("收到。");
+    await settled(client, assistant.id);
+  }
+});
+
+test("her next status stops following an ordinary Work after cancelling a watch and after it fires", { timeout: 60_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-watch-", assistant: true });
+  const client = await team.startHost();
+  const assistant = await team.assistantWork();
+  const target = await trustOnce(trust => client.create(team.cwd, "被观察的工作", "watched", trust));
+  const provider = team.providers.coordinator;
+  await client.prompt(target.id, "开始工作", "auto", "busy-target");
+  const busy = await provider.request(0);
+  await client.prompt(assistant.id, "留意那个工作", "auto", "watch-target");
+  (await provider.request(1)).tools({ id: "watch1", name: "dock_watch", arguments: { target: target.id } });
+  (await provider.request(2)).text("正在留意。");
+  await settled(client, assistant.id);
+  const latestStatus = (request: HeldChatRequest) => JSON.stringify(request.body.messages?.findLast(message => JSON.stringify(message.content).includes("这是 Dock 自动附上的"))?.content);
+  await client.prompt(assistant.id, "不盯了", "auto", "cancel-target");
+  const cancel = await provider.request(3);
+  assert.ok(latestStatus(cancel).includes("- Work「被观察的工作」"));
+  cancel.tools({ id: "cancel", name: "dock_cancel_watch", arguments: {} });
+  (await provider.request(4)).text("不盯了。");
+  await settled(client, assistant.id);
+  await client.prompt(assistant.id, "再盯一次", "auto", "watch-again");
+  const again = await provider.request(5);
+  assert.ok(!latestStatus(again).includes("- Work「被观察的工作」"), "Cancelled watch still follows its target");
+  again.tools({ id: "watch2", name: "dock_watch", arguments: { target: target.id } });
+  (await provider.request(6)).text("好的。");
+  await settled(client, assistant.id);
+  busy.text("做完了。");
+  const fired = await provider.request(7);
+  assert.ok(!latestStatus(fired).includes("- Work「被观察的工作」"), "Fired watch still follows its target");
+  fired.text("收到了。");
+  await settled(client, assistant.id);
+});
+
+test("an impossible local reminder date is rejected with the original date", { timeout: 60_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-reminder-date-", assistant: true });
+  const client = await team.startHost();
+  const assistant = await team.assistantWork();
+  await client.prompt(assistant.id, "安排一个提醒", "auto", "impossible-date");
+  (await team.providers.coordinator.request(0)).tools({ id: "invalid", name: "assistant_remind", arguments: { action: "set", at: "2099-02-31 08:00", text: "提醒我" } });
+  const next = await team.providers.coordinator.request(1);
+  assert.ok(given(next).includes("没有这个日期：2099-02-31 08:00"), "The impossible date was accepted rather than explained");
+  next.text("二月没有三十一日，请换一天。");
+  await settled(client, assistant.id);
 });
 
 // Seen in the official client against a real Host (card #667): her Work showed "Dock Tools OFF"
@@ -177,6 +249,7 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   old.appendMessage({ role: "user", content: "看看有哪些文件", timestamp: 2 });
   old.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "ls-1", name: "bash", arguments: { command: "ls" } }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "toolUse", timestamp: 3, usage: ZERO_USAGE });
   old.appendMessage({ role: "toolResult", toolCallId: "ls-1", toolName: "bash", content: [{ type: "text", text: "README.md" }], isError: false, timestamp: 4 });
+  old.appendCustomEntry("assistant-handoff-result", "旧版内部整理结果");
   old.appendCustomMessageEntry("assistant-dock-note", "[步数上限] 这是最后一步。", false);
   old.appendMessage({ role: "assistant", content: [{ type: "text", text: "只有一个 README.md。" }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "stop", timestamp: 5, usage: ZERO_USAGE });
 
@@ -191,7 +264,21 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   const system = (asked.body.messages ?? []).filter((message) => message.role === "system" || message.role === "developer").map((message) => JSON.stringify(message.content)).join("\n");
   assert.ok(system.includes("你是**阿露**") && !system.includes("You are an expert coding assistant."), "Her opening leads the request in place of the old prompt");
   assert.ok(given(asked).includes("只有一个 README.md。"), "She has the old conversation");
+  assert.ok(!given(asked).includes("旧版内部整理结果"));
+  assert.ok((await client.history(alu.id)).entries.filter(entry => entry.customType === "assistant-handoff-result").every(entry => entry.visibility === "metadata"));
   assert.ok(!given(asked).includes("[步数上限]"), "A persisted internal closing instruction no longer tells her to stop");
   asked.text("README.md。");
   await settled(client, alu.id);
+
+  // A reminder already due when Main starts tells the owner how late it is, not why.
+  client.closeActiveConnections();
+  await team.host!.stop();
+  const reopened = SessionManager.open(old.getSessionFile()!);
+  const overdue = new Date(Date.now() - 8 * 60_000).toISOString();
+  reopened.appendCustomEntry("assistant-reminders", { reminders: [{ id: "restored", at: overdue, createdAt: overdue, text: "继续看看文件。" }] });
+  const restarted = await team.startHost();
+  const late = await coordinator.request(2);
+  assert.match(given(late), /（晚了 \d+ 分钟）\]/u);
+  late.text("该看看文件了。");
+  await settled(restarted, alu.id);
 });

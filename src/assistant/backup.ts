@@ -9,6 +9,7 @@ import { documentFileName } from "./documents.js";
 
 /** Her recorded conversations, next to the two documents in the assistant directory. */
 export const ASSISTANT_DATABASE_FILE = "memory.sqlite";
+export const ASSISTANT_DB_BUSY_TIMEOUT_MS = 5_000;
 
 export interface AssistantBackup {
   directory: string;
@@ -54,7 +55,7 @@ function copyMemory(database: string, copy: string): boolean {
   // Read-only, so the copy never changes her memory; the service may keep writing meanwhile.
   const db = new DatabaseSync(database, { readOnly: true });
   try {
-    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec(`PRAGMA busy_timeout = ${ASSISTANT_DB_BUSY_TIMEOUT_MS}`);
     db.prepare("VACUUM INTO ?").run(copy);
   } finally {
     db.close();

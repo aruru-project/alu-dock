@@ -89,6 +89,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   }
   const identity = computed(() => identityFor(app.activeConnectionId ?? ''))
   const identityValue = computed(() => identity.value.draft ?? identity.value.current ?? '')
+  const identityChanged = computed(() => identity.value.draft !== null && identity.value.draft.trim() !== identity.value.current?.trim())
   const identityOnce = onceAfterLostReply()
   async function loadIdentity() {
     const context = app.connectionContext ? { ...app.connectionContext } : null
@@ -112,7 +113,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   }
   function editIdentity(name: string) {
     const editor = identity.value
-    editor.draft = editor.save?.state === 'pending' || name.trim() !== editor.current ? name : null
+    editor.draft = editor.save?.state === 'pending' || name.trim() !== editor.current?.trim() ? name : null
     if (editor.save?.state !== 'pending') editor.save = null
   }
   async function saveIdentity() {
@@ -123,12 +124,11 @@ export const useAssistantStore = defineStore('assistant', () => {
     if (!name || editor.save?.state === 'pending') return
     ++editor.revision
     editor.loading = false
-    const draft = editor.draft
     editor.save = { state: 'pending', message: '正在保存名字…' }
     try {
       const saved = await identityOnce([context.connectionId, 'display name'], name, operationId => setAssistantSettings({ displayName: name }, operationId, context))
       editor.current = saved.displayName ?? editor.current
-      if (editor.draft === draft) editor.draft = null
+      if (editor.draft?.trim() === editor.current?.trim()) editor.draft = null
       editor.save = { state: 'saved', message: editor.draft !== null ? '提交的名字已保存，还有新的修改未保存。' : '名字已保存，所有客户端共用这个名字。' }
       if (app.contextMatches(context)) await app.refreshWorksQuietly()
     } catch (cause) {
@@ -149,6 +149,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   function editor(document: AssistantDocumentName): Readonly<AssistantDocumentEditor> {
     return editors.get(editorKey(app.activeConnectionId ?? '', document)) ?? untouched
   }
+  const hasDrafts = computed(() => editor('persona').draft !== null || editor('notes').draft !== null
+    || identityChanged.value)
   /** Reads the Host's version. An unchanged editor shows it; a draft keeps its base and learns of a newer version. */
   async function loadDocument(document: AssistantDocumentName) {
     const context = app.connectionContext
@@ -188,7 +190,7 @@ export const useAssistantStore = defineStore('assistant', () => {
 
   function editDocument(document: AssistantDocumentName, text: string) {
     const entry = editorFor(app.activeConnectionId ?? '', document)
-    entry.draft = entry.base && text === entry.base.text ? null : text
+    entry.draft = entry.save?.state !== 'pending' && text === entry.base?.text ? null : text
     if (entry.save?.state === 'saved') entry.save = null
   }
 
@@ -227,7 +229,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       const saved = await setAssistantDocument(document, text, entry.base.revision, context)
       entry.base = saved
       entry.latest = null
-      if (entry.draft === text || entry.draft === saved.text) entry.draft = null
+      if (entry.draft === saved.text) entry.draft = null
       entry.save = { state: 'saved', message: '已保存。到助手的对话里点“刷新助手（Reload）”，她就会读到改动。' }
     } catch (cause) {
       const code = errorCode(cause)
@@ -263,8 +265,8 @@ export const useAssistantStore = defineStore('assistant', () => {
 
   return {
     infos, available, info, current, loadInfo,
-    identity, identityValue, loadIdentity, editIdentity, saveIdentity,
-    editor, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
+    identity, identityValue, identityChanged, loadIdentity, editIdentity, saveIdentity,
+    editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
   }
 })

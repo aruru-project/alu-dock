@@ -5,6 +5,11 @@ export function localTime(date: Date): string {
   return `${localMinute(date)}（UTC${sign}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}）`;
 }
 
+export function shortLocalTime(date: Date, now: Date = new Date()): string {
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return localDay(date) === localDay(now) ? time : `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+}
+
 /** Main's local date and minute, such as "2026-11-07 15:04". */
 export function localMinute(date: Date): string {
   return `${localDay(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;

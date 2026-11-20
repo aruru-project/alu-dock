@@ -232,7 +232,7 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
           if (!extractionModel) throw new Error("No model keeps your memories yet. Ask your owner which one to use, set it with set_model, then start over.");
           known(extractionModel);
           // Starting over sets aside what the background made: the owner says yes first, as in the client.
-          const confirmed = await confirm("从头整理记忆？", `助手会用 ${extractionModel.provider}/${extractionModel.id} 把所有对话从头读一遍：后台整理出、没人改过的记忆挪进「已作废」（可以逐条恢复），后台写的时间线清掉重写；你写过、改过的，和她按你吩咐记下的都留着。读完之前，新开的会话里记忆不全；花费大致等于当初整理这些对话的总和。`);
+          const confirmed = await confirm("从头整理记忆？", `助手会用 ${extractionModel.provider}/${extractionModel.id} 把所有对话从头读一遍：后台整理出、没人改过的记忆挪进「已作废」（可以逐条恢复），后台写的时间线清掉重写；你写过、改过的，和她按你吩咐记下的都留着。读完之前，她能查到的记忆还不全；花费大致等于当初整理这些对话的总和。`);
           if (!confirmed) return { content: [{ type: "text", text: "Your owner did not confirm. Nothing was changed." }], details: { confirmed: false } };
           const result = await port.call({ op: "reorganize", extractionModel });
           return {

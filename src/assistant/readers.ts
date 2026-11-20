@@ -89,7 +89,7 @@ export class AssistantReaders {
   private run(task: ReaderTask, signal?: AbortSignal): Promise<unknown> {
     if (this.closed) return Promise.reject(new AssistantError("assistant_unavailable", STOPPING_MESSAGE));
     if (signal?.aborted) return Promise.reject(new Error("Assistant request cancelled"));
-    if (this.waiting.length >= (this.options.maxWaiting ?? DEFAULT_MAX_WAITING)) return Promise.reject(new AssistantError("assistant_unavailable", BUSY_MESSAGE));
+    if (this.waiting.length >= (this.options.maxWaiting ?? DEFAULT_MAX_WAITING)) return Promise.reject(new AssistantError("assistant_busy", BUSY_MESSAGE));
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
       const cancel = () => { this.drop(read); settle(read, new Error("Assistant request cancelled")); };

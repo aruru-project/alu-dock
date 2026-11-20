@@ -18,11 +18,14 @@ import { userErrorMessage as errorMessage } from '../lib/userError'
 import { requireConnectionContext } from '../lib/hostResult'
 import { useExtensionUiStore, type ExtensionWidget } from '../stores/extension-ui'
 import { useAppStore } from '../stores/app'
+import { useSurfacesStore } from '../stores/surfaces'
 
 const props = defineProps<{ work: Work | null; focusSuspended?: boolean }>()
 const emit = defineEmits<{ editorText: [text: string]; title: [title: string] }>()
 const extension = useExtensionUiStore()
 const app = useAppStore()
+const surfaces = useSurfacesStore()
+const resident = computed(() => isResidentAssistant(props.work))
 const root = ref<HTMLElement | null>(null)
 const dialog = ref<HTMLElement | null>(null)
 const acquiringError = ref('')
@@ -329,9 +332,9 @@ function interactionMethodLabel(method: string) {
       </details>
     </div>
 
-    <div v-if="Object.keys(visibleStatus).length" class="alu-extension-status" :class="{ 'resident-status': isResidentAssistant(work) }" aria-label="Extension 状态">
+    <component :is="resident ? 'button' : 'div'" v-if="Object.keys(visibleStatus).length" class="alu-extension-status" :type="resident ? 'button' : undefined" :aria-label="resident ? '查看助手状态' : 'Extension 状态'" @click="resident && surfaces.openControlCenter('resources')">
       <span v-for="(text, key) in visibleStatus" :key="key">{{ key }}: {{ text }}</span>
-    </div>
+    </component>
 
     <slot />
 
@@ -384,15 +387,14 @@ function interactionMethodLabel(method: string) {
 .alu-extension-status {
   display: flex;
   gap: 10px;
+  overflow-x: auto;
   padding: 6px 4px 0;
   color: var(--alu-warning-dim);
   font-size: var(--alu-meta-size);
 }
 .alu-extension-status[hidden] { display: none; }
-.alu-extension-status:not(.resident-status) { overflow-x: auto; }
-.alu-extension-status:not(.resident-status) span { white-space: nowrap; }
-.alu-extension-status.resident-status { flex-wrap: wrap; }
-.alu-extension-status.resident-status span { white-space: normal; overflow-wrap: anywhere; }
+.alu-extension-status span { white-space: nowrap; }
+button.alu-extension-status { max-width: 100%; text-align: left; }
 .extension-ui-surface { width: 100%; min-width: 0; }
 .alu-input-section .extension-ui-surface { min-width: 0; }
 .extension-ui-surface { display: contents; }

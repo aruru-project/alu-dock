@@ -4,6 +4,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { DockEvent } from "../src/core/instance-dto.js";
+import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
@@ -15,11 +17,14 @@ const system = (request: HeldChatRequest) => JSON.stringify((request.body.messag
 /** Long enough to pass the point where a hand-over record is written for a 100k-token model, short of where she must wait for it. */
 const LONG_PASTE = "lorem ipsum dolor sit amet ".repeat(7_400);
 
-async function assistantWithSmallWindow(context: test.TestContext, prefix: string) {
+async function assistantWithSmallWindow(context: test.TestContext, prefix: string, maxTokens?: number) {
   const team = await startNativeTeam(context, ["coordinator"], { prefix, assistant: true });
   const modelsFile = join(team.agentDir, "models.json");
   const models = JSON.parse(await readFile(modelsFile, "utf8"));
-  for (const model of models.providers.coordinator.models) model.contextWindow = 100_000;
+  for (const model of models.providers.coordinator.models) {
+    model.contextWindow = 100_000;
+    if (maxTokens !== undefined) model.maxTokens = maxTokens;
+  }
   await writeFile(modelsFile, JSON.stringify(models));
   const client = await team.startHost();
   const alu = await team.assistantWork();
@@ -28,16 +33,18 @@ async function assistantWithSmallWindow(context: test.TestContext, prefix: strin
 
 const records = async (client: DockClient, id: string) => (await client.history(id)).entries.filter((entry) => entry.kind === "compaction_summary");
 
-/** The owner asks for full details through the same command center notification path. */
-async function runtimeDetails(client: DockClient, id: string): Promise<string> {
+const handoffDiagnostic = async (client: DockClient, id: string) => (await client.resources(id)).diagnostics.find(item => item.message.startsWith("滚动整理"));
+
+async function retryNow(client: DockClient, id: string): Promise<string> {
+  const command = "/retry-handoff";
   const operationId = randomUUID();
   let details: string | undefined;
   const follower = await client.streamEvents(id, { onEvent: event => {
     if (event.type === "extension.notification" && event.data.operationId === operationId) details = event.data.message;
   } });
   try {
-    await client.prompt(id, "/assistant-status", "auto", operationId);
-    await waitFor(() => details !== undefined, "The assistant's runtime details did not arrive");
+    await client.prompt(id, command, "auto", operationId);
+    await waitFor(() => details !== undefined, `The assistant's reply to ${command} did not arrive`);
     return details!;
   } finally {
     follower.close();
@@ -49,7 +56,7 @@ async function runtimeDetails(client: DockClient, id: string): Promise<string> {
 // hand-over record in the background while she goes on answering (compacting in place made the
 // Minecraft companion this follows deaf for 90 to 194 seconds), and the record takes its place later.
 test("saved hand-over settings guide background writing while she answers, and survive restarting Main", { timeout: 90_000 }, async (context) => {
-  const { team, client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-assistant-handoff-");
+  const { team, client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-assistant-handoff-", 8_192);
   const handoff = { startTokens: 55_000, keepRecentTokens: 1_200, prompt: "你是小满的交接记录员。用主人选的名字，只交接还没办完的事情，保留原话中的要求。" };
   assert.ok((await client.assistantSettings()).handoff?.prompt.includes("交接记录"), "Main supplies the editable factory instruction");
   await client.setAssistantSettings({ handoff });
@@ -65,11 +72,12 @@ test("saved hand-over settings guide background writing while she answers, and s
 
   // The record is being written: the model is asked for it and has not answered.
   const writing = await coordinator.request(2);
+  assert.equal(writing.headers["user-agent"], `AluDock-Assistant/${DOCK_VERSION} (${process.platform}; node/${process.version}; ${process.arch})`, "Assistant handoff User-Agent");
+  assert.equal(Reflect.get(writing.body, "max_completion_tokens"), 8_192, "The record can use the model's full output budget");
   assert.equal(writing.body.messages?.find((message) => message.role === "system" || message.role === "developer")?.content, handoff.prompt, "The entire saved instruction replaces the factory role and writing rules");
   // #671: routine background work is available on demand, not presented as a chat warning.
   assert.equal((await client.status(alu.id)).extensionStatus["滚动整理"], undefined);
-  const details = await runtimeDetails(client, alu.id);
-  assert.ok(details.includes("正在后台整理") && details.includes("55000 token") && details.includes("1200 token"), "Requested details show the effective hand-over settings");
+  assert.equal(await handoffDiagnostic(client, alu.id), undefined);
   assert.ok(given(writing).includes("交接记录") && given(writing).includes("周末去爬山，到时候记得提醒我带水壶。"), "The older part of the conversation is given to the model to write the record from");
   // She answers her owner meanwhile, from the whole conversation.
   await client.prompt(alu.id, "在吗？", "auto", "alu-there");
@@ -81,11 +89,31 @@ test("saved hand-over settings guide background writing while she answers, and s
   // What her owner changed since she started reaches her when the record takes its place.
   const notes = await client.assistantDocument("notes");
   await client.setAssistantDocument("notes", "主人的猫叫团子。", notes.revision);
-  writing.text("主人周末要去爬山；她答应到时候提醒他带上要带的东西。");
+  writing.fail(400, "摘要请求失败" + "长".repeat(2_048));
+  const status = async () => (await client.status(alu.id)).extensionStatus["滚动整理"];
+  await waitFor(async () => (await status())?.includes("失败") === true, "The failure did not reach the status bar");
+  assert.match((await status())!, /^(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 失败，最早 (?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 后有对话时重试$/u);
+  const failed = await handoffDiagnostic(client, alu.id);
+  assert.ok(failed);
+  assert.equal(failed.severity, "warning");
+  assert.equal(failed.message.length, 2_048);
+  assert.ok(failed.message.endsWith("…"));
+  assert.ok(failed.message.startsWith('滚动整理失败原因：400: {"message":"摘要请求失败'));
+  assert.equal(await retryNow(client, alu.id), "已开始重新整理，聊天照常。完成或失败都会显示在状态栏。");
+  const retry = await coordinator.request(4);
+  assert.equal(system(retry), system(writing), "The new request is another hand-over write, without waiting for the cooldown");
+  assert.match((await status())!, /^正在重试（(?:\d{1,2}月\d{1,2}日 )?\d{2}:\d{2} 开始）$/u);
+  const joined = client.compactSession(alu.id, "已有写作不重新开始。", "join-background");
+  void joined.catch(() => {});
+  await waitFor(async () => (await client.status(alu.id)).compacting, "The manual request did not join the held write");
+  retry.text("主人周末要去爬山；她答应到时候提醒他带上要带的东西。");
+  assert.equal((await joined).result.summary, "主人周末要去爬山；她答应到时候提醒他带上要带的东西。");
   await waitFor(async () => (await records(client, alu.id)).length === 1, "The hand-over record did not take its place");
 
+  await waitFor(async () => (await status()) === undefined, "The status bar did not clear after the successful retry");
+  assert.equal(await handoffDiagnostic(client, alu.id), undefined, "A successful retry clears the recorded failure reason");
   await client.prompt(alu.id, "周末要干嘛来着？", "auto", "alu-weekend");
-  const after = await coordinator.request(4);
+  const after = await coordinator.request(5);
   assert.ok(given(after).includes("主人周末要去爬山；她答应到时候提醒他带上要带的东西。"), "She goes on from the record");
   assert.ok(!given(after).includes("到时候记得提醒我带水壶"), "What the record replaced is no longer given to the model");
   assert.ok(given(after).includes("lorem ipsum") && given(after).includes("在吗？"), "The latest conversation stays as it was said");
@@ -101,8 +129,72 @@ test("saved hand-over settings guide background writing while she answers, and s
   const reopened = await team.startHost();
   assert.deepEqual((await reopened.assistantSettings()).handoff, handoff, "Main keeps the saved parameters and full instruction after restarting");
   const resident = await team.assistantWork();
-  assert.ok((await runtimeDetails(reopened, resident.id)).includes("上次整理成功"), "Requested details restore the latest hand-over result after reopening");
+  assert.equal(await handoffDiagnostic(reopened, resident.id), undefined);
   assert.equal((await reopened.status(resident.id)).extensionStatus["滚动整理"], undefined, "A healthy idle assistant leaves the chat status bar clear");
+});
+
+test("manual compaction writes below the threshold, keeps chatting, and returns only an adopted record", { timeout: 60_000 }, async context => {
+  const { client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-manual-handoff-");
+  const handoff = { startTokens: 55_000, keepRecentTokens: 100, prompt: "把较早的对话写成交接记录。" };
+  await client.setAssistantSettings({ handoff });
+  const events: DockEvent[] = [];
+  const follow = await client.streamEvents(alu.id, { onEvent: event => { events.push(event); } });
+  context.after(async () => { follow.close(); await follow.done.catch(() => {}); });
+  await assert.rejects(client.compactSession(alu.id), { code: "compaction_not_needed", message: "现在没有可以整理的较早对话。" });
+  await waitFor(() => events.some(event => event.type === "extension.notification" && event.data.message === "现在没有可以整理的较早对话。"), "Missing nothing-to-compact notice");
+  for (let index = 0; index < 2; index++) {
+    await client.prompt(alu.id, `资料 ${index}`, "auto", `manual-data-${index}`);
+    (await coordinator.request(index)).text("记住了。");
+    await settled(client, alu.id);
+  }
+  await client.prompt(alu.id, "继续聊天", "auto", "while-compacting");
+  const chatting = await coordinator.request(2);
+  const compact = client.compactSession(alu.id, "这次请记下日期。", "manual-record");
+  void compact.catch(() => {});
+  const writing = await coordinator.request(3);
+  assert.equal(writing.body.messages?.find(message => message.role === "system" || message.role === "developer")?.content, `${handoff.prompt}\n\n这次请记下日期。`);
+  writing.text("较早的资料已交接。");
+  assert.equal(chatting.closed, false, "Manual compaction must leave the running reply intact");
+  chatting.text("回复完了。");
+  const result = await compact;
+  assert.equal(result.result.summary, "较早的资料已交接。");
+  assert.ok(result.result.firstKeptEntryId && result.result.tokensBefore > 0);
+  assert.ok((await records(client, alu.id)).some(record => JSON.stringify(record.content).includes(result.result.summary)));
+  assert.deepEqual((await client.assistantSettings()).handoff, handoff);
+  await waitFor(() => events.some(event => event.type === "compaction.completed" && event.data.operationId === "manual-record" && event.data.reason === "manual"), "Missing manual completion");
+  assert.ok(events.some(event => event.type === "compaction.started" && event.data.operationId === "manual-record" && event.data.reason === "manual"));
+  await client.prompt(alu.id, "再补充一件事", "auto", "more-to-compact");
+  (await coordinator.request(4)).text("行。");
+  await settled(client, alu.id);
+  const cancelled = assert.rejects(client.compactSession(alu.id, undefined, "manual-stop"), { code: "compaction_cancelled" });
+  const cancelledWrite = await coordinator.request(5);
+  await client.abort(alu.id, "abort-only-compaction");
+  await cancelled;
+  await waitFor(() => cancelledWrite.closed, "Stop did not cancel the handoff model request");
+  assert.equal((await client.status(alu.id)).extensionStatus["滚动整理"], undefined);
+  assert.equal(await handoffDiagnostic(client, alu.id), undefined);
+  assert.equal((await records(client, alu.id)).length, 1);
+  const failure = assert.rejects(client.compactSession(alu.id, undefined, "manual-failure"), { code: "compaction_failed", message: "模型没有写出交接记录" });
+  const failing = await coordinator.request(6);
+  assert.equal(failing.body.messages?.find(message => message.role === "system" || message.role === "developer")?.content, handoff.prompt);
+  failing.text(" ");
+  await failure;
+  await waitFor(() => events.some(event => event.type === "compaction.completed" && event.data.operationId === "manual-failure" && event.data.error === "模型没有写出交接记录"), "Missing failed manual completion");
+  assert.equal((await handoffDiagnostic(client, alu.id))?.message, "滚动整理失败原因：模型没有写出交接记录");
+
+  await client.prompt(alu.id, "翻翻记忆再回答", "auto", "high-water-chat");
+  const toolTurn = await coordinator.request(7);
+  await client.setAssistantSettings({ handoff: { ...handoff, startTokens: 10, keepRecentTokens: 1 } });
+  const duringTools = client.compactSession(alu.id, undefined, "manual-before-next-step");
+  void duringTools.catch(() => {});
+  (await coordinator.request(8)).text("在工具轮之间采用的记录");
+  toolTurn.tools({ id: "read-memory", name: "assistant_search", arguments: { query: "较早" } });
+  const continued = await coordinator.request(9);
+  assert.ok(given(continued).includes("在工具轮之间采用的记录"));
+  assert.equal((await duringTools).result.summary, "在工具轮之间采用的记录", "The manual command returns while the next chat request is still open");
+  await client.setAssistantSettings({ handoff });
+  continued.text("查完了。");
+  await settled(client, alu.id);
 });
 
 // Card #667: what she is told to forget is no longer in front of her either: not where it was said
@@ -120,7 +212,12 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   const model = setInterval(() => {
     for (; handled < coordinator.requests.length; handled += 1) {
       const request = coordinator.requests[handled]!;
-      if (given(request).includes("要忘掉的事")) { rewrites.push(given(request)); request.text("没有还没了结的事。"); }
+      if (request.closed) continue; // A record cancelled after forgetting no longer needs a reply.
+      if (given(request).includes("要忘掉的事")) {
+        rewrites.push(given(request));
+        if (rewrites.length === 1) request.fail(400, "这一次没能改写");
+        else request.text("没有还没了结的事。");
+      }
       else if (given(request).includes("写一份交接记录")) request.text(given(request).includes("水壶") ? "主人周末爬山，她要提醒他带水壶。" : "主人贴过一份资料。");
       else hers.push(request);
     }
@@ -136,6 +233,11 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   (await reply(1)).text("记下了。");
   await settled(client, alu.id);
   const memory = (await client.assistantMemories()).memories.find((item) => item.text.includes("水壶"));
+  // Older forgets with larger IDs occupy the entire first page. The relevant memory will be on the next page.
+  for (let n = 0; n < 50; n++) {
+    const other = await client.addAssistantMemory({ topic: "events", text: `旧资料 ${n}`, resident: false });
+    await client.updateAssistantMemory({ id: other.id, revision: other.revision, state: "forgotten" });
+  }
   await client.prompt(alu.id, `这是我贴的资料：${LONG_PASTE}`, "auto", "alu-paste");
   (await reply(2)).text("收到。");
   await settled(client, alu.id);
@@ -148,13 +250,17 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   (await reply(4)).text("好，忘了。");
   await settled(client, alu.id);
   // The record written before tells it: the model is asked to take it out.
-  await waitFor(() => rewrites.length === 1, "The hand-over record was not rewritten");
-  assert.ok(rewrites[0]!.includes("主人周末爬山要带水壶。") && rewrites[0]!.includes("她要提醒他带水壶"));
+  await waitFor(() => rewrites.length >= 1, "The record was not submitted for rewriting");
+  await client.prompt(alu.id, "在吗？", "auto", "retry-forget");
+  (await reply(5)).text("在。");
+  await settled(client, alu.id);
+  await waitFor(() => rewrites.length >= 2, "The failed rewrite was not retried on the next turn with the same forgotten entries");
+  assert.ok(rewrites[1]!.includes("主人周末爬山要带水壶。") && rewrites[1]!.includes("她要提醒他带水壶") && !rewrites[1]!.includes("旧资料"));
   await waitFor(async () => (await records(client, alu.id)).some((record) => JSON.stringify(record.content).includes("没有还没了结的事。")), "The rewritten record did not take its place");
 
   await client.updateAssistantMemory({ id: resident.id, revision: resident.revision, state: "forgotten" });
   await client.prompt(alu.id, "周末我要带什么来着？", "auto", "alu-ask");
-  const asked = await reply(5);
+  const asked = await reply(6);
   assert.ok(!given(asked).includes("水壶") && !given(asked).includes("青栀"), `Nothing she is given still tells it: ${given(asked).replace(/lorem ipsum dolor sit amet /gu, "").slice(-1_500)}`);
   asked.text("不记得了。");
   await settled(client, alu.id);

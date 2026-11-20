@@ -108,6 +108,13 @@ export function reminderTime(input: { at?: string; inMinutes?: number; inSeconds
   if (typeof input.inMinutes === "number" || typeof input.inSeconds === "number") return new Date(now + (input.inMinutes ?? 0) * 60_000 + (input.inSeconds ?? 0) * 1_000);
   if (typeof input.at !== "string") return new Date(Number.NaN);
   const local = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/u.exec(input.at.trim());
-  if (local) return new Date(Number(local[1]), Number(local[2]) - 1, Number(local[3]), Number(local[4]), Number(local[5]));
+  if (local) {
+    const [year, month, day, hour, minute] = local.slice(1).map(Number) as [number, number, number, number, number];
+    const date = new Date(year, month - 1, day, hour, minute);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute) {
+      throw new Error(`没有这个日期：${input.at}`);
+    }
+    return date;
+  }
   return new Date(input.at);
 }

@@ -287,6 +287,10 @@ const refreshControl = (view) => find(find(view, item => item.type === 'details'
 const all = (item, predicate) => [...(predicate(item) ? [item] : []), ...item.children.flatMap(child => all(child, predicate))]
 const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
+const until = async (predicate, message) => {
+  const deadline = Date.now() + 3_000
+  while (!predicate()) { assert.ok(Date.now() < deadline, message); await new Promise(resolve => setImmediate(resolve)) }
+}
 let mounted
 try {
   await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations', 'work-actions'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
@@ -1395,6 +1399,7 @@ try {
     // Main does a change to a line once per operation; the same operation asked again gets its first answer, a refusal too.
     const lineAnswers = new Map()
     const entryAt = (entryId, kind, text, extra = {}) => ({ entryId, at: '2026-11-06T08:05:00.000Z', kind, text, ...extra })
+    let holdPersonaSave, searchBusy = false
     let persona = { document: 'persona', text: '她说话简短。', revision: 'p1' }
     let notes = { document: 'notes', text: '早上先说天气。', revision: 'n1' }
     const fallback = assistantNative
@@ -1409,6 +1414,7 @@ try {
       }
       if (command === 'set_assistant_document') {
         if (args.baseRevision !== persona.revision) throw { code: 'assistant_document_changed', message: 'The document changed since it was read.' }
+        if (holdPersonaSave) await holdPersonaSave.promise
         persona = { document: 'persona', text: args.text, revision: `${persona.revision}+` }
         return structuredClone(persona)
       }
@@ -1441,6 +1447,7 @@ try {
         return holdLineChange ? new Promise((resolve, reject) => holdLineChange(() => { try { resolve(change()) } catch (error) { reject(error) } })) : change()
       }
       if (command === 'assistant_search') {
+        if (searchBusy) throw { code: 'assistant_busy', message: '助手正在处理很多查询，这次没有排上。请稍后再试。' }
         const answer = args.cursor
           ? { hits: [{ session: { ...session, sessionId: 's0', workId: 'retired', name: undefined }, entryId: 'old', at: '2026-11-01T08:00:00.000Z', kind: 'user', snippet: '上周的天气' }] }
           : { hits: [{ session, entryId: 'e3', at: '2026-11-06T08:05:00.000Z', kind: 'assistant', snippet: '…今天上午有雨…' }], nextCursor: 'c2' }
@@ -1463,7 +1470,7 @@ try {
     assertSameReference(find(plainRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag')), undefined, 'other Works carry no mark')
     const original = JSON.parse(JSON.stringify(app.selectedWork))
     app.applyWorkSnapshot({ ...original, assistant: true }); await settle()
-    assert.equal(!!find(container, item => item.props['aria-label'] === '助手设置'), false, 'the legacy role does not turn a Pi conversation into the resident')
+    assert.equal(!!find(container, item => item.props['aria-label'] === '查看助手状态'), false, 'the legacy role does not turn a Pi conversation into the resident')
     app.applyWorkSnapshot(original); extraListed = []; await app.refreshWorksQuietly(); await settle()
 
     // An older Main has no assistant, so there is no entry; Main with her has one.
@@ -1512,6 +1519,16 @@ try {
     assert.ok(text(page()).includes('已保存'))
     assert.equal(persona.text, '她说话简短，先给结论。')
     assert.equal(text(entry()).includes('有改动还没有保存'), false)
+    const previousPersona = persona.text
+    holdPersonaSave = Promise.withResolvers()
+    await type('这份正在保存。'); await click(page(), '保存')
+    await type(previousPersona)
+    holdPersonaSave.resolve(); holdPersonaSave = null
+    await until(() => !button(page(), '保存').props.disabled, 'the later draft could not be saved after the first save finished')
+    assert.equal(editor().value, previousPersona)
+    assert.equal(button(page(), '保存').props.disabled, false, 'reverting to the former base during a save leaves the newer edit available')
+    await click(page(), '保存')
+    assert.equal(persona.text, previousPersona)
     // A save whose reply is lost is told once; reading the current version settles whether it went through.
     await click(page(), '手写设定')
     await type('早上先说天气，再说日程。')
@@ -1528,7 +1545,13 @@ try {
     find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
     const search = calls.filter(call => call.command === 'assistant_search').at(-1).args
     assert.deepEqual([search.query, search.from, search.to, search.cursor], ['天气', null, null, null])
+    searchBusy = true
+    await find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await nextTick()
+    await until(() => text(page()).includes('助手正在处理别的查询，请稍后再试。'), 'the owner did not see why the search was refused')
+    searchBusy = false
+    await find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await nextTick()
     const results = () => find(page(), item => item.props['aria-label'] === '搜索结果')
+    await until(() => !!results() && text(results()).includes('今天上午有雨'), 'no search result arrived after the busy reader recovered')
     assert.ok(text(results()).includes('今天上午有雨') && text(results()).includes('早上的闲聊') && text(results()).includes('工作站'), 'a hit shows where it happened and the text around it')
     await click(page(), '更多结果')
     assert.equal(calls.filter(call => call.command === 'assistant_search').at(-1).args.cursor, 'c2')
@@ -1553,7 +1576,7 @@ try {
     await click(timeline(), '保存')
     const rewrite = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
     assert.deepEqual([rewrite.id, rewrite.revision, rewrite.edit], ['7', 1, { text: '早上聊天气，提醒十点的评审。' }])
-    assert.ok(text(timeline()).includes('早上聊天气，提醒十点的评审。') && text(timeline()).includes('已改写') && text(timeline()).includes('你改过'), 'the line shows as rewritten')
+    assert.ok(text(timeline()).includes('早上聊天气，提醒十点的评审。') && text(timeline()).includes('已改写。到她的对话里点“刷新助手（Reload）”后，她按改后的读。') && text(timeline()).includes('你改过'), 'the line shows as rewritten')
     await click(rows()[0], '忘掉')
     const forget = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
     assert.deepEqual([forget.revision, forget.edit], [2, { state: 'forgotten' }], 'forgetting names the revision just read')
@@ -1950,7 +1973,7 @@ try {
     assert.ok(text(page()).includes('已定下：每次都带上') && text(page()).includes('后台整理不会再改'))
     await click(labelled('什么时候用'), '她查的时候才用')
     assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], ['3', 2, { resident: false }])
-    assert.ok(text(page()).includes('已改成她查的时候才用'))
+    assert.ok(text(page()).includes('已改成她查的时候才用：到她的对话里点“刷新助手（Reload）”后，她不再带上它'))
     // Changed by her meanwhile: nothing is changed, the page shows it as it is now and keeps the rewrite.
     await click(page(), '改写')
     await type('改写这条记忆', '主人不吃香菜和葱。')
@@ -1961,6 +1984,8 @@ try {
     await click(page(), '保存改写')
     assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [4, { text: '主人不吃香菜和葱。' }])
     assert.ok(text(page()).includes('已改写') && text(page()).includes('你改的'))
+    await click(labelled('什么时候用'), '每次都带上')
+    assert.ok(text(page()).includes('到她的对话里点“刷新助手（Reload）”后，她会读到它'))
     // A deletion whose reply is lost is said once; sending it again is the same operation, done once.
     loseNextReply = true
     await click(page(), '删除')
@@ -2105,7 +2130,7 @@ try {
     assert.equal(calls.some(call => call.command === 'reorganize_assistant'), false, 'nothing starts over before the owner confirms')
     await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理')
     assert.deepEqual(sent('reorganize_assistant').extractionModel, { provider: 'openai', id: 'gpt-mini' })
-    assert.ok(text(page()).includes('已开始从头整理') && text(page()).includes('2 条记忆') && text(page()).includes('3 行时间线'), text(page()))
+    assert.ok(text(page()).includes('读完之前，她能查到的记忆还不全。') && text(page()).includes('2 条记忆') && text(page()).includes('3 行时间线'), text(page()))
     const startOver = async () => { await click(page(), '用这个模型从头整理'); await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理') }
     // (#295 review 2) Starting over still on its way when another model was chosen and saved: the late
     // answer of the start-over put its own model back in the list, though Main had the one chosen after.
@@ -3390,13 +3415,38 @@ try {
     assert.deepEqual(rowNames(group('当前工作')), ['Work', '普通子 Work', 'Work'], 'ordinary parent/child trees stay together, separate from the assistant children')
     assert.equal(groupCount(group('当前工作')), '3')
     assert.deepEqual(rowNames().slice(0, 3), ['她的子 Work', 'Work', '普通子 Work'])
-    await click(assistantView, '打开alu的对话')
-    assert.equal(assistantApp.selectedWorkId, 'resident-assistant')
-    await click(assistantView, '助手设置')
+    const drawer = find(assistantView, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
+    assert.equal(!!find(drawer, item => item.type === 'button' && /查看状态$/u.test(item.props['aria-label'] ?? '')), false)
+    assert.ok(!!find(group('当前工作'), item => item.props.class === 'alu-instance-state is-idle'))
+    for (const area of ['alu-assistant-name', 'alu-assistant-model', 'alu-assistant-identity']) {
+      assistantApp.selectWork('work'); await nextTick()
+      button(assistantView, '打开工作列表').props.onClick(); await nextTick()
+      const identity = button(drawer, '打开alu的对话')
+      assert.equal(all(identity, item => item.type === 'button').length, 1)
+      const target = find(identity, item => String(item.props.class).split(' ').includes(area))
+      assert.ok(!!target, `the identity has a clickable ${area}`)
+      let owner = target
+      while (owner && !owner.props.onClick) owner = owner.parent
+      assertSameReference(owner, identity, 'the whole identity opens the same conversation')
+      owner.props.onClick(); await nextTick()
+      assert.equal(assistantApp.selectedWorkId, 'resident-assistant')
+      assert.equal(assistantApp.workDrawerOpen, false)
+    }
+    button(assistantView, '查看助手状态').props.onClick(); await nextTick()
+    assert.ok(text(dialog('助手状态')).includes('她能用的工具'))
+    assert.equal(!!find(assistantView, item => item.props.id === 'assistant-title'), false)
+    button(dialog('助手状态'), '关闭').props.onClick(); await nextTick()
+    button(assistantView, '打开工作列表').props.onClick(); await nextTick()
+    const assistantEntry = button(drawer, '助手')
+    assert.equal(assistantEntry.props.class, 'alu-sidebar-settings-entry')
+    assistantEntry.props.onClick(); await nextTick()
+    assert.ok(!!find(assistantView, item => item.props.id === 'assistant-title'))
     await click(assistantView, '设置')
     const nameInput = () => find(assistantView, item => item.props.id === 'assistant-name-input')
     const editName = async name => { nameInput().props.onInput({ target: { value: name } }); await settle() }
     await editName('小满')
+    const entryHint = () => visibleText(find(button(drawer, '助手'), item => item.type === 'small'))
+    assert.equal(entryHint(), '有改动还没有保存')
     find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
     assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { displayName: '小满' })
     await editName('下一版名字')
@@ -3424,16 +3474,22 @@ try {
     assert.equal(assistantApp.works.some(work => work.displayName === '远处的小满'), false, 'the late save never renames a Work on the other Main')
     await assistantApp.switchHost('host'); await settle()
     assistantApp.selectWork(her.id); await settle()
-    await click(assistantView, '助手设置'); await click(assistantView, '设置')
+    await click(assistantView, '打开工作列表'); await click(assistantView, '助手'); await click(assistantView, '设置')
     assert.equal(nameInput().props.value, '回家后继续写', 'the original Main keeps the new draft across switching connections')
     assert.equal(assistantApp.selectedWork.displayName, '远处的小满')
     nameReply = '小满'
     await editName('小满')
     find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    await editName('  小满  ')
     finishName(); await settle()
+    assert.equal(entryHint(), '人设、记忆和过去的对话')
+    assert.equal(nameInput().props.value, '小满')
     await click(assistantView, '整理记忆的速度')
     await click(assistantView, 'Fast')
     assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { extractionSpeed: 'fast' }, 'memory speed changes independently, leaving its model and chat speed alone')
+    assert.ok(visibleText(assistantView).includes('已保存为Fast'))
+    await click(assistantView, '关闭'); await click(assistantView, '打开工作列表'); await click(assistantView, '助手')
+    await until(() => !visibleText(assistantView).includes('已保存为Fast') && !!button(assistantView, '整理记忆的速度'), 'a new settings read must retire the receipt for the former speed')
     await click(assistantView, '打开小满的对话')
     assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'the settings page opens the already listed assistant')
     // The control is absent until the Host reports an acceleration tier for this model.
@@ -3476,7 +3532,7 @@ try {
     assert.equal(!!button(assistantView, '设置模型速度'), false, 'a model without acceleration tiers does not show the speed entry')
     settingsNative = undefined; updateSettingNative = undefined
     const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
-    assert.deepEqual(quickNames(), ['自选 Fork', '问候', '说明', '填入恢复'], 'only exactly executed Pi controls are hidden; custom text and insert buttons remain')
+    assert.deepEqual(quickNames(), ['自选 Fork', '压缩', '问候', '说明', '填入恢复'], 'only exactly executed Pi controls are hidden; custom text and insert buttons remain')
     const beforeInsert = calls.filter(call => call.command === 'submit_message').length
     await click(assistantView, '填入恢复')
     assert.equal(assistantApp.currentDraft, '/resume')
@@ -3491,15 +3547,28 @@ try {
     composer().props['onUpdate:modelValue']('/res'); await settle()
     const suggestions = all(assistantView, item => item.props.role === 'option').map(text).join(' ')
     assert.equal(suggestions.includes('/resume'), false, 'slash suggestions do not offer a second conversation')
+    composer().props['onUpdate:modelValue']('/compact'); await nextTick()
+    find(assistantView, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} }); await nextTick()
+    const compactPanel = dialog('立即整理对话')
+    assert.ok(!!compactPanel && !!find(compactPanel, item => item.props.id === 'compaction-instructions'))
+    assert.equal(text(compactPanel).includes('查看默认压缩提示'), false)
+    const beforeCompact = calls.length
+    compactNative = args => ({ result: { summary: '记录已采用', firstKeptEntryId: 'kept', tokensBefore: 500 }, instance: atHost(her) })
+    find(compactPanel, item => item.props.id === 'compaction-instructions').props['onUpdate:modelValue']('保留日期'); await nextTick()
+    button(compactPanel, '开始整理').props.onClick()
+    await until(() => calls.slice(beforeCompact).some(call => call.command === 'compact_session' && call.args.customInstructions === '保留日期'), 'The assistant compaction panel did not send the instructions')
+    compactNative = undefined
     composer().props['onUpdate:modelValue']('还没发完的话'); await settle()
     await click(assistantView, '打开命令中心')
     const paletteLabels = () => all(dialog('命令中心'), item => String(item.props.class).split(' ').includes('cmd-palette-item-label')).map(text)
-    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '压缩']) {
+    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复']) {
       assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
     }
+    assert.ok(paletteLabels().includes('立即整理对话') && text(dialog('命令中心')).includes('现在就把较早的对话整理成交接记录，不等对话变长'))
     assert.ok(paletteLabels().includes('Rename Session'), 'session naming stays separate from the global identity label')
     // Seen in the real Desktop trial: state and resources had become two identical entries.
     assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
+    assert.ok(paletteLabels().includes('扩展和 Skills') && text(dialog('命令中心')).includes('查看她加载的工具扩展、Skills 和加载问题'))
     await click(dialog('命令中心'), '刷新助手（Reload）重新读入人设、手写设定、记忆和工具扩展，对话接着原来的')
     assert.ok(!!dialog('刷新助手（Reload）'), 'Reload stays available with her meaning')
     await click(dialog('刷新助手（Reload）'), '取消')
@@ -3579,7 +3648,12 @@ try {
     await click(dialog('停止当前工作？'), '确认')
     assert.equal(assistantApp.works.some(item => item.id === legacy.id), false, 'Stop retires the Pi assistant like any Pi Work')
     retiredWorks.delete(legacy.id)
-    extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
+    extraListed = []
+    await assistantApp.refreshWorksQuietly(); await nextTick()
+    const identity = find(drawer, item => String(item.props.class).split(' ').includes('alu-assistant-identity'))
+    assert.equal(visibleText(find(identity, item => item.props.class === 'alu-assistant-name')), '小满')
+    assert.equal(visibleText(find(identity, item => item.props.class === 'alu-assistant-model')), '正在读取…')
+    stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
     console.log('PASS: resident identity opens her conversation; global rename keeps Session and later drafts across connections; restart, custom quick buttons and legacy Pi controls remain')
   }
 
@@ -3591,9 +3665,9 @@ try {
     const her = { ...otherWork, id: 'command-assistant', displayName: '助手', assistant: true, execution: 'idle', runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
     const savedCatalog = catalogNative, savedAbort = abortNative
     extraListed = [her]
-    let commands = [
+    const commands = [
       { referenceId: 'extension-echo', name: 'local-echo', source: { kind: 'extension', package: 'local' }, description: '扩展回显' },
-      { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情' },
+      { referenceId: 'retry-handoff', name: 'retry-handoff', source: { kind: 'built-in' }, description: '立即重试滚动整理（对话整理失败后用）', argumentCompletions: false },
     ]
     catalogNative = () => ({ commands: structuredClone(commands), total: commands.length, truncated: false })
     const pinia = createPinia(), commandApp = useAppStore(pinia), actions = compiled.useWorkActionsStore(pinia), view = element('assistant-commands-app')
@@ -3832,21 +3906,49 @@ try {
     assert.equal(!!button('中止命令'), false, 'completed commands no longer show as running')
     await click('关闭')
 
-    commandApp.selectWork('work'); await settle()
-    actions.openAssistantStatus(); await settle()
-    assert.equal(commandApp.selectedWorkId, her.id, 'the detail action navigates from another Work to the actual resident assistant')
-    assert.ok(!!dialog() && text(dialog()).includes('/assistant-status'), 'the real built-in catalog entry is selected before running')
-    snapshot(); await settle()
-    const details = '滚动整理\n最近一次完成：2026-11-16 10:00\n当前采用：100000 token 开始整理，保留最近原话约 20000 token。\n\n工具扩展\nlocal：已加载，1 个工具、1 个命令。'
-    runCatalogNative = args => {
-      notify(args.operationId, details)
-      event('command.handled', { operationId: args.operationId })
-      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
-    }
-    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
-    const output = find(dialog(), item => item.props.role === 'log')
-    assert.ok(text(output).includes(details), 'complete detail text appears in the command notification area')
-    assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
+    commandApp.selectWork('work'); await nextTick()
+    button('打开工作列表').props.onClick(); await nextTick()
+    button('助手').props.onClick(); await nextTick()
+    const lists = () => calls.filter(call => call.command === 'work_catalog').length
+    const retries = () => calls.filter(call => call.command === 'run_catalog_command' && call.args.name === 'retry-handoff')
+    const warning = '10:00 失败，最早 10:05 后有对话时重试'
+    const initialLists = lists()
+    her.extensionStatus = { '滚动整理': warning }
+    button('设置').props.onClick(); await nextTick()
+    const handoffSection = find(view, item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
+    await until(() => text(handoffSection).includes(warning), 'Settings did not refresh the unselected resident status')
+    assert.equal(lists(), initialLists + 1)
+    commandApp.applyWorkSnapshot(atHost({ ...her, lifecycle: 'stopping' })); await nextTick()
+    await button('立即重试').props.onClick(); await nextTick()
+    assert.ok(text(handoffSection).includes('助手目前没有运行。请打开她的对话查看状态，恢复后再重试。'))
+    commandApp.applyWorkSnapshot(atHost(her)); await nextTick()
+    let finishRetry
+    runCatalogNative = args => new Promise(resolve => { finishRetry = () => resolve({ receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }) })
+    button('立即重试').props.onClick(); await nextTick()
+    assert.equal(button('正在请求…').props.disabled, true)
+    assert.deepEqual(retries().map(({ args }) => [args.instanceId, args.arguments]), [[her.id, '']])
+    her.extensionStatus = {}
+    finishRetry()
+    await until(() => text(handoffSection).includes('已请求重试。整理结果会显示在她对话上方的状态里。') && !button('立即重试'), 'Settings did not show the receipt and refreshed status')
+    assert.equal(commandApp.selectedWorkId, 'work')
+    assert.equal(lists(), initialLists + 2)
+    await click('关闭')
+    commandApp.selectWork(her.id); await nextTick(); snapshot(); await nextTick()
+    event('extension.status_changed', { key: '滚动整理', text: warning }); await nextTick()
+    const strip = find(view, item => item.type === 'button' && item.props.class === 'alu-extension-status')
+    assert.equal(strip.props['aria-label'], '查看助手状态')
+    strip.props.onClick(); await nextTick()
+    const statusPage = find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '助手状态')
+    assert.ok(text(statusPage).includes('Loaded Resources') && text(statusPage).includes(warning))
+    runCatalogNative = () => { throw { code: 'connection_failed', message: '没有连上，请重试。' } }
+    button('立即重试').props.onClick()
+    await until(() => !!find(statusPage, item => item.props.role === 'alert' && text(item).includes('重试')), 'The retry error did not appear on the status page')
+    runCatalogNative = args => ({ receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) })
+    button('立即重试').props.onClick(); await nextTick()
+    event('extension.status_changed', { key: '滚动整理' }); await nextTick()
+    assert.equal(retries().length, 3)
+    assert.equal(!!button('立即重试'), false)
+    assert.equal(text(statusPage).includes('已请求重试'), false)
     await click('关闭')
 
     // P3 re-review: a new runtime retires old command results; its late failure stays natively available.
@@ -3870,11 +3972,6 @@ try {
     const retiredResults = find(view, item => item.props['aria-label'] === '当前 Work 操作结果')
     find(retiredResults, item => item.type === 'details').open = true
     await find(retiredResults, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
-    commands = []
-    commandApp.selectWork('work'); await settle()
-    actions.openAssistantStatus(); await settle()
-    assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
-    await click('关闭')
     // A fresh page has no command owner; cached errors must remain readable there.
     mounted.unmount(); await settle()
     const rebuiltPinia = createPinia()
@@ -3883,7 +3980,7 @@ try {
     rebuiltApp.selectWork('work'); await settle(); snapshot([unrelated], work); await settle()
     assert.ok(text(view).includes('本机命令失败，请重试。'), 'a page without the command center owner still shows the cached error')
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
-    console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
+    console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and direct handoff retry from settings and the status strip')
     console.log('PASS: command failures stay with their command center across close, Work switch, temporary SubHost outage, late reply and replay; unclaimed and Host errors remain visible')
     console.log('PASS: failed Queue handoff remains visible after its receipt and replay; cross-Host success stays successful and keeps later parameters; a retired command leaves its late failure in Work results')
   }

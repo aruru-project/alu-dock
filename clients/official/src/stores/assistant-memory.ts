@@ -226,8 +226,8 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     // Choosing counts even when it stays the same: the background no longer changes it.
     if (kind === 'resident' && memory.resident === before.resident) return `已定下：${memoryResidentLabel(memory.resident)}。后台整理不会再改这一项。`
     if (kind === 'resident') return memory.resident
-      ? `已改成${memoryResidentLabel(true)}：新开的助手会话会读到它，后台整理不会再改这一项。`
-      : `已改成${memoryResidentLabel(false)}：新开的助手会话不再带上它，后台整理不会再改这一项。`
+      ? `已改成${memoryResidentLabel(true)}：到她的对话里点“刷新助手（Reload）”后，她会读到它，后台整理不会再改这一项。`
+      : `已改成${memoryResidentLabel(false)}：到她的对话里点“刷新助手（Reload）”后，她不再带上它，后台整理不会再改这一项。`
     if (kind === 'retired') return '已作废：她不再用这条，记录还留着，可以恢复。'
     // What deleting does is said once, under the buttons.
     if (kind === 'forgotten') return '已删除。可以在这里或「已删除」里恢复。'
@@ -443,6 +443,8 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       // A choice or a start-over whose reply was lost is no longer waiting to be asked again.
       once.known(makingMemories(connectionId))
       settings.current = memorySettings(read)
+      const speed = speedChoices.get(connectionId)
+      if (speed?.state === 'saved' && speed.tier !== read.extractionSpeed) speedChoices.delete(connectionId)
       if (editor.save?.state !== 'pending' && editor.writeRevision === handoffRevision) {
         editor.current = read.handoff ?? null
         once.known([connectionId, 'handoff settings'])
@@ -534,7 +536,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       if (asked === settingsAsked) settings.current = { ...settings.current, extractionModel: result.extractionModel }
       if (asked === startOverShown) Object.assign(restart, {
         state: 'done',
-        message: `已开始从头整理：后台整理出的 ${result.retiredMemories} 条记忆挪进了「已作废」，它写的 ${result.removedLines} 行时间线清掉了。她正在把所有对话从头读一遍，读完之前，新开的会话里记忆不全。`,
+        message: `已开始从头整理：后台整理出的 ${result.retiredMemories} 条记忆挪进了「已作废」，它写的 ${result.removedLines} 行时间线清掉了。她正在把所有对话从头读一遍，读完之前，她能查到的记忆还不全。`,
       })
       if (list.shown) void loadMemories()
     } catch (cause) {

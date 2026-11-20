@@ -1,10 +1,10 @@
-import type { AttachmentAccessRequest, AttachmentAccessResult, AttachmentDto } from "../core/instance-attachments.js";
+import { MAX_ATTACHMENT_FILE_ID_CHARS, type AttachmentAccessRequest, type AttachmentAccessResult, type AttachmentDto } from "../core/instance-attachments.js";
 
 export const DOCK_ATTACHMENT_TOOL_NAMES = ["dock_attachment_list", "dock_attachment_resolve"] as const;
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
 const RESOLVE_SCHEMA = {
   type: "object",
-  properties: { fileId: { type: "string", minLength: 1, maxLength: 128 } },
+  properties: { fileId: { type: "string", minLength: 1, maxLength: MAX_ATTACHMENT_FILE_ID_CHARS } },
   required: ["fileId"],
   additionalProperties: false,
 };

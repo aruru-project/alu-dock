@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
@@ -33,6 +34,7 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
 
   await client.prompt(alu.id, "我家猫叫什么来着？", "auto", "alu-ask");
   const asked = await coordinator.request(0);
+  assert.equal(asked.headers["user-agent"], `AluDock-Assistant/${DOCK_VERSION} (${process.platform}; node/${process.version}; ${process.arch})`, "Assistant chat User-Agent");
   const prompt = systemMessages(asked.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
   assert.ok(prompt.startsWith("## 身份\n\n你是**阿露**"), `The prompt opens with her persona: ${prompt.slice(0, 200)}`);
   assert.ok(prompt.includes("主人的猫叫团子。"), "The assistant loads the owner's notes");
@@ -85,6 +87,40 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
   assert.ok(JSON.stringify(dog.body.messages).includes("团子呀，这都忘了？"), "A continued Work has its conversation back");
   dog.text("豆包。");
   await settled(client, alu.id);
+});
+
+test("failed refreshes use the last opening and warn once until a read succeeds", { timeout: 60_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-opening-", assistant: true });
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  const notes = await client.assistantDocument("notes");
+  await client.setAssistantDocument("notes", "上次读到的手写设定", notes.revision);
+  const notices: string[] = [];
+  const follower = await client.streamEvents(alu.id, { onEvent: event => {
+    if (event.type === "extension.notification" && event.data.level === "warning") notices.push(event.data.message);
+  } });
+  context.after(async () => { follower.close(); await follower.done.catch(() => {}); });
+  const warning = "没读到最新的人设和记忆，先沿用上次读到的版本。";
+  const talk = async (index: number) => {
+    await client.prompt(alu.id, "继续", "auto", `opening-${index}`);
+    const request = await team.providers.coordinator.request(index);
+    assert.ok(systemPrompt(request.body).includes("上次读到的手写设定"));
+    request.text("好。");
+    await settled(client, alu.id);
+  };
+  await talk(0);
+  const path = join(team.root, "assistant", "notes.md");
+  await rename(path, `${path}.saved`); await mkdir(path);
+  await client.reloadSession(alu.id);
+  await talk(1); await talk(2);
+  assert.equal(notices.filter(text => text === warning).length, 1);
+  await rmdir(path); await rename(`${path}.saved`, path);
+  await talk(3);
+  await team.stopAssistantService();
+  await client.reloadSession(alu.id);
+  await talk(4);
+  assert.equal(notices.filter(text => text === warning).length, 2);
+  assert.ok(notices.some(text => text.includes("下次对话或 Reload 时会自动补记，不用重发。")));
 });
 
 // Card #667: what a Pi Work lets its owner do while it replies stays with her own Agent: a message sent

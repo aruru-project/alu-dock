@@ -10,7 +10,7 @@ import { WakeBudget } from "../src/assistant-agent/wake.js";
 
 // Incident this guards against (the Minecraft companion this design follows): its two lines kept
 // waking each other with nobody else involved. Works may start twelve of her replies in a row.
-test("other Works may start twelve of her replies in a row; her owner or a reminder starts the count again", () => {
+test("other Works may start twelve replies; reminders wake her without resetting the count, and her owner resets it", () => {
   const budget = new WakeBudget();
   for (let reply = 1; reply <= 12; reply += 1) assert.equal(budget.admit("work"), true, `Reply ${reply} starts`);
   assert.equal(budget.admit("work"), false);
@@ -19,6 +19,8 @@ test("other Works may start twelve of her replies in a row; her owner or a remin
   for (let reply = 2; reply <= 12; reply += 1) budget.admit("work");
   assert.equal(budget.admit("work"), false);
   assert.equal(budget.admit("reminder"), true);
+  assert.equal(budget.admit("work"), false);
+  assert.equal(budget.admit("owner"), true);
   assert.equal(budget.admit("work"), true);
 });
 

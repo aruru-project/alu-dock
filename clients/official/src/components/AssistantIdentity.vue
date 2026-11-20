@@ -19,7 +19,7 @@ watch(() => app.connectionContext, () => { void assistant.loadIdentity() }, { im
       <label for="assistant-name-input">名字</label>
       <div class="assistant-identity-field">
         <input id="assistant-name-input" :value="identityValue" autocomplete="off" @input="assistant.editIdentity(($event.target as HTMLInputElement).value)" />
-        <button class="button secondary" :disabled="saving || !identityValue.trim() || (identityValue.trim() === identity.current && identity.save?.state !== 'failed')">{{ saving ? '正在保存…' : '保存名字' }}</button>
+        <button class="button secondary" :disabled="saving || !identityValue.trim() || (identityValue.trim() === identity.current.trim() && identity.save?.state !== 'failed')">{{ saving ? '正在保存…' : '保存名字' }}</button>
       </div>
     </form>
     <p v-else-if="identity.loading" class="assistant-status" role="status">正在读取名字…</p>

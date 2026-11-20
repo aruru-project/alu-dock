@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
+import { DOCK_VERSION } from "../src/version.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
@@ -19,6 +22,10 @@ test("what she hears becomes a memory and a timeline line her next session start
     assistantTiming: { idleMs: 1_000, tickMs: 100, quietMs: 0, dreamChanges: 1_000_000, dreamIntervalMs: 1e15 },
   });
   const { coordinator, memory } = team.providers;
+  const modelsFile = join(team.agentDir, "models.json");
+  const models = JSON.parse(await readFile(modelsFile, "utf8"));
+  Object.assign(models.providers.memory.models[0], { contextWindow: 100_000, maxTokens: 32_768 });
+  await writeFile(modelsFile, JSON.stringify(models));
   const client = await team.startHost();
   // Card #295: without a chosen model nothing is extracted, and the owner is told so.
   assert.equal((await client.assistantInfo()).extraction?.state, "off");
@@ -30,6 +37,8 @@ test("what she hears becomes a memory and a timeline line her next session start
   await settled(client, alu.id);
 
   const reading = await memory.request(0);
+  assert.equal(Reflect.get(reading.body, "max_completion_tokens"), 32_768, "Memory extraction uses the model's output budget");
+  assert.equal(reading.headers["user-agent"], `AluDock-Assistant/${DOCK_VERSION} (${process.platform}; node/${process.version}; ${process.arch})`, "Main memory User-Agent");
   const read = JSON.stringify(reading.body.messages);
   assert.ok(read.includes("主人：我不吃香菜，以后点外卖记得避开。"), "Extraction reads what the owner said");
   assert.ok(read.includes("助手：记住啦，香菜退散～"), "Extraction reads what she answered");
@@ -138,7 +147,10 @@ test("she keeps what the owner tells her to remember, forgets it so it cannot be
   await client.prompt(alu.id, "用这个模型把记忆从头整理一遍吧。", "auto", "alu-restart");
   (await coordinator.request(6)).tools({ id: "restart", name: "assistant_memory", arguments: { action: "reorganize" } });
   await waitFor(async () => (await client.status(alu.id)).activeInteraction?.method === "confirm", "The owner was not asked to confirm");
-  await client.respondInteraction(alu.id, undefined, (await client.status(alu.id)).activeInteraction!.id, { method: "confirm", confirmed: true });
+  const shared = await client.read(alu.id, undefined, "conversation_bootstrap", { interactions: "shared" });
+  const question = shared.page.events.find(event => event.type === "interaction.requested")?.data;
+  assert.ok(question?.method === "confirm" && question.message.includes("读完之前，她能查到的记忆还不全"));
+  await client.respondInteraction(alu.id, undefined, question.interactionId, { method: "confirm", confirmed: true });
   const restarted = await coordinator.request(7);
   assert.ok(JSON.stringify(restarted.body.messages?.findLast((message) => message.role === "tool")?.content ?? "").includes("Started over with coordinator/fixture"), "She is told it started");
   restarted.text("开始从头读了。");

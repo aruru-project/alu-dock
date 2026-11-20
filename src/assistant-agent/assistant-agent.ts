@@ -40,7 +40,10 @@ import {
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
-import { compareCommandDtos, compareToolDtos, type CommandDto, type ResourceDto } from "../core/config-projection.js";
+import { ASSISTANT_CLIENT_IDENTITY } from "../core/assistant-identity.js";
+import { MAX_TEXT_CHARS } from "../core/instance-dto.js";
+import { MAX_MESSAGE } from "../control/protocol.js";
+import { compareCommandDtos, compareToolDtos, type CommandDto, type DiagnosticDto, type ResourceDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { projectJsonObject, type JsonObject } from "../core/json-value.js";
@@ -54,6 +57,7 @@ import { appendDockAttachmentContext } from "../pi/dock-attachment-context.js";
 import {
   loadAttachmentContextKey,
   loadPiImages,
+  boundedString,
   PiConversationProjector,
   PiSessionConversation,
   type PiConversationSource,
@@ -67,7 +71,7 @@ import { dockAttachmentTools } from "../worker/dock-attachment-tools.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
 import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
-import { HANDOFF_STATE_TYPE, HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
+import { HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
 import { memoryTools } from "./memory-tools.js";
 import { AssistantToolExtensions, type AssistantBuiltinExtensions } from "./tool-extensions.js";
 import { AssistantOpening } from "./opening.js";
@@ -127,8 +131,12 @@ const BUILTIN_COMMANDS: readonly CommandDto[] = [{
   name: DOCK_TOOLS_COMMAND, source: { kind: "built-in" }, description: "开启、关闭或查看助手的 Dock tools（派 Work、联系别的 Work）",
   argumentHint: "on|off|status", argumentCompletions: false,
 }, {
-  name: "assistant-status", source: { kind: "built-in" }, description: "查看助手运行详情", argumentCompletions: false,
+  name: "retry-handoff", source: { kind: "built-in" }, description: "立即重试滚动整理（对话整理失败后用）", argumentCompletions: false,
 }];
+function fitDiagnostic(item: DiagnosticDto): DiagnosticDto {
+  return item.message.length <= MAX_MESSAGE ? item : { ...item, message: `${item.message.slice(0, MAX_MESSAGE - 1)}…` };
+}
+
 const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开会话、不切换或分叉。你可以直接继续说；要载入刚改过的人设和记忆，请用 Reload，重启也会保留这段对话。";
 
 /**
@@ -198,6 +206,7 @@ class AssistantAgent implements WorkerAgent {
   /** Whether the model's context was built from the conversation yet; until then the session alone holds it. */
   private contextReady = false;
   private readonly handoff: Handoff;
+  private manualCompacting = false;
   /** What clients are shown of her conversation: from the hand-over record before the latest one on. */
   private readonly shown: RecentConversation;
   /** The entries Main said were forgotten when it was last asked. */
@@ -245,8 +254,7 @@ class AssistantAgent implements WorkerAgent {
       contextWindow: () => this.model?.contextWindow ?? 0,
       settings: async () => (await port.call({ op: "settings_get" })).handoff,
       status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
-      rememberResult: (text) => this.saveState(HANDOFF_STATE_TYPE, text),
-      complete: (system, prompt, maxTokens, signal) => this.complete(system, prompt, maxTokens, signal),
+      complete: (system, prompt, signal) => this.complete(system, prompt, signal),
       forgotten: () => this.forgottenEntries(),
       ready: () => { if (this.running === undefined) this.settleSoon(); },
       tell: (message) => this.tell(message, "warning"),
@@ -274,6 +282,7 @@ class AssistantAgent implements WorkerAgent {
     ];
     this.builtInTools = this.tools;
     this.agent = new Agent({
+      identity: ASSISTANT_CLIENT_IDENTITY,
       initialState: { tools: this.tools },
       streamFn: (model, context, options) => models.streamSimple(model, context, { ...options, onPayload: modelSpeed.wrap(options?.onPayload) }),
       convertToLlm,
@@ -291,8 +300,7 @@ class AssistantAgent implements WorkerAgent {
           const stopped = new Promise<void>((done) => signal?.addEventListener("abort", () => done(), { once: true }));
           await Promise.race([this.handoff.require(tokens), stopped]);
           if (signal?.aborted) return undefined;
-          const record = this.handoff.take();
-          if (record !== undefined && await this.takeOver(record, true)) context = { ...context, messages: [...this.agent.state.messages] };
+          if (await this.handoff.adopt(record => this.takeOver(record, true))) context = { ...context, messages: [...this.agent.state.messages] };
         }
         // Each request (including retries) takes the latest choice; one already in flight is left alone.
         return { ...(this.model === undefined ? {} : { model: this.model }), thinkingLevel: this.thinkingLevel, context };
@@ -331,7 +339,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** The same current list authorizes resource.content. Other local context snapshots may join it. */
-  private getDocumentResources(): ResourceDto[] { return [...this.skills.resources]; }
+  private getDocumentResources(): ResourceDto[] { return [...this.skills.resources, ...this.extensions.resources]; }
 
   // ---- What the Host asks -------------------------------------------------------------------
 
@@ -350,7 +358,7 @@ class AssistantAgent implements WorkerAgent {
       ...(sessionFile === undefined ? {} : { sessionFile }),
       ...(durable ? { durableSessionFile: sessionFile } : {}),
       isStreaming: this.running !== undefined,
-      isCompacting: false,
+      isCompacting: this.manualCompacting,
       modelState: this.modelState(),
       metrics: this.metrics(),
       extensionCommands: [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog].map(command => command.name).sort(),
@@ -397,7 +405,12 @@ class AssistantAgent implements WorkerAgent {
         this.modelSpeed.refresh();
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
-      case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);
+      case "resource.get": {
+        const diagnostics: DiagnosticDto[] = [...this.skills.diagnostics, ...this.extensions.diagnostics];
+        const problem = this.handoff.problem;
+        if (problem !== undefined) diagnostics.push({ severity: "warning", message: problem });
+        return projectResources(this.getDocumentResources(), diagnostics.map(fitDiagnostic));
+      }
       // Commands run directly for her owner; no model turn is involved.
       case "command.catalog": {
         const commands = [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog]
@@ -412,9 +425,7 @@ class AssistantAgent implements WorkerAgent {
         this.tell(NO_OTHER_SESSION);
         return { cancelled: true };
       case "session.reload": return this.reload(request.params.operationId);
-      case "session.compact":
-        this.tell("助手的对话由她自己整理，不用手动压缩。");
-        throw new AgentCompactionKnownFailureError("nothing_to_compact", "The assistant keeps her own conversation short");
+      case "session.compact": return this.compact(request.params.operationId, request.params.customInstructions);
       case "session.compaction.prompts": throw this.notHers("助手的对话由她自己整理，没有可以查看的压缩提示。");
       case "bash.run": case "bash.abort": throw this.notHers("助手自己不跑命令。请在别的 Work 里运行。");
       case "tool.set_active":
@@ -552,7 +563,7 @@ class AssistantAgent implements WorkerAgent {
       }
       preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
       if (builtin?.name === DOCK_TOOLS_COMMAND) await this.switchDockTools(input![2]?.trim() || "status", operationId);
-      else if (builtin) this.tell(`滚动整理\n${this.handoff.details()}\n\n工具扩展\n${this.extensions.details()}`, "info", operationId);
+      else if (builtin?.name === "retry-handoff") this.tell(await this.handoff.retryNow(estimateContextTokens(convertToLlm(this.agent.state.messages)).tokens), "info", operationId);
       else await this.extensions.executeCommand(command!.name, command!.args, operationId);
       return null;
     }
@@ -573,9 +584,11 @@ class AssistantAgent implements WorkerAgent {
       preflight({ success: false });
       throw new AgentQueueRejectedBeforeEffectError();
     }
+    const fromWork = isDockMessageText(message);
     if (context?.type === "defer_to_host") {
       if (delivery === "prompt") throw new Error("Host-deferred input requires queued delivery");
       preflight({ success: true, inputKind: "prompt", delivery, custody: "host" });
+      if (!fromWork) this.admit("owner");
       return null;
     }
     let content: Array<TextContent | ImageContent>;
@@ -597,8 +610,8 @@ class AssistantAgent implements WorkerAgent {
       ...(images === undefined ? {} : { images }), ...(attachments === undefined ? {} : { attachments }),
     });
     preflight({ success: true, inputKind: "prompt", delivery: actual, custody: "runtime" });
-    // Another top-level Work speaks to her through her input, with Dock's source line first.
-    const fromWork = isDockMessageText(message);
+    // A Host-queued owner's message already reset the count when it was accepted, not when replayed.
+    if (!fromWork && !handedOver) this.admit("owner");
     if (actual !== "prompt") {
       if (!fromWork) this.ownerWords.push(message);
       this.queue.push({ operationId, delivery: actual, text: modelText });
@@ -606,7 +619,7 @@ class AssistantAgent implements WorkerAgent {
       this.publishQueue();
       return null;
     }
-    if (!this.admit(fromWork ? "work" : "owner")) {
+    if (fromWork && !this.admit("work")) {
       // It joins the conversation without a reply: the Host shows the message as taken without a run.
       this.observe({ type: "message_start", message: userMessage });
       this.observe({ type: "message_end", message: userMessage });
@@ -636,7 +649,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   private reminderDue(reminder: Reminder, lateMs: number): void {
-    const late = lateMs >= 60_000 ? `，晚了 ${Math.round(lateMs / 60_000)} 分钟（到点时 Dock 没在运行）` : "";
+    const late = lateMs >= 60_000 ? `（晚了 ${Math.round(lateMs / 60_000)} 分钟）` : "";
     const content = `[提醒 · 你定在 ${localMinute(new Date(reminder.at))}${late}]\n${reminder.text}`;
     this.arrive("reminder", { customType: REMINDER_NOTE_TYPE, content, display: true, details: { id: reminder.id, at: reminder.at } }, `你定的提醒（#${reminder.id}）`);
   }
@@ -657,7 +670,7 @@ class AssistantAgent implements WorkerAgent {
   /** Whether this may start a reply; says so once when Works have used up the replies they may start. */
   private admit(source: WakeSource, childId?: string): boolean {
     if (this.wake.admit(source)) {
-      if (source !== "work") this.toldWakesSpent = false;
+      if (source === "owner") this.toldWakesSpent = false;
       return true;
     }
     if (!this.toldWakesSpent) {
@@ -752,8 +765,6 @@ class AssistantAgent implements WorkerAgent {
     for (const [type, state] of latest) this.savedState.set(type, JSON.stringify(state));
     this.desk.restore(latest.get(WORKS_STATE_TYPE));
     this.reminders.restore((latest.get(REMINDERS_STATE_TYPE) as { reminders?: unknown } | undefined)?.reminders);
-    const lastCompaction = this.session.getBranch().findLast((entry) => entry.type === "compaction");
-    this.handoff.restore(latest.get(HANDOFF_STATE_TYPE), lastCompaction?.timestamp);
   }
 
   private clearQueue(): ClearedAgentQueue {
@@ -786,6 +797,7 @@ class AssistantAgent implements WorkerAgent {
 
   private async abort(): Promise<void> {
     this.extensions.abortCommands();
+    this.handoff.abortManual();
     if (this.running === undefined) return;
     this.stopRequested = true;
     this.retryWait?.abort();
@@ -886,8 +898,8 @@ class AssistantAgent implements WorkerAgent {
       await this.dropForgotten();
     } else void this.recorder.sync();
     if (this.running !== undefined) return;
-    const record = this.handoff.take();
-    if (record !== undefined) await this.takeOver(record);
+    const adoption = this.handoff.adopt(record => this.takeOver(record));
+    if (adoption !== undefined) await adoption;
     else if (this.contextReady) this.handoff.consider(estimateContextTokens(convertToLlm(this.agent.state.messages)).tokens);
   }
 
@@ -907,9 +919,9 @@ class AssistantAgent implements WorkerAgent {
       if (!insideReply) await this.dropForgotten(forgotten);
       return false;
     }
+    if (!this.handoff.beginCommit(record)) return false;
     this.session.appendCompaction(record.summary, record.firstKeptEntryId, record.tokensBefore);
     cleanupSessionResources(this.session.getSessionId());
-    this.handoff.applied();
     if (!insideReply) await this.dropForgotten(forgotten);
     this.opening.refresh();
     this.contextReady = false;
@@ -919,12 +931,31 @@ class AssistantAgent implements WorkerAgent {
     return true;
   }
 
+  private async compact(operationId: string, customInstructions?: string) {
+    this.manualCompacting = true;
+    this.publish({ type: "compaction_start", reason: "manual", operationId });
+    let errorMessage: string | undefined;
+    let aborted = false;
+    try {
+      const record = await this.handoff.compact(customInstructions);
+      return { summary: boundedString(record.summary, MAX_TEXT_CHARS, ""), firstKeptEntryId: record.firstKeptEntryId, tokensBefore: record.tokensBefore };
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      aborted = error instanceof AgentCompactionKnownFailureError && error.reason === "cancelled";
+      throw error;
+    } finally {
+      this.manualCompacting = false;
+      this.publish({ type: "compaction_end", reason: "manual", operationId, aborted, willRetry: false,
+        ...(errorMessage === undefined ? {} : { errorMessage }) });
+    }
+  }
+
   /** One request to her model outside the conversation. */
-  private async complete(system: string, prompt: string, maxTokens: number, signal: AbortSignal): Promise<string> {
+  private async complete(system: string, prompt: string, signal: AbortSignal): Promise<string> {
     const model = this.model;
     if (model === undefined) throw new Error("没有可用的模型");
     const reply = await this.models.completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      { signal, maxTokens: Math.min(maxTokens, model.maxTokens || maxTokens), onPayload: this.modelSpeed.wrap() });
+      { signal, identity: ASSISTANT_CLIENT_IDENTITY, onPayload: this.modelSpeed.wrap() });
     if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? "模型没有回答");
     if (reply.stopReason === "length") throw new Error("模型的回答被截断了");
     return reply.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
@@ -979,31 +1010,36 @@ class AssistantAgent implements WorkerAgent {
       } else continue;
       changed = true;
     }
-    if (await this.rewriteRecord(hidden)) changed = true;
-    this.forgottenSeen = hidden;
+    const rewrite = await this.rewriteRecord(hidden);
+    if (rewrite === "rewritten") changed = true;
+    if (rewrite !== "failed") this.forgottenSeen = hidden;
     if (!changed) return;
     this.contextReady = false;
     this.publish(this.checkpoint());
   }
 
   /** The hand-over record in use, when it was written before something in this conversation was forgotten, is rewritten without it. */
-  private async rewriteRecord(hidden: ReadonlySet<string>): Promise<boolean> {
+  private async rewriteRecord(hidden: ReadonlySet<string>): Promise<"rewritten" | "unneeded" | "failed"> {
     const record = this.session.buildContextEntries()[0];
-    if (record?.type !== "compaction" || !hidden.has(record.id)) return false;
+    if (record?.type !== "compaction" || !hidden.has(record.id)) return "unneeded";
     try {
       const since = Date.parse(record.timestamp);
-      const { memories } = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50 });
+      let page = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50 });
+      const memories = [...page.memories];
+      while (page.nextCursor !== undefined) {
+        page = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50, cursor: page.nextCursor });
+        memories.push(...page.memories);
+      }
       const texts = memories.filter((memory) => Date.parse(memory.updatedAt) > since).map((memory) => memory.text);
-      if (texts.length === 0) return false;
+      if (texts.length === 0) return "unneeded";
       const { system, prompt } = rewriteWithoutPrompt(record.summary, texts);
-      const rewritten = (await this.complete(system, prompt, 4_096, new AbortController().signal)).trim();
-      if (rewritten.length === 0) return false;
+      const rewritten = (await this.complete(system, prompt, new AbortController().signal)).trim();
+      if (rewritten.length === 0) return "failed";
       this.session.appendCompaction(rewritten, record.firstKeptEntryId, record.tokensBefore);
       cleanupSessionResources(this.session.getSessionId());
-      return true;
+      return "rewritten";
     } catch {
-      // Tried again the next time something is found forgotten; until then the record stays.
-      return false;
+      return "failed";
     }
   }
 

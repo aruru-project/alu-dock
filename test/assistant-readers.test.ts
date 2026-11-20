@@ -36,7 +36,7 @@ test("a memory search the asker gave up on keeps its thread until it ends, and t
   await assert.rejects(quick.search({ query: "火锅", limit: 5 }), (error: unknown) => error instanceof AssistantError && error.code === "assistant_query_timeout");
   assert.ok(Date.now() - askedAt < 1_000, "The asker heard at the limit, not when the scan ended");
 
-  const readers = new AssistantReaders({ databasePath, threads: 1, timeoutMs: 10_000 });
+  const readers = new AssistantReaders({ databasePath, threads: 1, timeoutMs: 10_000, maxWaiting: 1 });
   context.after(() => readers.close());
   await readers.search({ query: "第0条", limit: 1 });
   // Given up while it runs on the only thread: the asker hears at once.
@@ -47,6 +47,7 @@ test("a memory search the asker gave up on keeps its thread until it ends, and t
   // Given up while waiting behind it: it never runs.
   const waiting = new AbortController();
   const queued = readers.search({ query: "天气", limit: 1 }, waiting.signal);
+  await assert.rejects(readers.search({ query: "别的", limit: 1 }), { code: "assistant_busy", message: "助手正在处理很多查询，这次没有排上。请稍后再试。" });
   waiting.abort();
   await assert.rejects(queued);
   // The next read waits for the thread, then gets its own result, not the abandoned one's empty one.

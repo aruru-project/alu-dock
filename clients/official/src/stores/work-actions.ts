@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import {
-  abortRun, abortShellCommands, compactSession, forgetWork, isTauri, listMachines, reopenWork, runShellCommand, sessionContext, stopWork, type CreateWorkContinuation,
+  abortRun, abortShellCommands, compactSession, forgetWork, isTauri, listMachines, reopenWork, runCatalogCommand, runShellCommand, sessionContext, stopWork, type CreateWorkContinuation,
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { subhostMachineName } from '../lib/machines'
@@ -459,23 +459,34 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     page.openAssistant()
   }
 
-  const assistantStatusError = ref('')
-  watch(() => app.activeConnectionId, () => { assistantStatusError.value = '' })
+  const handoffRetryError = ref('')
+  const handoffRetryPending = ref(false)
+  watch(() => app.connectionContext?.selectionGeneration, () => { handoffRetryError.value = ''; handoffRetryPending.value = false })
 
-  /** An explicit owner click navigates to her command center before any command is sent. */
-  function openAssistantStatus() {
-    assistantStatusError.value = ''
+  async function retryAssistantHandoff(): Promise<boolean> {
+    if (handoffRetryPending.value) return false
+    handoffRetryError.value = ''
     const assistant = app.works.find(isResidentAssistant)
     if (!assistant) {
-      assistantStatusError.value = '助手暂未出现在工作列表中，请稍后重试。'
-      return
+      handoffRetryError.value = '助手暂未出现在工作列表中，请稍后重试。'
+      return false
     }
     if (assistant.lifecycle !== 'active') {
-      assistantStatusError.value = '助手目前没有运行。请从工作列表打开她，选择继续后重试。'
-      return
+      handoffRetryError.value = '助手目前没有运行。请打开她的对话查看状态，恢复后再重试。'
+      return false
     }
-    app.selectWork(assistant.id)
-    page.openControlCenter('commands', { name: 'assistant-status', source: { kind: 'built-in' } })
+    const context = requireConnectionContext(app)
+    handoffRetryPending.value = true
+    try {
+      const target = app.captureOperationTarget(context, assistant.id)
+      await runCatalogCommand(assistant.id, 'retry-handoff', '', crypto.randomUUID(), target)
+      return app.contextMatches(context)
+    } catch (cause) {
+      if (app.contextMatches(context)) handoffRetryError.value = errorMessage(cause)
+      return false
+    } finally {
+      if (app.contextMatches(context)) handoffRetryPending.value = false
+    }
   }
 
   function acceptCreatedWork(work: Work) {
@@ -494,6 +505,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, checkContinuedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, openAssistantStatus, assistantStatusError, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, retryAssistantHandoff, handoffRetryError, handoffRetryPending, acceptCreatedWork,
   }
 })
