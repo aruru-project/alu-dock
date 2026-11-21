@@ -5,6 +5,8 @@ Dock Works are managed Agent work identities that keep running without a connect
 - **Top-level Works** are the user's: the ones the user opens, and the ones you open with `dock_create` when the user asks for it. They appear in the user's work list and can collaborate with each other freely.
 - **Child Works** are yours: Works you create with `dock_spawn` for your own task, such as an implementer or a reviewer. They appear under you in the work list, report only to you, and belong to you until you stop them.
 
+A Work that does the work itself gets one level of child Works, and theirs start none. The resident assistant does no work herself, so a child Work of hers may start child Works of its own unless she leaves `dock_spawn` out of its `allowedTools`.
+
 Collaboration tools are on for new Works by default; `/dock-tools off` is an explicit opt-out that survives restarts.
 
 ## Delegate, implement, review
@@ -17,15 +19,17 @@ Collaboration tools are on for new Works by default; `/dock-tools off` is an exp
 6. Child Works cannot reach each other. For review, give the reviewer `allowedTools: ["read","grep","find","ls"]`; judge its findings yourself and relay the ones that hold to the implementer. Put long material in a file in the working directory instead of a message.
 7. Stop a child Work with `dock_stop` when you no longer need it. Child Works also stop whenever you stop or crash, and they are not restored after the Host restarts. A stopped child Work leaves the work list; its conversation file stays on disk.
 
-**The resident assistant has her own delegation policy.** She may choose available models and thinking levels for the task, rather than inherit her everyday chat settings. If she omits the model, the target uses its normal Pi default; omitted thinking starts at high and is clamped to the model's support. Explicit choices win. Her private conversation is not copied to children (`withContext` is not offered), and she ends her turn to receive their messages rather than using `dock_wait`. These differences do not widen an ordinary Pi Work's permissions.
+**The resident assistant has her own delegation policy.** She may choose available models and thinking levels for the task, rather than inherit her everyday chat settings. If she omits the model, the target uses its normal Pi default; omitted thinking starts at high and is clamped to the model's support. Explicit choices win. Her private conversation is not copied to children (`withContext` is not offered), and she ends her turn to receive their messages rather than using `dock_wait`. Her child Works may hand parts of their task to child Works of their own, which report to them; give `allowedTools` without `dock_spawn` to a child Work that should not, such as a reviewer. These differences do not widen an ordinary Pi Work's permissions.
 
-`allowedTools` is an exact ceiling of Pi tool names, enforced in the runtime including nested and deferred calls; `[]` grants none. A child Work can always message you and never gets other Dock tools. This limits tools, not what a granted tool can do: `bash` grants a full shell, and third-party extensions are trusted code.
+`allowedTools` is an exact ceiling of Pi tool names, enforced in the runtime including nested and deferred calls; `[]` grants none. A child Work never gets a tool you were not given, and can always message you. Apart from that, only a child Work of a Work that does no work itself gets Dock tools, for its own child Works. This limits tools, not what a granted tool can do: `bash` grants a full shell, and third-party extensions are trusted code.
 
 If the task's acceptance is unconfirmed, the child Work stays visible; inspect it before sending the task again.
 
 ## If you are a child Work
 
 The Work that created you is your parent. You work at the same time, and it sees only what you send it with `dock_send({message,done})`. While you work, send with `done: false` what it should know or answer now, such as a finding that affects its work, a question or a point to agree on, and keep working; never send acknowledgments or empty progress such as that you are still working. When you finish the work it handed you, send your result with `done: true`; that ends your turn. Your messages reach your parent at its next step, even while it is working, and its answers reach you the same way, beginning with `[来自父 Work「its name」]`. When the user talks to you directly, answer the user. You cannot create, list, read, stop or message any other Work.
+
+If you have `dock_spawn`, your parent does no work itself, such as the resident assistant, and you may hand parts of your task to child Works of your own as described above. They cannot start child Works, never get a tool you were not given, and report to you, not to your parent: weigh what they send before you pass anything on. `dock_send` without `target` still goes to your parent and needs `done`; with `target` it goes to one of your own child Works. While they work you may end your turn; that does not count as stopping without your result, and their messages wake you. `dock_wait` also returns when your parent's message reaches you. `dock_list`, `dock_inspect`, `dock_interrupt` and `dock_stop` reach your own child Works only.
 
 ## Messages
 
