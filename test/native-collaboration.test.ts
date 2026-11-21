@@ -136,15 +136,58 @@ test("what a child Work owes its parent is settled by the numbers of the message
   await fromLead("A5", 5);
   assert.equal(await leaves(), 2, "a result for all that arrived settles it");
 
-  // Taking the work back holds against a message sent before it, even when that message arrives after.
+  const leadStatus = { ...child, id: lead.id, name: "Lead" };
+  const stopNotices = async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    parentHears();
+    return sessions.parent.workMessages.filter((message) => message.type === "child_stopped").length;
+  };
+
+  // Taking the work back covers a message sent before it, even when that message's receipt comes back after
+  // the interrupt's. A stop report while the interrupt is under way waits for it, and is dropped.
   const sending = fromParent("Q7");
-  messages.release(lead.id, true);
+  const interrupting = messages.takeBack(lead.id, true);
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "aborted", readThrough: 5 });
+  interrupting.answered(true);
+  parentView.noteWork({ type: "interrupt", instance: leadStatus, settlesThrough: interrupting.settlesThrough });
   await sending;
-  for (const reason of ["aborted", "ended"] as const) await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason });
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended", readThrough: 7 });
+  assert.equal(parentView.owes(lead.id), false);
   assert.equal(await leaves(), 2, "after taking the work back the parent hears of no stop");
+
+  // A message sent after an interrupt began is not taken back by it, whichever receipt comes first.
+  const interruptingAgain = messages.takeBack(lead.id, true);
   await fromParent("Q8");
-  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended" });
-  assert.equal(sessions.parent.workMessages.filter((message) => message.type === "child_stopped").length, 3, "new work from the parent is owed a report again");
+  interruptingAgain.answered(true);
+  parentView.noteWork({ type: "interrupt", instance: leadStatus, settlesThrough: interruptingAgain.settlesThrough });
+  assert.equal(parentView.owes(lead.id), true, "Q8 is still owed");
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended", readThrough: 8 });
+  assert.equal(await stopNotices(), 3, "new work from the parent is owed a report again");
+  // A turn's stop report covers what that turn had read, not what reached the child since.
+  await fromParent("Q9");
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended", readThrough: 8 });
+  assert.equal(await stopNotices(), 4);
+  assert.equal(parentView.owes(lead.id), true, "Q9 is still owed");
+
+  // A refused interrupt takes nothing back: a stop report that waited for it still reaches the parent, and a
+  // result that came meanwhile still counts.
+  const refused = messages.takeBack(lead.id, true);
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended", readThrough: 9 });
+  refused.answered(false);
+  assert.equal(await stopNotices(), 5);
+  const refusedAgain = messages.takeBack(lead.id, true);
+  await fromLead("A9", 9);
+  refusedAgain.answered(false);
+  assert.equal(await leaves(), 5, "its result still settles Q9");
+  assert.equal(parentView.owes(lead.id), false);
+
+  // The child leaves while its final result is still on its way to the parent: the result settles it, so no
+  // notice that it stopped without one follows the result.
+  await fromParent("Q10");
+  const answering = fromLead("A10", 10);
+  messages.childLeaving(lead);
+  await answering;
+  assert.equal(await stopNotices(), 5);
 });
 
 // Card #674 review (Astra): the Host took the work back before the interrupt ran; when the interrupt was

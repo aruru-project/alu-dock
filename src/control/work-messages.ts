@@ -21,23 +21,32 @@ type WorkMessageResult = Extract<DockToolsResult, { type: "work_message" }>;
 
 /**
  * What a child Work owes its parent, counted by the numbers of the parent's messages to it; its task counts
- * as 0 (card #674). It owes a result while what its final results settled is behind what reached it, so a
- * parent message that crosses a final result for earlier work stays owed, in whatever order they arrive.
+ * as 0 (card #674). It owes a result while what is settled is behind what reached it, so a parent message
+ * that crosses a final result for earlier work stays owed, in whatever order they arrive. Each fact is kept
+ * apart, so none undoes another.
  */
 interface Ledger {
   /** The next message's number. Numbers are never reused: a message that failed to arrive leaves a gap. */
   next: number;
   /** The latest message that reached it. */
   handed: number;
-  /** The latest message its final results answered, or that its parent took back by interrupting or stopping it. */
-  settled: number;
+  /** The latest message its delivered final results answered. */
+  answered: number;
+  /** The latest message the parent took back by an interrupt or stop that went through, or was told the child left with. */
+  closed: number;
   /**
    * The parent interrupted it after sending messages through this number and took that work back: no stop is
    * reported until a newer message reaches it. A message sent before the interrupt does not undo it, even
    * if it arrives later.
    */
   interruptedAt?: number;
+  /** The parent's interrupts and stops of it still under way. */
+  takingBack: number;
+  /** Stop reports that came meanwhile, decided once those answer: dropped if the work was taken back. */
+  held: Array<() => void>;
 }
+
+const owes = (ledger: Ledger): boolean => Math.max(ledger.answered, ledger.closed) < ledger.handed;
 
 /**
  * Messages between a Work and its own child Works on the Host that runs both, and whether each child
@@ -54,7 +63,7 @@ export class WorkMessages {
   constructor(private readonly port: WorkMessagesPort) {}
 
   /** A child Work starts owing its parent the result of the task it was created for. */
-  childStarted(childId: string): void { this.ledgers.set(childId, { next: 1, handed: 0, settled: -1 }); }
+  childStarted(childId: string): void { this.ledgers.set(childId, newLedger(-1)); }
 
   /** The source's own child Work that `target` names, by ID, Main's ID, key, name or ID prefix. */
   ownChild(source: InstanceSnapshot, target: string): ManagedInstance | "ambiguous" | undefined {
@@ -76,8 +85,10 @@ export class WorkMessages {
       // What this result answers: the parent messages the child had read when it sent it.
       const settlesThrough = request.readThrough ?? ledger?.handed ?? 0;
       const done = request.done === true;
-      await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done, settlesThrough } : {}) });
-      if (done && ledger) ledger.settled = Math.max(ledger.settled, settlesThrough);
+      await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done, settlesThrough } : {}) }, () => {
+        // Before anything queued after it is decided, such as Dock's notice that this child left.
+        if (done && ledger) ledger.answered = Math.max(ledger.answered, settlesThrough);
+      });
       return { type: "work_message", to: "parent", acceptedAt: this.port.now(), ...(done ? { done } : {}) };
     }
     if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
@@ -94,59 +105,79 @@ export class WorkMessages {
 
   /**
    * A child Work's Worker saw a turn carry its parent's work and end without its last call reaching the
-   * parent, so the parent hears of it. Only the Worker knows what that turn still owed, so the child Work
-   * owes the result again whatever the Host settled.
+   * parent, so the parent hears of it, for the parent messages that turn had read. It stays owed: a crash
+   * later is reported too.
    */
   async unreportedStop(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
     const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
     if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
     const ledger = this.ledgers.get(source.id);
+    // While the parent is taking the work back, whether to tell it waits for that to answer.
+    if (ledger && ledger.takingBack > 0) {
+      ledger.held.push(() => { void this.unreportedStop(source, request).catch(() => { /* The parent's Worker is gone. */ }); });
+      return { type: "unreported_stop", notified: false };
+    }
     // The parent interrupted it and took the work back; nothing is owed until the parent sends more.
     if (ledger?.interruptedAt !== undefined) return { type: "unreported_stop", notified: false };
-    if (ledger) ledger.settled = Math.min(ledger.settled, ledger.handed - 1);
     await this.deliver(parent, {
       type: "child_stopped", from: this.childSender(source), reason: request.reason,
       ...(request.error === undefined ? {} : { error: request.error }),
       ...(request.lastWords === undefined ? {} : { lastWords: request.lastWords }),
-      settlesThrough: ledger?.handed ?? 0,
+      settlesThrough: request.readThrough ?? ledger?.handed ?? 0,
     });
     return { type: "unreported_stop", notified: true };
   }
 
   /**
-   * The parent takes the work back by interrupting or stopping its child Work itself. The returned function
-   * undoes this when that request fails: the child Work may still be at work, and its stops matter again.
+   * The parent takes the work back by interrupting or stopping its child Work itself: every message sent so
+   * far, through `settlesThrough`, a message still on its way included; the parent's own view settles that
+   * too. Nothing changes until `answered` says whether the request went through; stop reports that come
+   * meanwhile are decided then.
    */
-  release(childId: string, interrupted: boolean): () => void {
+  takeBack(childId: string, interrupt: boolean): { settlesThrough: number; answered(succeeded: boolean): void } {
     const ledger = this.ledger(childId);
-    const before = { settled: ledger.settled, interruptedAt: ledger.interruptedAt };
-    // Everything sent so far is taken back, a message still on its way included.
-    const sent = ledger.next - 1;
-    ledger.settled = Math.max(ledger.settled, sent);
-    if (interrupted) ledger.interruptedAt = sent;
-    const after = { settled: ledger.settled, interruptedAt: ledger.interruptedAt };
-    return () => {
-      // A result or a newer parent message that came meanwhile stays as it set things.
-      if (ledger.settled === after.settled) ledger.settled = before.settled;
-      if (ledger.interruptedAt === after.interruptedAt) ledger.interruptedAt = before.interruptedAt;
+    const through = ledger.next - 1;
+    ledger.takingBack += 1;
+    return {
+      settlesThrough: through,
+      answered: (succeeded) => {
+        ledger.takingBack -= 1;
+        if (succeeded) {
+          ledger.closed = Math.max(ledger.closed, through);
+          // A message sent after it and already delivered keeps the child at work, so it is not interrupted.
+          if (interrupt && ledger.handed <= through) ledger.interruptedAt = Math.max(ledger.interruptedAt ?? 0, through);
+        }
+        if (ledger.takingBack > 0) return;
+        for (const report of ledger.held.splice(0)) report();
+      },
     };
   }
 
   /** A child Work is stopping or crashed. Its parent hears of it once if a result was still owed, unless the parent is leaving too. */
   childLeaving(child: ManagedInstance): void {
     const ledger = this.ledgers.get(child.id);
-    if (!ledger || ledger.settled >= ledger.handed) return;
-    ledger.settled = ledger.handed;
+    if (!ledger) return;
+    if (ledger.takingBack > 0) {
+      ledger.held.push(() => this.childLeaving(child));
+      return;
+    }
+    if (!owes(ledger)) return;
     const snapshot = child.snapshot();
     const parent = snapshot.parentId === undefined ? undefined : this.port.get(snapshot.parentId);
     if (!parent || parent.snapshot().lifecycle !== "active") return;
     const crashed = snapshot.lifecycle === "runtime_error";
     const lastWords = child.lastAgentReply();
-    void this.deliver(parent, {
-      type: "child_stopped", from: this.childSender(snapshot), reason: crashed ? "crashed" : "stopped",
-      ...(crashed && snapshot.lastError ? { error: shortenLastWords(snapshot.lastError) } : {}),
-      ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
-      settlesThrough: ledger.handed,
+    // Decided when its turn comes: a final result queued before it may settle everything yet.
+    void this.deliver(parent, () => {
+      if (!owes(ledger)) return undefined;
+      // Nothing follows: everything that reached it is settled by this notice, which is sent once.
+      ledger.closed = ledger.handed;
+      return {
+        type: "child_stopped", from: this.childSender(snapshot), reason: crashed ? "crashed" : "stopped",
+        ...(crashed && snapshot.lastError ? { error: shortenLastWords(snapshot.lastError) } : {}),
+        ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
+        settlesThrough: ledger.handed,
+      };
     }).catch(() => { /* The parent's Worker is gone as well. */ });
   }
 
@@ -173,7 +204,7 @@ export class WorkMessages {
 
   private ledger(childId: string): Ledger {
     let ledger = this.ledgers.get(childId);
-    if (!ledger) this.ledgers.set(childId, ledger = { next: 1, handed: 0, settled: 0 });
+    if (!ledger) this.ledgers.set(childId, ledger = newLedger(0));
     return ledger;
   }
 
@@ -181,12 +212,26 @@ export class WorkMessages {
     return { relation: "child", id: this.mainIdentities.get(child.id)?.child ?? child.id, name: child.displayName };
   }
 
-  private deliver(recipient: ManagedInstance, message: WorkMessage): Promise<void> {
+  /**
+   * After what is already on its way to the same recipient. `message` may be decided only when its turn comes,
+   * and `delivered` runs as soon as it arrived, before the next one is decided.
+   */
+  private deliver(recipient: ManagedInstance, message: WorkMessage | (() => WorkMessage | undefined), delivered?: () => void): Promise<void> {
     const previous = this.deliveries.get(recipient.id) ?? Promise.resolve();
-    const delivery = previous.then(() => recipient.deliverWorkMessage(message));
+    const delivery = previous.then(async () => {
+      const decided = typeof message === "function" ? message() : message;
+      if (decided === undefined) return;
+      await recipient.deliverWorkMessage(decided);
+      delivered?.();
+    });
     const tail = delivery.then(() => undefined, () => undefined);
     this.deliveries.set(recipient.id, tail);
     void tail.finally(() => { if (this.deliveries.get(recipient.id) === tail) this.deliveries.delete(recipient.id); });
     return delivery;
   }
+}
+
+/** A child Work's ledger: its task, number 0, reached it; `answered` says whether that is settled. */
+function newLedger(answered: number): Ledger {
+  return { next: 1, handed: 0, answered, closed: -1, takingBack: 0, held: [] };
 }

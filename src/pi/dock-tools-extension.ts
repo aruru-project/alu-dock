@@ -150,6 +150,7 @@ class OwedResult {
     // messages wake it, and childMessage counts that turn as the parent's work again.
     if (!aborted && failure === undefined && childrenOwe) return undefined;
     return {
+      readThrough: this.read,
       reason: aborted ? "aborted" : failure !== undefined ? "failed" : "ended",
       ...(!aborted && failure ? { error: shortenLastWords(failure) } : {}),
       ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),

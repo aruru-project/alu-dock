@@ -99,8 +99,11 @@ export type DockToolsRequest =
    * A lead child Work names one of its own child Works with target.
    */
   | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean; readThrough?: number }
-  /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */
-  | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string };
+  /**
+   * A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is
+   * still owed; `readThrough` is the number of the parent's last message that turn had read.
+   */
+  | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string; readThrough?: number };
 
 /** What the Host creates for dock_create, plus what dock_spawn chooses for a child. */
 export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
@@ -139,8 +142,12 @@ export type DockToolsResult =
   | ({ type: "models" } & ChildModelList)
   | { type: "speed"; setting: SettingDto }
   | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; error?: string }
-  | { type: "interrupt"; instance: ObservedInstanceStatus }
-  | { type: "stop"; instance: ObservedInstanceStatus }
+  /**
+   * On a parent's own child Work, `settlesThrough` is the number of the parent's messages it took back by this
+   * (card #674): one still on its way when it was taken back stays settled, one sent after it does not.
+   */
+  | { type: "interrupt"; instance: ObservedInstanceStatus; settlesThrough?: number }
+  | { type: "stop"; instance: ObservedInstanceStatus; settlesThrough?: number }
   /** `currentHostId` is the source Work's own Machine; only the source Host adds it. */
   | { type: "machines"; machines: MachineDto[]; currentHostId?: string }
   | { type: "deliver"; deliverable: DeliverableDto }

@@ -166,6 +166,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly childStarts = new WeakMap<ManagedInstance, Set<Promise<unknown>>>();
   /** What each child Work was started with: its role and tool ceiling. A child is never reopened. */
   private readonly childGrants = new WeakMap<ManagedInstance, DockChildStart>();
+  /**
+   * Works that left the list, stopped or removed, and stay in `instances` only until their own child Works
+   * are retired (card #674): a parent no longer finds them by name, a Stop of a Work above still waits.
+   */
+  private readonly departed = new WeakSet<ManagedInstance>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, Promise<unknown>>();
@@ -249,7 +254,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       isResidentAssistant: (instanceId) => this.isResidentAssistant(instanceId),
     });
     this.workMessages = new WorkMessages({
-      live: () => this.instances.values(),
+      live: () => [...this.instances.values()].filter((instance) => !this.departed.has(instance)),
       get: (instanceId) => this.instances.get(instanceId),
       now: () => new Date().toISOString(),
     });
@@ -895,15 +900,16 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (request.type === "interrupt" || request.type === "stop") {
       if (child) {
         // The parent takes back the work it handed out, so nothing is owed for it any more.
-        const undo = this.workMessages.release(child.id, request.type === "interrupt");
+        const takeBack = this.workMessages.takeBack(child.id, request.type === "interrupt");
+        let succeeded = false;
         try {
           await mutations[request.type](child.id, request.operationId);
-        } catch (error) {
+          succeeded = true;
+        } finally {
           // Refused, or not known to have happened: the child may still be at work on it.
-          undo();
-          throw error;
+          takeBack.answered(succeeded);
         }
-        return { type: request.type, instance: this.workMessages.forParent(child.snapshot()) };
+        return { type: request.type, instance: this.workMessages.forParent(child.snapshot()), settlesThrough: takeBack.settlesThrough };
       }
       if (source.parentId !== undefined) throw new Error("You can interrupt or stop only your own child Works. Name one as dock_list shows it.");
       const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
@@ -986,6 +992,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       const snapshot = instance.snapshot();
       // A Work leaves the runtime list only once the Works below it are retired, so a Stop of a Work above
       // it still finds it and waits for them too (card #674).
+      if (!snapshot.assistant) this.departed.add(instance);
       await this.childRetirements.get(instance);
       if (snapshot.assistant && this.assistantWorkspace !== undefined) {
         // Return the old Work's truthful stopped receipt. The same ID is already open again when
@@ -1121,7 +1128,10 @@ export class DockRegistry implements LocalDockToolsHostPort {
       const instance = this.instances.get(instanceId);
       const retiring = instance === undefined ? undefined : this.childRetirements.get(instance);
       if (retiring === undefined) this.instances.delete(instanceId);
-      else void retiring.then(() => { if (this.instances.get(instanceId) === instance) this.instances.delete(instanceId); });
+      else {
+        this.departed.add(instance!);
+        void retiring.then(() => { if (this.instances.get(instanceId) === instance) this.instances.delete(instanceId); });
+      }
       await this.cleanupObservationForForgottenTargets([instanceId]);
       this.notifyCatalogRemoval([instanceId]);
       return { forgottenId: removed.id, previousLifecycle: removed.lifecycle as "stopped" | "host_lost" | "runtime_error" };

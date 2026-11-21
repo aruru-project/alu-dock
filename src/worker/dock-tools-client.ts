@@ -209,7 +209,7 @@ export function renderChildWait(result: ChildWaitResult): string {
     cancelled: `Stopped waiting.${received ? ` ${received}` : ""}`,
   }[result.ended];
   const still = result.waiting.length === 0 ? "" : `\nStill working: ${result.waiting.map((child) => `"${inline(child.name)}" id=${inline(child.id)}`).join(", ")}`;
-  return [head + still, ...result.messages.map((message) => renderWorkMessage(message))].join("\n\n");
+  return [head + still, ...result.messages.map((message) => renderWorkMessage(message, result.waiting.some((child) => child.id === message.from.id)))].join("\n\n");
 }
 
 /** Your own model first, then the models the user picked, with what each supports. */

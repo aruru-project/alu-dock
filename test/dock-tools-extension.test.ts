@@ -8,6 +8,7 @@ import {
   type ObservationResult,
 } from "../src/core/instance-observation.js";
 import type { DockToolsRequest, WorkMessage } from "../src/core/dock-tools.js";
+import { ChildMessages } from "../src/worker/child-messages.js";
 import {
   DOCK_TOOL_NAMES,
   DockToolsBridge,
@@ -445,7 +446,7 @@ test("a lead child Work reports a stop to its parent only while it owes a result
     return {
       bridge, reports, sends, state,
       /** The model calls dock_wait. */
-      waits: (params: object) => wait.execute("wait", params, undefined, undefined, { hasPendingMessages: () => false }) as Promise<{ details: { ended: string } }>,
+      waits: (params: object) => wait.execute("wait", params, undefined, undefined, { hasPendingMessages: () => false }) as Promise<{ content: Array<{ text: string }>; details: { ended: string } }>,
       setIdle: (value: boolean) => { idle = value; },
       /** The model ends its turn with these words. */
       ends: (text: string, options: { aborted?: boolean; error?: string } = {}) => {
@@ -520,6 +521,10 @@ test("a lead child Work reports a stop to its parent only while it owes a result
   assert.deepEqual(parentOfReview.bridge.children.waiting.map((child) => child.id), ["review"]);
   parentOfReview.ends("Waiting for the newer answer.");
   assert.deepEqual(parentOfReview.reports, []);
+  // The earlier result is still waiting to go into the conversation, so dock_wait takes it, and says so too.
+  const waited = await parentOfReview.waits({ timeoutSeconds: 5 });
+  const waitText = waited.content[0]!.text;
+  assert.ok(waitText.includes("Still working: \"Review\"") && waitText.includes("[来自子 Work「Review」· 已完成，你后来发的消息它还没回]\nOLD_RESULT"), waitText);
   parentOfReview.setIdle(true);
   parentOfReview.bridge.receive(reviewSays("OLDER_STILL", 0));
   assert.ok(parentOfReview.state.messages.some(({ message }) => String((message as { content?: unknown }).content).startsWith("[来自子 Work「Review」· 已完成，你后来发的消息它还没回]\nOLDER_STILL")));
@@ -539,7 +544,7 @@ test("a lead child Work reports a stop to its parent only while it owes a result
   late.bridge.receive(reviewSays("REVIEW_DONE"));
   late.bridge.runStarting("custom");
   late.ends("Review passed.");
-  assert.deepEqual(late.reports.map((report) => report.reason), ["ended"], "Q2 was still owed");
+  assert.deepEqual(late.reports.map((report) => [report.reason, report.readThrough]), [["ended", 2]], "Q2 was still owed, as the report says");
 
   // Its final result says which of its parent's messages it had read; a newer one is still owed (Host side).
   const crossing = lead();
@@ -548,4 +553,19 @@ test("a lead child Work reports a stop to its parent only while it owes a result
   crossing.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q2", number: 2 });
   await crossing.toParent(true);
   assert.equal(crossing.sends.at(-1)!.readThrough, 2);
+});
+
+// Card #674 review (Astra): a child Work whose final result came before its call's receipt was forgotten
+// once enough other child Works had finished, and its late receipt then made it owe that result again.
+test("a final result that came before its receipt is kept until the receipt pairs with it", () => {
+  const children = new ChildMessages();
+  const status = (id: string) => ({ ...notification.target, id, name: id });
+  const result = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: "done", done: true, settlesThrough: 0 });
+  children.receive(result("early"));
+  for (let index = 0; index < 100; index += 1) {
+    children.noteWork({ type: "spawn", taskStatus: "accepted", instance: status(`other-${index}`) });
+    children.receive(result(`other-${index}`));
+  }
+  children.noteWork({ type: "spawn", taskStatus: "accepted", instance: status("early") });
+  assert.deepEqual(children.waiting, []);
 });

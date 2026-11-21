@@ -47,9 +47,11 @@ export class ChildMessages {
 
   noteWork(result: DockToolsResult): void {
     // Stopping or interrupting a child Work takes its work back; Dock tells nothing more about it.
+    // Only what the Host took back by it: a message sent after it is still owed, whichever receipt comes first.
     if (result.type === "stop" || result.type === "interrupt") {
-      const ledger = this.ledgers.get(result.instance.id);
-      if (ledger) ledger.settled = Math.max(ledger.settled, ledger.handed);
+      const ledger = this.ledger(result.instance.id, result.instance.name ?? result.instance.id);
+      ledger.settled = Math.max(ledger.settled, result.settlesThrough ?? ledger.handed);
+      this.forgetSettled();
       return;
     }
     if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) this.hand(result.instance, 0);
@@ -91,8 +93,12 @@ export class ChildMessages {
     return ledger;
   }
 
+  /**
+   * A child Work whose last result and last receipt agree is remembered only so long. One whose result came
+   * before its call's receipt is kept until the receipt pairs with it, or it would owe that work again.
+   */
   private forgetSettled(): void {
-    const settled = [...this.ledgers.values()].filter((ledger) => !owes(ledger));
+    const settled = [...this.ledgers.values()].filter((ledger) => ledger.settled === ledger.handed);
     for (const ledger of settled.slice(0, Math.max(0, settled.length - MAX_SETTLED_CHILDREN))) this.ledgers.delete(ledger.id);
   }
 

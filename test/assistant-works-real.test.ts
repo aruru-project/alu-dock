@@ -242,6 +242,11 @@ test("stopping the assistant while her child Work is stopping still waits for th
   process.kill(crashingPid, "SIGKILL");
   await waitFor(async () => (await client.status(crashing.id)).lifecycle === "runtime_error", "The lead's crash was not observed");
   await client.forget(crashing.id, "forget-crashed");
+  // She hands the work to a new Work of the same name while the removed one waits for its child: by name, she
+  // reaches the new one only.
+  const again = await client.create(team.cwd, "会崩的主 Work", "tree-again", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: reopened.id });
+  const reached = await team.registry!.invokeDockTool(reopened.id, { type: "interrupt", operationId: "interrupt-by-name", target: "会崩的主 Work" });
+  assert.ok(reached.type === "interrupt" && reached.instance.id === again.id);
   const letGoAgain = setTimeout(release, 5_000);
   await client.stop(reopened.id, "stop-her-again");
   const strandedGone = exited(strandedPid);

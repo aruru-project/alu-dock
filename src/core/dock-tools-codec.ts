@@ -108,12 +108,13 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     };
   }
   if (value.type === "unreported_stop") {
-    exactKeys(value, ["type", "reason", "error", "lastWords"], "Unreported stop");
+    exactKeys(value, ["type", "reason", "error", "lastWords", "readThrough"], "Unreported stop");
     return {
       type: "unreported_stop",
       reason: oneOf(value.reason, ["ended", "aborted", "failed"] as const, "Stop reason"),
       ...(value.error === undefined ? {} : { error: boundedString(value.error, MAX_CHILD_LAST_WORDS_CHARS, "Stop error") }),
       ...(value.lastWords === undefined ? {} : { lastWords: boundedString(value.lastWords, MAX_CHILD_LAST_WORDS_CHARS, "Last words") }),
+      ...(value.readThrough === undefined ? {} : { readThrough: nonNegativeInteger(value.readThrough, "Parent messages read") }),
     };
   }
   exactKeys(value, ["type", "operationId", "target", "message", "delivery", "done", "readThrough"], "Dock send request");
@@ -217,7 +218,12 @@ export function parseDockToolsResult(raw: unknown): void {
     if (value.error !== undefined && typeof value.error !== "string") throw new Error("Spawn error must be text");
     return;
   }
-  if (value.type === "interrupt" || value.type === "stop") { exactKeys(value, ["type", "instance"], "Worker control result"); validateObservedStatus(value.instance); return; }
+  if (value.type === "interrupt" || value.type === "stop") {
+    exactKeys(value, ["type", "instance", "settlesThrough"], "Worker control result");
+    validateObservedStatus(value.instance);
+    if (value.settlesThrough !== undefined) nonNegativeInteger(value.settlesThrough, "Messages taken back");
+    return;
+  }
   if (value.type === "system_catalog") {
     exactKeys(value, ["type", "result"], "Dock system catalog result");
     parseSystemCatalogResult(value.result); return;
