@@ -146,7 +146,7 @@ test("what a child Work owes its parent is settled by the numbers of the message
   // Taking the work back covers a message sent before it, even when that message's receipt comes back after
   // the interrupt's. A stop report while the interrupt is under way waits for it, and is dropped.
   const sending = fromParent("Q7");
-  const interrupting = messages.takeBack(lead.id, true);
+  const interrupting = messages.takeBack(lead.id);
   await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "aborted", readThrough: 5 });
   interrupting.answered(true);
   parentView.noteWork({ type: "interrupt", instance: leadStatus, settlesThrough: interrupting.settlesThrough });
@@ -156,7 +156,7 @@ test("what a child Work owes its parent is settled by the numbers of the message
   assert.equal(await leaves(), 2, "after taking the work back the parent hears of no stop");
 
   // A message sent after an interrupt began is not taken back by it, whichever receipt comes first.
-  const interruptingAgain = messages.takeBack(lead.id, true);
+  const interruptingAgain = messages.takeBack(lead.id);
   await fromParent("Q8");
   interruptingAgain.answered(true);
   parentView.noteWork({ type: "interrupt", instance: leadStatus, settlesThrough: interruptingAgain.settlesThrough });
@@ -171,11 +171,11 @@ test("what a child Work owes its parent is settled by the numbers of the message
 
   // A refused interrupt takes nothing back: a stop report that waited for it still reaches the parent, and a
   // result that came meanwhile still counts.
-  const refused = messages.takeBack(lead.id, true);
+  const refused = messages.takeBack(lead.id);
   await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended", readThrough: 9 });
   refused.answered(false);
   assert.equal(await stopNotices(), 5);
-  const refusedAgain = messages.takeBack(lead.id, true);
+  const refusedAgain = messages.takeBack(lead.id);
   await fromLead("A9", 9);
   refusedAgain.answered(false);
   assert.equal(await leaves(), 5, "its result still settles Q9");
@@ -188,6 +188,32 @@ test("what a child Work owes its parent is settled by the numbers of the message
   messages.childLeaving(lead);
   await answering;
   assert.equal(await stopNotices(), 5);
+
+  // The parent stops it and, in the same breath, hands it Q11, which reaches it before it starts stopping.
+  // The report of the turn the Stop took back is dropped; its leaving still settles Q11, although the Stop
+  // forgot its ledger before it answered.
+  const stopping = messages.takeBack(lead.id);
+  await fromParent("Q11");
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "aborted", readThrough: 10 });
+  messages.childLeaving(lead);
+  messages.forget([lead.id]);
+  stopping.answered(true);
+  parentView.noteWork({ type: "stop", instance: leadStatus, settlesThrough: stopping.settlesThrough });
+  assert.equal(await stopNotices(), 6);
+  assert.deepEqual(sessions.parent.workMessages.at(-1), { type: "child_stopped", from: { relation: "child", id: lead.id, name: "Lead" }, reason: "stopped", settlesThrough: 11 });
+  assert.equal(parentView.owes(lead.id), false);
+
+  // The parent reloads just as its child Work is stopping: the first notice does not reach it, the one when
+  // the child has stopped does.
+  const helper = new ManagedInstance({ id: "helper", name: "Helper", cwd: process.cwd(), session: new DelayedAgentWorkerConnection("helper"), parentId: parent.id });
+  works.set(helper.id, helper);
+  messages.childStarted(helper.id);
+  parentView.noteWork({ type: "spawn", taskStatus: "accepted", instance: { ...child, id: helper.id, name: "Helper" } });
+  sessions.parent.failWorkMessages = 1;
+  messages.childLeaving(helper);
+  messages.childLeaving(helper);
+  assert.equal(await stopNotices(), 7, "one notice reached the parent");
+  assert.equal(parentView.owes(helper.id), false);
 });
 
 // Card #674 review (Astra): the Host took the work back before the interrupt ran; when the interrupt was

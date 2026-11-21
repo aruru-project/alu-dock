@@ -34,15 +34,12 @@ interface Ledger {
   answered: number;
   /** The latest message the parent took back by an interrupt or stop that went through, or was told the child left with. */
   closed: number;
-  /**
-   * The parent interrupted it after sending messages through this number and took that work back: no stop is
-   * reported until a newer message reaches it. A message sent before the interrupt does not undo it, even
-   * if it arrives later.
-   */
-  interruptedAt?: number;
   /** The parent's interrupts and stops of it still under way. */
   takingBack: number;
-  /** Stop reports that came meanwhile, decided once those answer: dropped if the work was taken back. */
+  /**
+   * Stop reports that came meanwhile, decided once those answer: dropped if the work was taken back. Each
+   * keeps this ledger, which a Stop that went through may already have forgotten.
+   */
   held: Array<() => void>;
 }
 
@@ -99,7 +96,6 @@ export class WorkMessages {
     await this.deliver(child, { type: "message", from: { relation: "parent", id: source.id, name: source.displayName }, text: request.message, number });
     // It owes a reply to this message as well, even if it already finished its earlier work.
     ledger.handed = Math.max(ledger.handed, number);
-    if (ledger.interruptedAt !== undefined && number > ledger.interruptedAt) delete ledger.interruptedAt;
     return { type: "work_message", to: "child", target: this.forParent(child.snapshot()), acceptedAt: this.port.now(), number };
   }
 
@@ -108,24 +104,8 @@ export class WorkMessages {
    * parent, so the parent hears of it, for the parent messages that turn had read. It stays owed: a crash
    * later is reported too.
    */
-  async unreportedStop(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
-    const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
-    if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
-    const ledger = this.ledgers.get(source.id);
-    // While the parent is taking the work back, whether to tell it waits for that to answer.
-    if (ledger && ledger.takingBack > 0) {
-      ledger.held.push(() => { void this.unreportedStop(source, request).catch(() => { /* The parent's Worker is gone. */ }); });
-      return { type: "unreported_stop", notified: false };
-    }
-    // The parent interrupted it and took the work back; nothing is owed until the parent sends more.
-    if (ledger?.interruptedAt !== undefined) return { type: "unreported_stop", notified: false };
-    await this.deliver(parent, {
-      type: "child_stopped", from: this.childSender(source), reason: request.reason,
-      ...(request.error === undefined ? {} : { error: request.error }),
-      ...(request.lastWords === undefined ? {} : { lastWords: request.lastWords }),
-      settlesThrough: request.readThrough ?? ledger?.handed ?? 0,
-    });
-    return { type: "unreported_stop", notified: true };
+  unreportedStop(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
+    return this.reportUnreported(source, request, this.ledgers.get(source.id));
   }
 
   /**
@@ -134,7 +114,7 @@ export class WorkMessages {
    * too. Nothing changes until `answered` says whether the request went through; stop reports that come
    * meanwhile are decided then.
    */
-  takeBack(childId: string, interrupt: boolean): { settlesThrough: number; answered(succeeded: boolean): void } {
+  takeBack(childId: string): { settlesThrough: number; answered(succeeded: boolean): void } {
     const ledger = this.ledger(childId);
     const through = ledger.next - 1;
     ledger.takingBack += 1;
@@ -142,11 +122,7 @@ export class WorkMessages {
       settlesThrough: through,
       answered: (succeeded) => {
         ledger.takingBack -= 1;
-        if (succeeded) {
-          ledger.closed = Math.max(ledger.closed, through);
-          // A message sent after it and already delivered keeps the child at work, so it is not interrupted.
-          if (interrupt && ledger.handed <= through) ledger.interruptedAt = Math.max(ledger.interruptedAt ?? 0, through);
-        }
+        if (succeeded) ledger.closed = Math.max(ledger.closed, through);
         if (ledger.takingBack > 0) return;
         for (const report of ledger.held.splice(0)) report();
       },
@@ -156,9 +132,12 @@ export class WorkMessages {
   /** A child Work is stopping or crashed. Its parent hears of it once if a result was still owed, unless the parent is leaving too. */
   childLeaving(child: ManagedInstance): void {
     const ledger = this.ledgers.get(child.id);
-    if (!ledger) return;
+    if (ledger) this.leaving(child, ledger);
+  }
+
+  private leaving(child: ManagedInstance, ledger: Ledger): void {
     if (ledger.takingBack > 0) {
-      ledger.held.push(() => this.childLeaving(child));
+      ledger.held.push(() => this.leaving(child, ledger));
       return;
     }
     if (!owes(ledger)) return;
@@ -167,18 +146,40 @@ export class WorkMessages {
     if (!parent || parent.snapshot().lifecycle !== "active") return;
     const crashed = snapshot.lifecycle === "runtime_error";
     const lastWords = child.lastAgentReply();
-    // Decided when its turn comes: a final result queued before it may settle everything yet.
+    // Decided when its turn comes: a final result queued before it may settle everything yet. Nothing follows,
+    // so everything that reached it is settled once the notice arrives; one that failed to arrive is sent
+    // again when the child is seen leaving next, as it is for stopping and then stopped.
+    let through = ledger.handed;
     void this.deliver(parent, () => {
       if (!owes(ledger)) return undefined;
-      // Nothing follows: everything that reached it is settled by this notice, which is sent once.
-      ledger.closed = ledger.handed;
+      through = ledger.handed;
       return {
         type: "child_stopped", from: this.childSender(snapshot), reason: crashed ? "crashed" : "stopped",
         ...(crashed && snapshot.lastError ? { error: shortenLastWords(snapshot.lastError) } : {}),
         ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
-        settlesThrough: ledger.handed,
+        settlesThrough: through,
       };
-    }).catch(() => { /* The parent's Worker is gone as well. */ });
+    }, () => { ledger.closed = Math.max(ledger.closed, through); }).catch(() => { /* The parent's Worker is gone as well. */ });
+  }
+
+  private async reportUnreported(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>, ledger: Ledger | undefined): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
+    const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
+    if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
+    // While the parent is taking the work back, whether to tell it waits for that to answer.
+    if (ledger && ledger.takingBack > 0) {
+      ledger.held.push(() => { void this.reportUnreported(source, request, ledger).catch(() => { /* The parent's Worker is gone. */ }); });
+      return { type: "unreported_stop", notified: false };
+    }
+    const readThrough = request.readThrough ?? ledger?.handed ?? 0;
+    // The parent took back all that turn carried; a newer message that reaches it is owed a report again.
+    if (ledger && readThrough <= ledger.closed) return { type: "unreported_stop", notified: false };
+    await this.deliver(parent, {
+      type: "child_stopped", from: this.childSender(source), reason: request.reason,
+      ...(request.error === undefined ? {} : { error: request.error }),
+      ...(request.lastWords === undefined ? {} : { lastWords: request.lastWords }),
+      settlesThrough: readThrough,
+    });
+    return { type: "unreported_stop", notified: true };
   }
 
   /** What Main calls a child Work created here through Main, and its parent. */
