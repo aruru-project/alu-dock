@@ -31,7 +31,7 @@ import { cloneWorkerConfig } from "../core/worker-config.js";
 import { InstanceBusyError, InstanceNotActiveError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import type { CreateInstanceMutation } from "./instance-manager.js";
-import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
+import { controlledByOwnChild, InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { ProtocolValidationError } from "./protocol.js";
 import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
@@ -364,11 +364,12 @@ export class DockRegistry implements LocalDockToolsHostPort {
     parentActive: () => boolean,
     { assistant = false, child }: { assistant?: boolean; child?: DockChildStart } = {},
   ): Promise<ManagedInstance> {
-    if (input.createDirectory) await createMissingWorkingDirectory(input.cwd);
-    // Her own workspace loads no project resources, so opening her does not grant project trust.
+    const created = input.createDirectory === true && await createMissingWorkingDirectory(input.cwd);
+    // Her own workspace loads no project resources, so opening her does not grant project trust. A directory
+    // created for this Work holds nothing of its own to trust, so the Work starts trusted there (card #674).
     const resolution = assistant
       ? { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: false }
-      : await this.resolveCreationTrust(input, parent);
+      : created ? { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: true } : await this.resolveCreationTrust(input, parent);
     const cwd = resolution.canonicalCwd;
     const resolvedConfig = !assistant && this.systemService
       ? (await this.systemService.resolveCreation(cwd, input.workerConfig)).workerConfig
@@ -886,7 +887,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const mutations = this.dockToolsMutationPort;
     if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
     if (request.type === "speed") {
-      const target = request.target === undefined ? source : this.ownChild(source, request.target)?.snapshot() ?? this.observationService.resolveTarget(sourceInstanceId, request.target);
+      const target = request.target === undefined ? source : this.ownChild(source, request.target)?.snapshot() ?? this.controlTarget(source, request.target);
       if (!mutations.speed) throw new Error("这个 Host 尚不支持模型速度设置，请更新 Host。");
       return { type: "speed", setting: await mutations.speed(target.id, request.operationId, request.selection) };
     }
@@ -912,14 +913,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
         return { type: request.type, instance: this.workMessages.forParent(child.snapshot()), settlesThrough: takeBack.settlesThrough };
       }
       if (source.parentId !== undefined) throw new Error("You can interrupt or stop only your own child Works. Name one as dock_list shows it.");
-      const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
+      const target = this.controlTarget(source, request.target);
       return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
     }
     if (request.type !== "send") throw new Error("Unknown Dock tool request");
     return sendDockMessage(source, request, {
       send: (input) => mutations.send(input),
-      resolveTarget: (target) => this.observationService.resolveTarget(sourceInstanceId, target),
+      resolveTarget: (target) => this.controlTarget(source, target),
     });
+  }
+
+  /** A Work the source may control, by name or ID; one under its own child Work is that child Work's (card #674). */
+  private controlTarget(source: InstanceSnapshot, target: string): InstanceSnapshot {
+    const owned = controlledByOwnChild(source, this.list(), target);
+    if (owned !== undefined) throw new Error(owned);
+    return this.observationService.resolveTarget(source.id, target);
   }
 
   private ownChild(source: InstanceSnapshot, target: string | undefined): ManagedInstance | undefined {
@@ -1246,15 +1254,19 @@ const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
   },
 };
 
-async function createMissingWorkingDirectory(path: string): Promise<void> {
+/** True when it did not exist and was created here. */
+async function createMissingWorkingDirectory(path: string): Promise<boolean> {
   // Don't turn another platform's absolute path into a new relative directory here.
-  if (isPortableAbsoluteLocalPath(path) && !isNativeAbsoluteLocalPath(path)) return;
+  if (isPortableAbsoluteLocalPath(path) && !isNativeAbsoluteLocalPath(path)) return false;
   const lexical = resolve(path);
   try { await stat(lexical); }
   catch (error) {
     // Existing paths and all other stat failures keep the normal working-directory check.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") await mkdir(lexical, { recursive: true });
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    await mkdir(lexical, { recursive: true });
+    return true;
   }
+  return false;
 }
 
 async function canonicalDirectory(path: string): Promise<string> {

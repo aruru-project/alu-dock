@@ -175,7 +175,7 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 浏览初始位置可使用所选 `machine.list` 项的 `homePath`。跨文件系统导航使用同一项中 Host 权威提供的 `workspaceRoots`：客户端可以投影 `Computer` 或盘符选择页，但该虚拟位置不是 Host path；用户选择某个 root 后，再将该原生绝对路径传给 `workspace.list.v1`。Windows 客户端不得从 `C:\` 的 parent 猜测其他盘符，也不得自行扫描 A–Z；旧 Host 未提供 roots 时仍可保留绝对路径输入。
 
-浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会创建目录、读取文件正文、改变进程 cwd 或授予 project trust。已有目录用 `instance.create(cwd)`；收到 `workspace_not_found` 时可让用户明确选择创建该目录和 Work，再要求 `instance.create.directory.v1` 并发送 `instance.create {cwd,operationId,createDirectory:true}`。目标 Host 创建缺少的各级目录，再做普通创建校验；权限或连接错误不是目录缺失。
+浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会创建目录、读取文件正文、改变进程 cwd 或授予 project trust。已有目录用 `instance.create(cwd)`；收到 `workspace_not_found` 时可让用户明确选择创建该目录和 Work，再要求 `instance.create.directory.v1` 并发送 `instance.create {cwd,operationId,createDirectory:true}`。目标 Host 创建缺少的各级目录，再做普通创建校验；这次新建的目录直接以已信任打开，不会再收到信任挑战。权限或连接错误不是目录缺失。
 
 ## Adapter-owned Worker 创建配置
 

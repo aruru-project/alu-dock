@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -101,11 +101,14 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   const alu = await team.assistantWork();
 
   await client.prompt(alu.id, "把 sum.js 修好，找人独立审查一下。", "auto", "lead-start");
-  (await coordinator.request(0)).tools({ id: "spawn-lead", name: "dock_spawn", arguments: { name: "修 sum", task: "修好 sum.js，并找人独立审查。", model: { provider: "implementer", id: "fixture" } } });
+  // She hands it out in a directory that does not exist yet: Dock creates it, and the Work starts trusted there.
+  const newDirectory = join(team.cwd, "新目录", "修 sum");
+  (await coordinator.request(0)).tools({ id: "spawn-lead", name: "dock_spawn", arguments: { name: "修 sum", task: "修好 sum.js，并找人独立审查。", cwd: newDirectory, createDirectory: true, model: { provider: "implementer", id: "fixture" } } });
   const leadStarted = await implementer.request(0);
   (await coordinator.request(1)).text("派出去了。");
   await settled(client, alu.id);
   const lead = (await client.list()).find((work) => work.parentId === alu.id)!;
+  assert.equal(lead.cwd, await realpath(newDirectory));
   // It may start and manage child Works of its own, and reaches no other Work.
   const workTools = (names: string[]) => names.filter((name) => name.startsWith("dock_") && !name.startsWith("dock_attachment_")).sort();
   assert.deepEqual(workTools(leadStarted.toolNames), ["dock_inspect", "dock_interrupt", "dock_list", "dock_models", "dock_send", "dock_spawn", "dock_stop", "dock_wait"]);
@@ -133,11 +136,16 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   (await coordinator.request(2)).tools({ id: "check", name: "dock_send", arguments: { target: "修 sum", message: "PARENT_CHECK: 进度如何？" } });
   const checked = await implementer.request(4);
   assert.ok(given(checked).includes("Stopped waiting because a message reached you") && given(checked).includes("[来自父 Work「alu」]\\nPARENT_CHECK"));
-  (await coordinator.request(3)).text("问了。");
+  // She sees the reviewer under its lead, and is told to go through the lead to stop it.
+  (await coordinator.request(3)).tools({ id: "her-list", name: "dock_list", arguments: {} }, { id: "her-stop", name: "dock_stop", arguments: { target: "审查" } });
+  const overseen = await coordinator.request(4);
+  assert.ok(given(overseen).includes(`\\n  - 审查 id=${review.id} · active/`), `The reviewer is listed under its lead: ${given(overseen)}`);
+  assert.ok(given(overseen).includes("is a child Work of your child Work \\\"修 sum\\\", and only \\\"修 sum\\\" controls it"), "She is told whom to go through");
+  overseen.text("问了。");
   await settled(client, alu.id);
   checked.tools({ id: "progress", name: "dock_send", arguments: { message: "LEAD_PROGRESS: 审查还在进行。", done: false } });
-  assert.ok(given(await coordinator.request(4)).includes("[来自子 Work「修 sum」]\\nLEAD_PROGRESS"));
-  coordinator.requests[4]!.text("收到。");
+  assert.ok(given(await coordinator.request(5)).includes("[来自子 Work「修 sum」]\\nLEAD_PROGRESS"));
+  coordinator.requests[5]!.text("收到。");
   (await implementer.request(5)).text("继续等审查。");
   await settled(client, lead.id);
   await settled(client, alu.id);
@@ -155,7 +163,7 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   listed.text("继续等审查。");
   await settled(client, lead.id);
   await new Promise((resolve) => setTimeout(resolve, 500));
-  assert.equal(coordinator.requests.length, 5, "She is not told the lead stopped while its reviewer works");
+  assert.equal(coordinator.requests.length, 6, "She is not told the lead stopped while its reviewer works");
 
   // The reviewer's result wakes the lead. The result it owes her is still owed: ending this turn without
   // it tells her, quoting what it said last.
@@ -164,15 +172,15 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   const reviewed = await implementer.request(8);
   assert.ok(given(reviewed).includes("[来自子 Work「审查」· 已完成]\\nREVIEW_DONE"));
   reviewed.text("LEAD_LAST: 审查通过了。");
-  const told = await coordinator.request(5);
+  const told = await coordinator.request(6);
   assert.ok(given(told).includes("[子 Work「修 sum」异常停止]") && given(told).includes("> LEAD_LAST: 审查通过了。"), "She hears the lead stopped without its result");
   told.tools({ id: "ask-result", name: "dock_send", arguments: { target: "修 sum", message: "PARENT_ASK: 把结果发给我。" } });
-  (await coordinator.request(6)).text("等它的结果。");
+  (await coordinator.request(7)).text("等它的结果。");
   await settled(client, alu.id);
   const asking = await implementer.request(9);
   assert.ok(given(asking).includes("PARENT_ASK"));
   asking.tools({ id: "result", name: "dock_send", arguments: { message: "LEAD_RESULT: 修好并通过了独立审查。", done: true } });
-  const result = await coordinator.request(7);
+  const result = await coordinator.request(8);
   assert.ok(given(result).includes("[来自子 Work「修 sum」· 已完成]\\nLEAD_RESULT"));
   result.text("修好了，也审查过了。");
   await settled(client, alu.id);
@@ -181,7 +189,7 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   // Its result answered her latest message, so stopping it now owes her no notice.
   await client.stop(lead.id, "lead-stop");
   await new Promise((resolve) => setTimeout(resolve, 500));
-  assert.equal(coordinator.requests.length, 8, "Stopping a Work that gave her its result tells her nothing");
+  assert.equal(coordinator.requests.length, 9, "Stopping a Work that gave her its result tells her nothing");
 
   // A child Work she grants no dock_spawn, such as a reviewer, starts none. A lead's child Work gets no tool the lead was not given.
   const readOnly = await client.create(team.cwd, "只读审查", "read-only", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: alu.id, allowedTools: ["read"] });

@@ -75,7 +75,9 @@ ssh root@127.0.0.1 "NODE_DIR=$HOME/.nvm/versions/node/v24.22.1 bash $PWD/scripts
 ssh root@127.0.0.1 'docker exec -e STEPS=chat,remember,delegate,question,stop,remind,forget alu-trial-main node /opt/alu/scripts/trials/assistant-driver.mjs'
 #    其余步骤：handoff（换小窗口模型读长文，直到写出交接记录）、leave 和 back（中间在外面重启 Host）、
 #    create（替主人在 Laptop 上开 Work）、memories（十分钟没有新话之后看后台整理出了什么）、
-#    child（CHILD=名字的一部分，看某个子 Work 收到了什么、做了什么）、works、transcript。
+#    child（CHILD=名字的一部分，看她下面某个 Work 收到了什么、做了什么，孙子也找得到）、works、transcript；
+#    team（她派一个 Work，它再开三个子 Work 并行建文件、汇总回来）、teamstop（两个子 Work 各跑 sleep 900 时叫停，
+#    看进程是否都退出）、tree（按层级列出她下面的 Work）。
 #    MODEL=provider/id 和 THINKING 指定她的模型，默认 openai-sub/gpt-6-luna、low。
 ```
 

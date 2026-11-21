@@ -252,7 +252,8 @@ test("the resident assistant discovers another Work's child and reads its own co
   live.tools({ id: "list-all", name: "dock_list", arguments: { scope: "all" } });
   const all = await team.providers.chat.request(2);
   const allText = JSON.stringify(all.body.messages!.at(-1));
-  assert.ok(allText.includes(child.id) && allText.includes(`parent=${parent.id}`) && allText.includes("active/idle"));
+  // The child is listed under its parent.
+  assert.ok(allText.includes(`- Coordinator id=${parent.id}`) && allText.includes(`\\n  - Reviewer id=${child.id} · active/idle`), allText);
   all.tools({ id: "inspect-child", name: "dock_inspect", arguments: { target: "Reviewer", limit: 20 } });
   const inspected = await team.providers.chat.request(3);
   const raw = JSON.stringify(inspected.body.messages!.at(-1));
@@ -264,6 +265,12 @@ test("the resident assistant discovers another Work's child and reads its own co
     blocked.tools({ id: `blocked-${index}`, name, arguments: { target: child.id, ...(name === "dock_send" ? { message: "DO_NOT_DELIVER" } : {}) } });
     blocked = await team.providers.chat.request(4 + index);
   }
+  // A Work under her own child Work is that Work's to control, and Main says so (card #674).
+  const lead = await client.create(team.cwd, "Lead", "inspect-lead", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: alu.id });
+  await client.create(team.cwd, "Helper", "inspect-helper", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: lead.id });
+  blocked.tools({ id: "through-lead", name: "dock_stop", arguments: { target: "Helper" } });
+  blocked = await team.providers.chat.request(7);
+  assert.ok(JSON.stringify(blocked.body.messages!.at(-1)).includes('is a child Work of your child Work \\"Lead\\", and only \\"Lead\\" controls it'), JSON.stringify(blocked.body.messages!.at(-1)));
   const deniedResults = (await client.history(alu.id)).entries.flatMap((entry) => entry.content)
     .flatMap((block) => block.type === "tool_result" && block.toolCallId.startsWith("blocked-") ? [block.isError] : []);
   assert.deepEqual(deniedResults, [true, true, true]);

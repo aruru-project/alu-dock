@@ -70,6 +70,7 @@ export async function spawnDockWorker(
   const created = await port.create({
     type: "create", operationId: childCreationOperation(request.operationId),
     cwd: request.cwd ?? source.cwd, name: request.name,
+    ...(request.createDirectory ? { createDirectory: true } : {}),
     model: request.model ?? (residentAssistant ? undefined : source.executor.model),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     child: {

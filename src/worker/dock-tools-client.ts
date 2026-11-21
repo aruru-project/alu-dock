@@ -173,9 +173,21 @@ export function renderDockToolsResult(result: DockToolsResult, context: RenderCo
 export function renderObservationResult(result: ObservationResult): string {
   if (result.type === "list") {
     const scope = result.result.includesHistory ? "all catalog records" : "live";
-    const lines = [`[Dock Works · ${scope}]`];
-    for (const status of result.result.instances) lines.push(`- ${statusLine(status, result.result.observedAt)}`);
-    if (result.result.instances.length === 0) lines.push("- none");
+    const { instances, observedAt } = result.result;
+    // A child Work is listed under the Work that started it (card #674); one whose parent is not listed says whose it is.
+    const listed = new Set(instances.map((status) => status.id));
+    const nested = instances.some((status) => status.parentId !== undefined && listed.has(status.parentId));
+    const lines = [`[Dock Works · ${scope}${nested ? " · child Works are indented under the Work that started them, which alone controls them" : ""}]`];
+    const shown = new Set<string>();
+    const add = (status: ObservedInstanceStatus, depth: number): void => {
+      if (shown.has(status.id)) return;
+      shown.add(status.id);
+      lines.push(`${"  ".repeat(depth)}- ${statusLine(status, observedAt, depth > 0)}`);
+      for (const child of instances) if (child.parentId === status.id) add(child, depth + 1);
+    };
+    for (const status of instances) if (status.parentId === undefined || !listed.has(status.parentId)) add(status, 0);
+    for (const status of instances) add(status, 0);
+    if (instances.length === 0) lines.push("- none");
     if (result.result.truncated) lines.push(`[… ${result.result.total - result.result.instances.length} more omitted]`);
     return lines.join("\n");
   }
@@ -269,7 +281,7 @@ function renderMessage(message: ObservationMessage): string {
   return `${heading}\n${quoted}`;
 }
 
-function statusLine(status: ObservedInstanceStatus, observedAt: string): string {
+function statusLine(status: ObservedInstanceStatus, observedAt: string, underParent = false): string {
   const state = status.compacting ? "compacting" : status.execution;
   const duration = status.runStartedAt === undefined ? "" : ` · running ${elapsed(status.runStartedAt, observedAt)}`;
   const error = status.lastError === undefined ? "" : ` · error=${inline(status.lastError, 160)}`;
@@ -277,7 +289,7 @@ function statusLine(status: ObservedInstanceStatus, observedAt: string): string 
   const label = inline(modelLabel(status.model), MAX_MODEL_PROVIDER_CHARS + 1 + MAX_MODEL_ID_CHARS);
   const model = status.model === undefined ? ` · ${label}` : ` · model=${label}`;
   const thinking = status.thinkingLevel === undefined ? "" : ` · thinking=${status.thinkingLevel}`;
-  return `${identity(status)}${status.parentId ? ` · parent=${inline(status.parentId)}` : ""} · ${status.lifecycle}/${state}${duration}${model}${thinking} · cwd=${inline(status.cwd, 180)}${error}`;
+  return `${identity(status)}${status.parentId && !underParent ? ` · parent=${inline(status.parentId)}` : ""} · ${status.lifecycle}/${state}${duration}${model}${thinking} · cwd=${inline(status.cwd, 180)}${error}`;
 }
 
 function identity(status: ObservedInstanceStatus): string {

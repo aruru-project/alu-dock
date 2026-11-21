@@ -46,8 +46,9 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: value.type, operationId: boundedString(value.operationId, 128, "Operation ID"), target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Target") };
   }
   if (value.type === "spawn") {
-    exactKeys(value, ["type", "operationId", "task", "name", "cwd", "model", "thinkingLevel", "allowedTools", "withContext"], "Spawn request");
+    exactKeys(value, ["type", "operationId", "task", "name", "cwd", "createDirectory", "model", "thinkingLevel", "allowedTools", "withContext"], "Spawn request");
     if (value.withContext !== undefined && typeof value.withContext !== "boolean") throw new Error("withContext must be true or false");
+    if (value.createDirectory !== undefined && typeof value.createDirectory !== "boolean") throw new Error("createDirectory must be boolean");
     const cwd = value.cwd === undefined ? undefined : boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Working directory");
     if (cwd !== undefined && !isPortableAbsoluteLocalPath(cwd)) throw new Error("Working directory must be absolute");
     return {
@@ -55,6 +56,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       task: boundedString(value.task, MAX_DOCK_TOOL_MESSAGE_CHARS, "Task"),
       name: boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Worker name"),
       ...(cwd === undefined ? {} : { cwd }),
+      ...(value.createDirectory === true ? { createDirectory: true } : {}),
       ...(value.model === undefined ? {} : { model: parseModelRef(value.model, "Worker model", "invalid_request") }),
       ...(value.thinkingLevel === undefined ? {} : { thinkingLevel: oneOf(value.thinkingLevel, THINKING_LEVELS, "Thinking level") }),
       ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),

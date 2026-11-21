@@ -67,7 +67,7 @@ test("a delegated task reaches the child as the parent's words, never as an owne
 
 test("native collaboration wire validates tool selections, delivery and terminal controls", async () => {
   const { parseDockToolsRequest, parseDockToolsResult } = await import("../src/core/dock-tools-codec.js");
-  const spawn = { ...request, model: { provider: "local", id: "model" }, thinkingLevel: "low", allowedTools: ["read", "grep"] };
+  const spawn = { ...request, createDirectory: true, model: { provider: "local", id: "model" }, thinkingLevel: "low", allowedTools: ["read", "grep"] };
   assert.deepEqual(parseDockToolsRequest(JSON.parse(JSON.stringify(spawn))), spawn);
   assert.deepEqual(parseDockToolsRequest({ type: "send", operationId: "message", target: "child", message: "review", delivery: "followUp" }), { type: "send", operationId: "message", target: "child", message: "review", delivery: "followUp" });
   // A child's message names no target: the Host delivers it to the child's own parent, marked final or not.

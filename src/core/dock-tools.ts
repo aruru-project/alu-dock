@@ -87,7 +87,7 @@ export type DockToolsRequest =
   | { type: "machines" }
   | { type: "models" }
   | { type: "speed"; operationId: string; target?: string; selection?: ModelSpeedSelection | null }
-  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
+  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; createDirectory?: boolean; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }

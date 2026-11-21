@@ -312,7 +312,7 @@ Pi 现有机制已覆盖 Dock 自带扩展的需要；没有任何一个真实�
 
 ### 已知边界
 
-机器连接不协商 `DockToolsRequest` 的字段版本。跨机器转发工具请求时，旧端按它认识的字段严格解析；例如新版 SubHost 向旧 Main 发带 `createDirectory: true` 的创建请求，旧 Main 会关闭整条机器连接，不只是拒绝创建。要使用这类新字段，Main 和 SubHost 需要一起升级。
+机器连接不协商 `DockToolsRequest` 的字段版本。跨机器转发工具请求时，旧端按它认识的字段严格解析；例如新版 SubHost 向旧 Main 发带 `createDirectory: true` 的创建或 `dock_spawn` 请求，旧 Main 会关闭整条机器连接，不只是拒绝创建。要使用这类新字段，Main 和 SubHost 需要一起升级。
 
 代码入口：`src/core/dock-tools-codec.ts` 的 `parseDockToolsRequest`、`src/control/machine-transport.ts` 的 `parseMachineRecord`。
 

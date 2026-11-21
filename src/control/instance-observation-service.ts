@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveHumanTarget } from "../human-target.js";
 
 import { AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import type {
@@ -788,4 +789,17 @@ export function dockTargetVisible(source: InstanceSnapshot, target: InstanceSnap
   if (source.id === target.id) return false;
   if (source.parentId !== undefined) return target.parentId === source.id;
   return target.parentId === undefined || target.parentId === source.id;
+}
+
+/**
+ * The Work `target` names when it is none the source may control, but one under the source's own child Work,
+ * which alone controls it (card #674): what to tell the source instead of "not found".
+ */
+export function controlledByOwnChild(source: InstanceSnapshot, snapshots: readonly InstanceSnapshot[], target: string): string | undefined {
+  if (resolveHumanTarget(snapshots.filter((item) => dockTargetVisible(source, item)), target).kind !== "not_found") return undefined;
+  const own = new Map(snapshots.filter((item) => item.parentId === source.id).map((item) => [item.id, item]));
+  const below = resolveHumanTarget(snapshots.filter((item) => item.parentId !== undefined && own.has(item.parentId)), target);
+  if (below.kind !== "resolved") return undefined;
+  const owner = JSON.stringify(own.get(below.instance.parentId!)!.displayName);
+  return `${JSON.stringify(below.instance.displayName)} is a child Work of your child Work ${owner}, and only ${owner} controls it. Stop ${owner} to stop it together with its child Works, or send ${owner} a message to change its work.`;
 }
