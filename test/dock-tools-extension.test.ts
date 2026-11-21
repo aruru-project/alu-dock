@@ -392,7 +392,7 @@ test("a child Work that sends its final result alongside another call is not rep
     const bridge = new DockToolsBridge(true, {
       configure: async () => ({ enabled: true }),
       invoke: async (request) => { invoked.push(request); return { type: "unreported_stop", notified: true }; },
-    }, true);
+    }, "helper");
     bridge.runStarting("user");
     return { bridge, invoked };
   };

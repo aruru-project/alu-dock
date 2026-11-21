@@ -3410,7 +3410,9 @@ try {
     ]))
     const her = { ...otherWork, id: 'resident-assistant', displayName: 'alu', name: '早晨的对话', assistant: true, runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
     const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id, execution: 'running' }
-    extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
+    // Card #674: the Work she handed work to may hand parts of it to child Works of its own.
+    const grandchild = { ...otherWork, id: 'her-grandchild', displayName: '审查 Work', parentId: child.id, execution: 'running' }
+    extraListed = [her, grandchild, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
     const savedAssistant = assistantNative, savedTools = toolsNative, savedModelVisibility = modelVisibilityNative
     modelVisibilityNative = () => ({ models: [{ provider: 'openai', id: 'gpt-mini', name: 'Memory model', reasoning: true, speedTiers: ['standard', 'fast'] }], total: 1, truncated: false, hidden: [] })
     let finishName
@@ -3439,11 +3441,13 @@ try {
     const group = label => find(assistantView, item => item.type === 'section' && item.props['aria-label'] === label)
     const groupCount = root => text(find(root, item => item.props.class === 'alu-instance-group-title')).match(/\d+$/)?.[0]
     assert.ok(!!group('alu的子工作'), 'moving the assistant out of the ordinary list must keep a visible parent for her children')
-    assert.deepEqual(rowNames(group('alu的子工作')), ['她的子 Work'])
-    assert.equal(groupCount(group('alu的子工作')), '1')
+    assert.deepEqual(rowNames(group('alu的子工作')), ['她的子 Work', '审查 Work'], 'a child Work of her child Work sits under it')
+    assert.equal(groupCount(group('alu的子工作')), '2')
+    const rowOf = name => find(group('alu的子工作'), item => String(item.props.class ?? '').split(' ').includes('alu-instance-row') && text(item).includes(name))
+    assert.ok(String(rowOf('审查 Work').props.class).includes('is-grandchild') && !String(rowOf('她的子 Work').props.class).includes('is-grandchild'), 'it is set one step further in')
     assert.deepEqual(rowNames(group('当前工作')), ['Work', '普通子 Work', 'Work'], 'ordinary parent/child trees stay together, separate from the assistant children')
     assert.equal(groupCount(group('当前工作')), '3')
-    assert.deepEqual(rowNames().slice(0, 3), ['她的子 Work', 'Work', '普通子 Work'])
+    assert.deepEqual(rowNames().slice(0, 4), ['她的子 Work', '审查 Work', 'Work', '普通子 Work'])
     const drawer = find(assistantView, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
     assert.equal(!!find(drawer, item => item.type === 'button' && /查看状态$/u.test(item.props['aria-label'] ?? '')), false)
     assert.ok(!!find(group('当前工作'), item => item.props.class === 'alu-instance-state is-idle'))
@@ -3489,10 +3493,10 @@ try {
     assert.equal(assistantApp.selectedWork.executor.piSessionId, her.executor.piSessionId)
     assert.equal(text(find(assistantView, item => item.props.id === 'assistant-title')), '小满')
     assert.ok(!!button(assistantView, '打开小满的对话'), 'the identity navigation uses the same saved name')
-    assert.deepEqual(rowNames(group('小满的子工作')), ['她的子 Work'], 'the child group follows her global name, not a second identity')
+    assert.deepEqual(rowNames(group('小满的子工作')), ['她的子 Work', '审查 Work'], 'the child group follows her global name, not a second identity')
     child.execution = 'idle'; child.lastRun = 'succeeded'
     assistantApp.applyWorkSnapshot(atHost(child)); await settle()
-    assert.deepEqual(rowNames(group('小满的子工作')), ['她的子 Work'], 'a finished child stays with its parent until it is stopped')
+    assert.deepEqual(rowNames(group('小满的子工作')), ['她的子 Work', '审查 Work'], 'a finished child stays with its parent until it is stopped')
     assert.ok(!!find(assistantView, item => item.props.role === 'status' && text(item).includes('新的修改未保存')), 'the newer draft is not described as saved')
     await editName('小满')
     assert.equal(!!find(assistantView, item => item.props['aria-label'] === '有未保存的改动'), false, 'restoring the saved name clears its draft marker')
@@ -3616,12 +3620,13 @@ try {
     await click(assistantView, '打开命令中心')
     find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Stop Work')).props.onClick(); await settle()
     stopNative = args => {
-      extraListed = extraListed.filter(item => item.id !== child.id)
+      // As the Host does, its own child Work stops with it.
+      extraListed = extraListed.filter(item => item.id !== child.id && item.id !== grandchild.id)
       return { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...child, lifecycle: 'stopped', execution: 'unavailable', ownerHostEpoch: undefined }) }
     }
     await click(dialog('停止当前工作？'), '确认')
     assert.equal(calls.findLast(call => call.command === 'stop_work').args.instanceId, child.id)
-    assert.equal(rowNames().includes('她的子 Work'), false)
+    assert.equal(rowNames().includes('她的子 Work') || rowNames().includes('审查 Work'), false)
     assert.ok(rowNames(group('当前工作')).includes('普通子 Work'), 'stopping her child leaves the ordinary tree alone')
     await click(assistantView, '打开小满的对话')
     assert.equal(assistantApp.selectedWorkId, her.id)

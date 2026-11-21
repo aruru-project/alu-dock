@@ -3,11 +3,19 @@ import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from ".
 import type { InstanceSnapshot } from "../core/instance-dto.js";
 import { systemToolOperation } from "./system-tools.js";
 
-/** A child Work talks only to its parent: it may message it, and its Worker reports a turn that ended without doing so. */
-export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">, request: DockToolsRequest): void {
-  if (source.parentId !== undefined && request.type !== "send" && request.type !== "unreported_stop") {
-    throw new Error("A child Work can only message the Work that created it. Use dock_send to ask it something or to give it your result.");
-  }
+/** What a lead child Work asks about its own child Works (card #674), besides messaging its parent. */
+const LEAD_REQUESTS: ReadonlySet<DockToolsRequest["type"]> = new Set(["spawn", "models", "interrupt", "stop", "list", "inspect"]);
+
+/**
+ * A child Work talks only to its parent: it may message it, and its Worker reports a turn that ended without
+ * doing so. A lead also starts and manages child Works of its own, and reaches no other Work.
+ */
+export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">, request: DockToolsRequest, lead: boolean): void {
+  if (source.parentId === undefined || request.type === "send" || request.type === "unreported_stop") return;
+  if (lead && LEAD_REQUESTS.has(request.type)) return;
+  throw new Error(lead
+    ? "A child Work can only message the Work that created it and start, message, check, interrupt or stop its own child Works."
+    : "A child Work can only message the Work that created it. Use dock_send to ask it something or to give it your result.");
 }
 
 /** The creation of the child Work a spawn request makes; a SubHost finds the child it created for Main by it. */

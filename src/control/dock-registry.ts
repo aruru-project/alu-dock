@@ -14,6 +14,9 @@ import { AgentModelNotFoundError, AgentStartupTimeoutError, AgentUnavailableBefo
 import { ResourceContentError } from "../core/resource-content.js";
 import type { ObservationDeliverySink } from "../core/instance-observation.js";
 import {
+  DOCK_REPORT_TOOL,
+  DOCK_SPAWN_TOOL,
+  type DockChildSelection,
   type DockChildStart,
   type DockToolsHostPort,
   type DockToolsMutationPort,
@@ -32,7 +35,7 @@ import { InstanceObservationService, observationStatus } from "./instance-observ
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { ProtocolValidationError } from "./protocol.js";
 import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
-import { inheritedModelSpeed, type ModelSpeedSelection } from "../core/model-speed.js";
+import { inheritedModelSpeed, type ModelSpeedSelection, type ModelSpeedTier } from "../core/model-speed.js";
 import type { SettingDto, SettingUpdate } from "../core/config-projection.js";
 import { WorkMessages } from "./work-messages.js";
 import {
@@ -161,6 +164,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly childRetirements = new WeakMap<ManagedInstance, Promise<void>>();
   /** Children whose Worker is still starting, per parent runtime. */
   private readonly childStarts = new WeakMap<ManagedInstance, Set<Promise<unknown>>>();
+  /** What each child Work was started with: its role and tool ceiling. A child is never reopened. */
+  private readonly childGrants = new WeakMap<ManagedInstance, DockChildStart>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, Promise<unknown>>();
@@ -310,13 +315,14 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     const parent = input.child === undefined ? undefined : this.get(input.child.parentId);
     const parentActive = () => parent === undefined || (this.instances.get(parent.id) === parent
-      && parent.parentId === undefined && parent.lifecycle === "active");
-    if (!parentActive()) throw new Error("A child Work needs an active top-level Work on this machine as its parent.");
+      && this.mayStartChildren(parent) && parent.lifecycle === "active");
+    if (!parentActive()) throw new Error("A child Work needs an active Work on this machine that may start child Works as its parent.");
     if (parent === undefined) return this.startNew(input, key, undefined, parentActive);
+    const child = this.childStart(parent, input.child!);
     // A parent that starts stopping from here on waits for this child, which then stops itself.
     const starting = this.childStarts.get(parent) ?? new Set<Promise<unknown>>();
     this.childStarts.set(parent, starting);
-    const creation = this.startNew(input, key, parent, parentActive);
+    const creation = this.startNew(input, key, parent, parentActive, { child });
     starting.add(creation);
     try {
       return await creation;
@@ -325,12 +331,33 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
   }
 
+  /**
+   * Card #674: the Works that do the work themselves count, and they get one level of helpers. A top-level
+   * Work may start child Works; so may a lead, the child of a Work that only coordinates.
+   */
+  private mayStartChildren(instance: ManagedInstance): boolean {
+    return instance.parentId === undefined || this.childGrants.get(instance)?.role === "lead";
+  }
+
+  /** The new child's tools stay within its parent's; it may hand work out only below a Work that does none itself. */
+  private childStart(parent: ManagedInstance, selection: DockChildSelection): DockChildStart {
+    const ceiling = this.childGrants.get(parent)?.allowedTools;
+    let allowedTools = selection.allowedTools;
+    if (ceiling !== undefined) {
+      if (allowedTools === undefined) allowedTools = [...ceiling];
+      const extra = allowedTools.filter((name) => !ceiling.includes(name) && name !== DOCK_REPORT_TOOL);
+      if (extra.length > 0) throw new Error(`A child Work cannot use tools you were not given: ${extra.join(", ")}.`);
+    }
+    const lead = !parent.handsOn && (allowedTools === undefined || allowedTools.includes(DOCK_SPAWN_TOOL));
+    return { parentId: parent.id, ...(allowedTools === undefined ? {} : { allowedTools }), role: lead ? "lead" : "helper" };
+  }
+
   private async startNew(
     input: CreateRegistryInstanceInput,
     key: string | undefined,
     parent: ManagedInstance | undefined,
     parentActive: () => boolean,
-    assistant = false,
+    { assistant = false, child }: { assistant?: boolean; child?: DockChildStart } = {},
   ): Promise<ManagedInstance> {
     if (input.createDirectory) await createMissingWorkingDirectory(input.cwd);
     // Her own workspace loads no project resources, so opening her does not grant project trust.
@@ -351,7 +378,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.child === undefined ? {} : { child: { parentId: input.child.parentId, ...(input.child.allowedTools === undefined ? {} : { allowedTools: input.child.allowedTools }) } }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(child === undefined ? {} : { child }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -375,40 +402,68 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     instance.markCatalogCommitted();
     this.instances.set(id, instance);
+    if (child !== undefined) this.childGrants.set(instance, child);
     this.trackInstanceForObservation(instance);
-    if (input.child !== undefined) this.workMessages.childStarted(id);
+    if (child !== undefined) this.workMessages.childStarted(id);
     if (!parentActive()) {
       // The parent stopped while this child was starting; it leaves with its parent.
       await this.stop(id, randomUUID()).catch(() => {});
       throw new Error("The parent Work stopped before its child could start.");
     }
     // Creation may have taken time; use the parent's current choice before the first task is sent.
-    if (parent) await this.changeModelSpeed(parent.id, async () => {
-      if (instance.modelSpeed === undefined && inheritedModelSpeed(parent.modelSpeed) !== "standard") {
-        await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), inheritedModelSpeed(parent.modelSpeed));
+    if (parent) await this.changeModelSpeed(this.treeRoot(parent), async () => {
+      const tier = this.speedPassedDown(parent);
+      if (instance.modelSpeed === undefined && tier !== "standard") {
+        await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
       }
     });
     return instance;
   }
 
-  /** Change one Work's setting; only children still following it take a group speed change. */
+  /** Change one Work's setting; only Works below it still following it take a group speed change. */
   async updateSetting(instanceId: string, update: SettingUpdate, operationId: string): Promise<SettingDto> {
     const instance = this.get(instanceId);
     if (update.key !== "modelSpeed") return instance.updateSetting(update, operationId);
-    return this.changeModelSpeed(instance.parentId ?? instance.id, async () => {
+    return this.changeModelSpeed(this.treeRoot(instance), async () => {
       const current = this.get(instanceId);
       const parent = current.parentId === undefined ? undefined : this.instances.get(current.parentId);
-      const setting = await current.updateSetting(update, operationId, inheritedModelSpeed(parent?.modelSpeed));
-      const tier = inheritedModelSpeed(current.modelSpeed);
+      const setting = await current.updateSetting(update, operationId, parent === undefined ? "standard" : this.speedPassedDown(parent));
       let failure: unknown;
-      for (const child of this.instances.values()) {
-        if (child.parentId !== current.id || child.modelSpeed !== undefined || child.lifecycle !== "active") continue;
-        try { await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier); }
-        catch (error) { if (child.lifecycle === "active") failure ??= error; }
+      // A child still following passes the change on to its own children still following it, so all of them take one tier.
+      const tier = this.speedPassedDown(current);
+      const following = (above: ManagedInstance) => [...this.instances.values()]
+        .filter((child) => child.parentId === above.id && child.modelSpeed === undefined && child.lifecycle === "active");
+      for (let next = following(current); next.length > 0;) {
+        const level = next;
+        next = [];
+        for (const child of level) {
+          try {
+            await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
+            next.push(...following(child));
+          } catch (error) { if (child.lifecycle === "active") failure ??= error; }
+        }
       }
       if (failure) throw failure;
       return setting;
     });
+  }
+
+  /** The top of a Work's tree: speed changes in one tree are ordered, other trees are not held up. */
+  private treeRoot(instance: ManagedInstance): string {
+    let current = instance;
+    for (let parent = this.parentOf(current); parent !== undefined; parent = this.parentOf(current)) current = parent;
+    return current.id;
+  }
+
+  /** The speed a Work's children follow: its own choice for its children, or what it follows itself. */
+  private speedPassedDown(instance: ManagedInstance): ModelSpeedTier {
+    if (instance.modelSpeed !== undefined) return inheritedModelSpeed(instance.modelSpeed);
+    const parent = this.parentOf(instance);
+    return parent === undefined ? "standard" : this.speedPassedDown(parent);
+  }
+
+  private parentOf(instance: ManagedInstance): ManagedInstance | undefined {
+    return instance.parentId === undefined ? undefined : this.instances.get(instance.parentId);
   }
 
   /** Keep parent/child choices ordered, without locking sessions or unrelated Work trees. */
@@ -732,7 +787,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (!this.assistantRecoveryEnabled) return;
     const record = this.catalog.current().instances.find((work) => work.assistant);
     if (!record) {
-      await this.startNew({ operationId: randomUUID(), cwd: workspace }, undefined, undefined, () => true, true);
+      await this.startNew({ operationId: randomUUID(), cwd: workspace }, undefined, undefined, () => true, { assistant: true });
       return;
     }
     if (record.lifecycle === "active") return;
@@ -812,7 +867,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
     this.assertDockToolsSource(sourceInstanceId);
     const source = this.getSnapshot(sourceInstanceId);
-    assertChildMayRequest(source, request);
+    assertChildMayRequest(source, request, this.mayStartChildren(this.get(sourceInstanceId)));
     if (request.type === "unreported_stop") return this.workMessages.unreportedStop(source, request);
     const child = request.type === "send" || request.type === "interrupt" || request.type === "stop" ? this.ownChild(source, request.target) : undefined;
     if (request.type === "send" && (source.parentId !== undefined || child !== undefined)) return this.workMessages.send(source, request, child);
@@ -844,6 +899,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
         await mutations[request.type](child.id, request.operationId);
         return { type: request.type, instance: this.workMessages.forParent(child.snapshot()) };
       }
+      if (source.parentId !== undefined) throw new Error("You can interrupt or stop only your own child Works. Name one as dock_list shows it.");
       const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
       return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
     }

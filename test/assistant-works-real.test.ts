@@ -91,6 +91,105 @@ test("the assistant hands work to a child Work, answers her owner while it works
   await waitFor(async () => !(await client.list()).some((work) => work.id === child.id), "Her child Work outlived her");
 });
 
+// Card #674: she does no work herself, so the child Work she hands work to is the one that does it. It
+// used to be a helper that could hand nothing out: every implementer and reviewer had to go through her.
+// It now hands parts out itself, and they report to it; she hears from it alone.
+test("the assistant's child Work hands parts of its task to child Works of its own, which report to it, not to her", { timeout: 90_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "implementer", "reviewer"], { prefix: "alu-assistant-lead-", assistant: true });
+  const { coordinator, implementer, reviewer } = team.providers;
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+
+  await client.prompt(alu.id, "把 sum.js 修好，找人独立审查一下。", "auto", "lead-start");
+  (await coordinator.request(0)).tools({ id: "spawn-lead", name: "dock_spawn", arguments: { name: "修 sum", task: "修好 sum.js，并找人独立审查。", model: { provider: "implementer", id: "fixture" } } });
+  const leadStarted = await implementer.request(0);
+  (await coordinator.request(1)).text("派出去了。");
+  await settled(client, alu.id);
+  const lead = (await client.list()).find((work) => work.parentId === alu.id)!;
+  // It may start and manage child Works of its own, and reaches no other Work.
+  const workTools = (names: string[]) => names.filter((name) => name.startsWith("dock_") && !name.startsWith("dock_attachment_")).sort();
+  assert.deepEqual(workTools(leadStarted.toolNames), ["dock_inspect", "dock_interrupt", "dock_list", "dock_models", "dock_send", "dock_spawn", "dock_stop", "dock_wait"]);
+
+  leadStarted.tools({ id: "spawn-reviewer", name: "dock_spawn", arguments: { name: "审查", task: "独立审查 sum.js。", model: { provider: "reviewer", id: "fixture" } } });
+  const reviewStarted = await reviewer.request(0);
+  const review = (await client.list()).find((work) => work.parentId === lead.id)!;
+  // Under a Work that does the work itself it is a helper: with every tool, it still starts no Work.
+  assert.deepEqual(workTools(reviewStarted.toolNames), ["dock_send"]);
+  await assert.rejects(team.registry!.invokeDockTool(review.id, { type: "spawn", operationId: "deeper", name: "更深", task: "再派一层。" }));
+  (await implementer.request(1)).tools({ id: "wait-review", name: "dock_wait", arguments: {} });
+
+  // The reviewer's question ends the lead's wait; the lead answers it and waits again.
+  reviewStarted.tools({ id: "ask", name: "dock_send", arguments: { message: "REVIEW_QUESTION: 测试也要看吗？", done: false } });
+  const asked = await implementer.request(2);
+  assert.ok(given(asked).includes("REVIEW_QUESTION"), "The reviewer's question comes back as the wait's result");
+  asked.tools({ id: "answer", name: "dock_send", arguments: { target: "审查", message: "LEAD_ANSWER: 只看 sum.js。" } });
+  (await implementer.request(3)).tools({ id: "wait-again", name: "dock_wait", arguments: {} });
+  (await reviewer.request(1)).text("等回答。");
+  const answered = await reviewer.request(2);
+  assert.ok(given(answered).includes("[来自父 Work「修 sum」]\\nLEAD_ANSWER"), "The reviewer hears from the lead, its parent");
+
+  // Her message ends the lead's wait as well, instead of waiting until the wait is over.
+  await client.prompt(alu.id, "问问它进度。", "auto", "lead-check");
+  (await coordinator.request(2)).tools({ id: "check", name: "dock_send", arguments: { target: "修 sum", message: "PARENT_CHECK: 进度如何？" } });
+  const checked = await implementer.request(4);
+  assert.ok(given(checked).includes("Stopped waiting because a message reached you") && given(checked).includes("[来自父 Work「alu」]\\nPARENT_CHECK"));
+  (await coordinator.request(3)).text("问了。");
+  await settled(client, alu.id);
+  checked.tools({ id: "progress", name: "dock_send", arguments: { message: "LEAD_PROGRESS: 审查还在进行。", done: false } });
+  assert.ok(given(await coordinator.request(4)).includes("[来自子 Work「修 sum」]\\nLEAD_PROGRESS"));
+  coordinator.requests[4]!.text("收到。");
+  (await implementer.request(5)).text("继续等审查。");
+  await settled(client, lead.id);
+  await settled(client, alu.id);
+
+  // The reviewer's note wakes the lead: what its own child Works send is part of the work it owes her.
+  // It sees its own child Works only. Its last call does not reach her, and it ends its turn while its
+  // reviewer still works: that is no stop without a result.
+  answered.tools({ id: "review-note", name: "dock_send", arguments: { message: "REVIEW_NOTE: 还在核对边界。", done: false } });
+  const noted = await implementer.request(6);
+  assert.ok(given(noted).includes("[来自子 Work「审查」]\\nREVIEW_NOTE"));
+  noted.tools({ id: "list", name: "dock_list", arguments: {} });
+  const listed = await implementer.request(7);
+  const listText = JSON.stringify(listed.body.messages?.at(-1));
+  assert.ok(listText.includes(review.id) && !listText.includes(alu.id), `The lead lists its own child Work only: ${listText}`);
+  listed.text("继续等审查。");
+  await settled(client, lead.id);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(coordinator.requests.length, 5, "She is not told the lead stopped while its reviewer works");
+
+  // The reviewer's result wakes the lead. The result it owes her is still owed: ending this turn without
+  // it tells her, quoting what it said last.
+  const reviewing = await reviewer.request(3);
+  reviewing.tools({ id: "review-done", name: "dock_send", arguments: { message: "REVIEW_DONE: 没问题。", done: true } });
+  const reviewed = await implementer.request(8);
+  assert.ok(given(reviewed).includes("[来自子 Work「审查」· 已完成]\\nREVIEW_DONE"));
+  reviewed.text("LEAD_LAST: 审查通过了。");
+  const told = await coordinator.request(5);
+  assert.ok(given(told).includes("[子 Work「修 sum」异常停止]") && given(told).includes("> LEAD_LAST: 审查通过了。"), "She hears the lead stopped without its result");
+  told.tools({ id: "ask-result", name: "dock_send", arguments: { target: "修 sum", message: "PARENT_ASK: 把结果发给我。" } });
+  (await coordinator.request(6)).text("等它的结果。");
+  await settled(client, alu.id);
+  const asking = await implementer.request(9);
+  assert.ok(given(asking).includes("PARENT_ASK"));
+  asking.tools({ id: "result", name: "dock_send", arguments: { message: "LEAD_RESULT: 修好并通过了独立审查。", done: true } });
+  const result = await coordinator.request(7);
+  assert.ok(given(result).includes("[来自子 Work「修 sum」· 已完成]\\nLEAD_RESULT"));
+  result.text("修好了，也审查过了。");
+  await settled(client, alu.id);
+  // What the reviewer said went to the lead only.
+  assert.ok(!coordinator.requests.some((request) => ["REVIEW_QUESTION", "REVIEW_NOTE", "REVIEW_DONE"].some((words) => given(request).includes(words))), "The reviewer's words never reach her");
+
+  // A child Work she grants no dock_spawn, such as a reviewer, starts none. A lead's child Work gets no tool the lead was not given.
+  const readOnly = await client.create(team.cwd, "只读审查", "read-only", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: alu.id, allowedTools: ["read"] });
+  await assert.rejects(team.registry!.invokeDockTool(readOnly.id, { type: "spawn", operationId: "read-only-spawn", name: "x", task: "x" }));
+  const limited = await client.create(team.cwd, "只读主 Work", "limited-lead", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: alu.id, allowedTools: ["read", "dock_spawn"] });
+  await assert.rejects(client.create(team.cwd, "要 shell", "wants-bash", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: limited.id, allowedTools: ["read", "bash"] }), /bash/u);
+
+  // Stopping her stops the whole tree below her.
+  await client.stop(alu.id, "alu-stop");
+  await waitFor(async () => !(await client.list()).some((work) => [lead.id, review.id, readOnly.id, limited.id].includes(work.id)), "A Work below her outlived her");
+});
+
 test("the owner's steer and follow-up during a reply each renew the Work wake budget", { timeout: 90_000 }, async context => {
   const team = await startNativeTeam(context, ["coordinator", "implementer"], { prefix: "alu-owner-wake-", assistant: true });
   const client = await team.startHost();

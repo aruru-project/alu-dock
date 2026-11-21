@@ -235,6 +235,8 @@ export interface ManagedInstanceOptions {
   modelSpeed?: ModelSpeedSelection;
   /** Opened as the personal assistant (card #295); fixed at creation. */
   assistant?: true;
+  /** Declared by the kind of Agent; default true. See `handsOn`. */
+  handsOn?: boolean;
 }
 
 interface AssistantOutcome {
@@ -406,6 +408,12 @@ export class ManagedInstance {
   get modelSpeed(): ModelSpeedSelection | undefined { return this.modelSpeedValue && { ...this.modelSpeedValue }; }
   readonly parentId: string | undefined;
   readonly assistant: boolean;
+  /**
+   * Its Agent does the work itself, editing files and running commands, as Pi does. A child Work under
+   * it is its helper and starts none of its own; under an Agent that only coordinates, such as the
+   * resident assistant, a child Work does the work and may hand parts of it out (card #674).
+   */
+  readonly handsOn: boolean;
   // Retained only for this Work and its canonical cwd, never written to Pi's directory trust store.
   private projectTrustedValue: boolean | undefined;
   private readonly deliverables = new InstanceDeliverables();
@@ -479,6 +487,7 @@ export class ManagedInstance {
     this.parentId = options.parentId;
     this.modelSpeedValue = options.modelSpeed && { ...options.modelSpeed };
     this.assistant = options.assistant === true;
+    this.handsOn = options.handsOn ?? true;
     this.projectTrustedValue = options.projectTrusted;
     this.workerConfigValue = options.workerConfig === undefined
       ? undefined

@@ -89,7 +89,10 @@ export type DockToolsRequest =
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
   /** `assistant` is only accepted from older callers so they receive a clear refusal: Main already keeps one assistant. */
   | { type: "create"; operationId: string; cwd: string; createDirectory?: boolean; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
-  /** A child Work omits target: it can only message its parent, and `done` says whether this is its final result. */
+  /**
+   * A child Work omits target to message its parent, and `done` says whether this is its final result.
+   * A lead child Work names one of its own child Works with target.
+   */
   | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
   /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */
   | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string };
@@ -100,7 +103,19 @@ export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
   child?: DockChildSelection;
 };
 
-/** A child belongs to a top-level Work on the same Host; its tools never exceed what the parent named. */
+/** The Dock tool that starts a child Work. A child Work granted it may become a lead (card #674). */
+export const DOCK_SPAWN_TOOL = "dock_spawn";
+/** Every child Work can report to its parent with this tool, whatever else its parent allowed. */
+export const DOCK_REPORT_TOOL = "dock_send";
+
+/**
+ * What a child Work may do besides reporting to its parent (card #674). A lead starts child Works of its
+ * own: no Work above it does the work itself, as when the resident assistant hands work out. A helper
+ * works for a Work that does, and starts none.
+ */
+export type ChildRole = "helper" | "lead";
+
+/** A child belongs to a Work on the same Host that may start child Works; its tools never exceed what the parent named. */
 export interface DockChildSelection {
   parentId: string;
   allowedTools?: string[];
@@ -108,8 +123,11 @@ export interface DockChildSelection {
   withParentContext?: boolean;
 }
 
-/** What starts a child's Worker; the Registry has already turned `withParentContext` into its session file. */
-export type DockChildStart = Omit<DockChildSelection, "withParentContext">;
+/**
+ * What starts a child's Worker; the Registry has already turned `withParentContext` into its session file,
+ * applied its parent's tool ceiling to `allowedTools` and decided its role.
+ */
+export type DockChildStart = Omit<DockChildSelection, "withParentContext"> & { role: ChildRole };
 
 export type DockToolsResult =
   | ObservationResult

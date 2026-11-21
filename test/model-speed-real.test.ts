@@ -143,6 +143,25 @@ test("Work speed can be shared with children, overridden individually and extend
   assert.equal(tier(hers), "ultrafast", "The assistant uses the same speed path without a Pi extension");
   hers.text("你好。");
   await idle(assistant.id);
+  // Card #674: her child Work may start child Works of its own. Shared speed passes through it to them.
+  await client.updateSetting(assistant.id, { key: "modelSpeed", value: { tier: "fast", scope: "all" } });
+  const lead = await team.registry!.invokeDockTool(assistant.id, { type: "spawn", operationId: "her-lead", task: "Report done.", name: "lead", model: { provider: "worker", id: "fixture" } });
+  assert.ok(lead.type === "spawn");
+  const leadFirst = await worker.request(7);
+  assert.equal(tier(leadFirst), "priority");
+  const helper = await team.registry!.invokeDockTool(lead.instance.id, { type: "spawn", operationId: "lead-helper", task: "Read the memo.", name: "helper", model: { provider: "worker", id: "fixture" } });
+  assert.ok(helper.type === "spawn");
+  const helperFirst = await worker.request(8);
+  assert.equal(tier(helperFirst), "priority", "A child of her child Work follows her shared speed through it");
+  await client.updateSetting(assistant.id, { key: "modelSpeed", value: { tier: "ultrafast", scope: "all" } });
+  helperFirst.tools({ id: "helper-read", name: "read", arguments: { path: memo } });
+  const helperNext = await worker.request(9);
+  assert.equal(tier(helperNext), "ultrafast", "Her change reaches it through its parent, which still follows her");
+  helperNext.tools({ id: "helper-done", name: "dock_send", arguments: { message: "Memo read.", done: true } });
+  leadFirst.text("Waiting for the helper.");
+  (await worker.request(10)).tools({ id: "lead-done", name: "dock_send", arguments: { message: "Done.", done: true } });
+  (await coordinator.request(3)).text("收到。");
+  await idle(assistant.id);
   assert.equal((await client.assistantSettings()).extractionSpeed, "fast", "Background memory has a separate selection");
   for (const original of [parent, assistant]) {
     const current = await client.status(original.id);

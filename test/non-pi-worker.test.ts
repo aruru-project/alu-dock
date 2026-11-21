@@ -26,6 +26,7 @@ test("a Work whose Agent is not Pi answers a message, opens with nothing of Pi's
     const registry = new DockRegistry(({ child: _child, sessionFile, ...input }) => createWorkerInstance({
       ...input,
       executor: { kind: "plain", version: "1" },
+      handsOn: true,
       workerEnvironment: isolatedProcessEnvironment(root),
       launch: (environment) => ({
         entry: PLAIN_WORKER,

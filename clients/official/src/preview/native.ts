@@ -101,7 +101,7 @@ function sampleData() {
         ],
       },
     },
-    total: 5,
+    total: 7,
     hiddenStopped: 1,
     works: [
       previewWork('Alu Dock Official Client', '/workshop/alu_dock/clients/official', 'running', 'active', 'main'),
@@ -109,6 +109,9 @@ function sampleData() {
       previewWork('Alu Workstation', '/workshop/alu_workstation', 'unavailable', 'host_lost', undefined, null),
       previewWork('alu_dock', '/workshop/alu_dock', 'idle', 'active', 'main', { provider: 'openrouter', id: 'anthropic/claude-opus-4.1-20250805-thinking-preview' }),
       assistantWork,
+      // Card #674: the Work she hands work to may hand part of it to a child Work of its own.
+      { ...previewWork('修好 sum.js', '/workshop/alu_dock', 'running', 'active', 'main'), parentId: assistantWork.id },
+      { ...previewWork('独立审查 sum.js', '/workshop/alu_dock', 'idle', 'active', 'main', { provider: 'anthropic', id: 'claude-sonnet-4-6' }), parentId: 'preview-修好 sum.js' },
     ],
   }
 

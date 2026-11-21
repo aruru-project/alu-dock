@@ -62,7 +62,9 @@ export class MainMachineDockToolsAuthority {
     const source = snapshots.find((item) => item.id === sourceMainId);
     if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
     if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot act on other work. Open active work and try again.");
-    assertChildMayRequest(source, request);
+    // A child Work's own Host answers everything it asks; Main hears only from a machine with an older
+    // Alu Dock, whose child Works are all helpers.
+    assertChildMayRequest(source, request, false);
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
       const result = await this.observation.observe(sourceMainId, request);

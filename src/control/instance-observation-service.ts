@@ -780,9 +780,12 @@ function cloneCursorState(state: ObservationCursorState): ObservationCursorState
   return { ...state, pending: state.pending.map((message) => ({ ...message })), entries: [...state.entries] };
 }
 
-/** Native children communicate through their parent; top-level peers stay unrestricted. */
+/**
+ * Native children communicate through their parent and see only their own child Works, which only a lead
+ * has (card #674); top-level peers stay unrestricted.
+ */
 export function dockTargetVisible(source: InstanceSnapshot, target: InstanceSnapshot): boolean {
   if (source.id === target.id) return false;
-  if (source.parentId !== undefined) return target.id === source.parentId;
+  if (source.parentId !== undefined) return target.parentId === source.id;
   return target.parentId === undefined || target.parentId === source.id;
 }

@@ -43,7 +43,6 @@ export class WorkMessages {
 
   /** The source's own child Work that `target` names, by ID, Main's ID, key, name or ID prefix. */
   ownChild(source: InstanceSnapshot, target: string): ManagedInstance | "ambiguous" | undefined {
-    if (source.parentId !== undefined) return undefined;
     const children = [...this.port.live()].filter((instance) => instance.parentId === source.id);
     const mainId = (child: ManagedInstance) => this.mainIdentities.get(child.id)?.child;
     const exact = children.find((child) => child.id === target || mainId(child) === target) ?? children.find((child) => child.key === target);
@@ -54,7 +53,8 @@ export class WorkMessages {
 
   /** A child Work's message to its parent, or a parent's message to its own child Work. */
   async send(source: InstanceSnapshot, request: SendRequest, child: ManagedInstance | undefined): Promise<WorkMessageResult> {
-    if (source.parentId !== undefined) {
+    // A lead child Work names one of its own child Works; without a target it messages its parent.
+    if (source.parentId !== undefined && request.target === undefined) {
       const parent = this.port.get(source.parentId);
       if (!parent || parent.snapshot().lifecycle !== "active") throw new Error("The Work that created you is no longer running, so nothing can reach it.");
       const done = request.done === true;
@@ -63,7 +63,7 @@ export class WorkMessages {
       return { type: "work_message", to: "parent", target: observationStatus(parent.snapshot()), acceptedAt: this.port.now(), ...(done ? { done } : {}) };
     }
     if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
-    if (!child) throw new Error("Name one of your child Works with target.");
+    if (!child) throw new Error(source.parentId === undefined ? "Name one of your child Works with target." : "Name one of your own child Works with target, or leave target out to message the Work that created you.");
     if (child.snapshot().lifecycle !== "active") throw new Error("That child Work is no longer running, so it cannot receive messages. Check it with dock_list.");
     // It owes a reply to this message as well, even if it already finished its earlier work.
     const owedBefore = this.owing.has(child.id);
