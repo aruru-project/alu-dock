@@ -62,21 +62,100 @@ export interface DockToolsCallPort {
   invoke(request: DockToolsRequest): Promise<DockToolsResult>;
 }
 
-/** What a child Work's current turn did with its parent's work, to tell its parent when it stops without reporting. */
-interface ChildTurn {
+/** Why a child Work's turn ended without its result reaching its parent, for the Host to tell the parent. */
+type UnreportedStop = Omit<Extract<DockToolsRequest, { type: "unreported_stop" }>, "type">;
+
+/**
+ * What a child Work owes its parent (cards #666, #674): the result of the work its parent handed it. Each
+ * thing that bears on it comes in as one event here, and the end of each turn decides whether the parent
+ * must hear that the child stopped without it. A turn's own facts are cleared when it ends; only what is
+ * owed and which parent messages were read span turns.
+ */
+class OwedResult {
+  /** From the task or a parent message until a final result reaches the parent, by any call. */
+  private owed = false;
   /** The first prompt a child Work gets is the task it was created for; later ones are the user's own. */
-  taskSeen: boolean;
-  /** The task or a parent message went into the conversation for this turn. */
-  hasParentWork: boolean;
-  /** The last call of the turn so far delivered a message to the parent. */
-  reachedParent: boolean;
+  private taskSeen = false;
+  /** The number of the parent's latest message that went into the conversation. */
+  private read = 0;
+  /** This turn carries the parent's work: the task, a parent message, or for a lead its own child Works' work. */
+  private carriesParentWork = false;
+  /** The last top-level call of the turn so far delivered a message to the parent. */
+  private reachedParent = false;
   /**
    * The final result reached the parent in this turn and no parent work came after it. Other calls made in
    * the same step do not undo it: Pi ends a turn after a batch only when every call in it ends the turn.
    */
-  resultSent: boolean;
-  lastWords?: string;
-  failure?: string;
+  private resultSent = false;
+  private lastWords: string | undefined;
+  private failure: string | undefined;
+
+  constructor(private readonly lead: boolean) {}
+
+  /** Sent with a final result: a newer parent message is still owed after it (card #674). */
+  get parentMessagesRead(): number { return this.read; }
+
+  /** A turn starts with the user's prompt; only the first is the task. */
+  userPrompt(): void {
+    if (this.taskSeen) return;
+    this.taskSeen = true;
+    this.owed = true;
+    this.parentWork();
+  }
+
+  /** A parent message went into the conversation. New work from the parent is owed a report again. */
+  parentMessage(number: number | undefined): void {
+    this.owed = true;
+    if (number !== undefined && number > this.read) this.read = number;
+    this.parentWork();
+  }
+
+  /**
+   * A message from one of its own child Works reached the model, in the conversation or as dock_wait's
+   * result. They work on what the parent handed a lead, so while that is owed the turn carries it too.
+   */
+  childMessage(): void {
+    if (this.lead && this.owed) this.parentWork();
+  }
+
+  replied(text: string, failure: string | undefined): void {
+    if (text) this.lastWords = text;
+    this.failure = failure;
+  }
+
+  /** A top-level call of the turn ended; `toParent` when it delivered a message to the parent. */
+  callEnded(toParent: boolean, done: boolean): void {
+    if (toParent && done) this.resultSent = true;
+    this.reachedParent = toParent || this.resultSent;
+  }
+
+  /** The final result reached the parent, by any call, nested ones included. */
+  resultDelivered(): void { this.owed = false; }
+
+  /** The turn ended: what the parent must hear, if anything. The turn's own facts are cleared either way. */
+  turnEnded(aborted: boolean, childrenOwe: boolean): UnreportedStop | undefined {
+    const { carriesParentWork, reachedParent, lastWords, failure } = this;
+    this.carriesParentWork = false;
+    this.reachedParent = false;
+    this.resultSent = false;
+    this.lastWords = undefined;
+    this.failure = undefined;
+    if (!carriesParentWork || reachedParent) return undefined;
+    // Card #674: a lead ends its turn normally while its own child Works work. That is no stop: their
+    // messages wake it, and childMessage counts that turn as the parent's work again.
+    if (!aborted && failure === undefined && childrenOwe) return undefined;
+    return {
+      reason: aborted ? "aborted" : failure !== undefined ? "failed" : "ended",
+      ...(!aborted && failure ? { error: shortenLastWords(failure) } : {}),
+      ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
+    };
+  }
+
+  private parentWork(): void {
+    this.carriesParentWork = true;
+    this.reachedParent = false;
+    this.resultSent = false;
+  }
 }
 
 /** The parts of a Pi message the bridge reads. */
@@ -122,9 +201,8 @@ export class DockToolsBridge {
    * once done, so asking again then would run one turn too many.
    */
   private turnRequested = false;
-  private readonly turn: ChildTurn = { taskSeen: false, hasParentWork: false, reachedParent: false, resultSent: false };
-  /** A child Work owes its parent a result from its task, and from each parent message, until its final result reaches the parent. */
-  private owesParent = false;
+  /** Kept by a child Work only. */
+  private readonly owed: OwedResult | undefined;
   readonly children = new ChildMessages();
   readonly toolNames: readonly string[];
 
@@ -132,10 +210,11 @@ export class DockToolsBridge {
   constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort, readonly role?: ChildRole) {
     this.enabledValue = initiallyEnabled;
     this.toolNames = role === "lead" ? LEAD_DOCK_TOOL_NAMES : role === "helper" ? CHILD_DOCK_TOOL_NAMES : DOCK_TOOL_NAMES;
+    this.owed = role === undefined ? undefined : new OwedResult(role === "lead");
   }
 
-  /** A child Work, which owes its parent the result of the work it was handed. */
-  get child(): boolean { return this.role !== undefined; }
+  /** The number of the parent's latest message this child Work has read, sent with its final result. */
+  get parentMessagesRead(): number { return this.owed?.parentMessagesRead ?? 0; }
 
   get enabled(): boolean { return this.enabledValue; }
 
@@ -162,7 +241,11 @@ export class DockToolsBridge {
 
   /** A message from this Work's parent or child Work, or Dock's notice about a child Work. */
   receive(message: WorkMessage): void {
-    if (this.children.receive(message)) return;
+    // A dock_wait in progress took it as its result: it reaches the model there.
+    if (this.children.receive(message)) {
+      this.owed?.childMessage();
+      return;
+    }
     this.stoppedByUser = false;
     this.inbox.push({ kind: "work", message });
     this.deliverWorkMessages();
@@ -176,6 +259,7 @@ export class DockToolsBridge {
       if (item.kind === "work" && item.message.from.relation === "child") {
         arrived.push(item.message);
         this.inbox.splice(index, 1);
+        this.owed?.childMessage();
       } else index += 1;
     }
     return arrived;
@@ -193,7 +277,10 @@ export class DockToolsBridge {
   }
 
   settled(aborted: boolean): void {
-    if (this.child) this.reportUnreportedStop(aborted);
+    // The Host tells the parent if a result is still owed; the child Work is not asked to report again.
+    const unreported = this.owed?.turnEnded(aborted, this.children.waiting.length > 0);
+    if (unreported) void this.port.invoke({ type: "unreported_stop", ...unreported })
+      .catch(() => { /* Dock tools are off or the Host is gone: no one can be told. */ });
     // Pi's abort leaves no automatic continuation after the user stops a turn, and these messages join
     // that rule. Otherwise what came after the last step, or went unanswered, starts the next turn.
     if (aborted) {
@@ -211,10 +298,7 @@ export class DockToolsBridge {
     // The new turn answers whatever waits in the conversation.
     this.stoppedByUser = false;
     this.turnRequested = false;
-    if (!this.child || messageType !== "user" || this.turn.taskSeen) return;
-    this.turn.taskSeen = true;
-    this.turn.hasParentWork = true;
-    this.owesParent = true;
+    if (messageType === "user") this.owed?.userPrompt();
   }
 
   messageStarted(message: ObservedMessage): void {
@@ -222,22 +306,17 @@ export class DockToolsBridge {
   }
 
   messageEnded(message: ObservedMessage): void {
-    if (!this.child || message.role !== "assistant") return;
-    const text = textOf(message.content);
-    if (text) this.turn.lastWords = text;
-    this.turn.failure = message.stopReason === "error" ? message.errorMessage ?? "" : undefined;
+    if (message.role !== "assistant") return;
+    this.owed?.replied(textOf(message.content), message.stopReason === "error" ? message.errorMessage ?? "" : undefined);
   }
 
   toolEnded(event: Pick<ToolExecutionEndEvent, "toolName" | "isError" | "parentToolCallId" | "result">): void {
-    if (!this.child || event.parentToolCallId !== undefined) return;
+    // #666 looks at the turn's last call the model made itself, not at calls made inside a tool.
+    if (event.parentToolCallId !== undefined) return;
     const details = (event.result as { details?: { to?: unknown; done?: unknown } } | undefined)?.details;
     // A lead's message to one of its own child Works does not reach its parent.
-    const sent = event.toolName === DOCK_REPORT_TOOL && !event.isError && details?.to !== "child";
-    if (sent && details?.done === true) {
-      this.turn.resultSent = true;
-      this.owesParent = false;
-    }
-    this.turn.reachedParent = sent || this.turn.resultSent;
+    const toParent = event.toolName === DOCK_REPORT_TOOL && !event.isError && details?.to !== "child";
+    this.owed?.callEnded(toParent, details?.done === true);
   }
 
   /** An idle Work takes waiting messages now and starts a turn for them; a busy one takes them at the end of its step. */
@@ -262,35 +341,11 @@ export class DockToolsBridge {
       api.sendMessage<unknown>(item.kind === "work" ? workMessageEntry(item.message) : watchNoticeEntry(item.notification), { triggerTurn: false });
       this.inbox.shift();
       this.awaitingReply = true;
-      // New work from the parent is owed a report again, whatever the child Work sent it before. A lead's
-      // own child Works work on what its parent handed it: while that result is owed, theirs count too.
-      const fromParent = item.kind === "work" && item.message.from.relation === "parent";
-      if (this.child && (fromParent || (item.kind === "work" && this.role === "lead" && this.owesParent))) {
-        this.turn.hasParentWork = true;
-        this.turn.reachedParent = false;
-        this.turn.resultSent = false;
-      }
-      if (this.child && fromParent) this.owesParent = true;
+      if (item.kind !== "work") continue;
+      const { message } = item;
+      if (message.from.relation === "parent") this.owed?.parentMessage(message.type === "message" ? message.number : undefined);
+      else this.owed?.childMessage();
     }
-  }
-
-  /**
-   * A child Work's turn that carried its parent's work ended, and its last call did not reach the parent.
-   * The Host tells the parent if a result is still owed; the child Work is not asked to report again.
-   */
-  private reportUnreportedStop(aborted: boolean): void {
-    const { hasParentWork, reachedParent, lastWords, failure } = this.turn;
-    // Card #674: a lead hands parts of the work to its own child Works and ends its turn while they work.
-    // That is no stop: their messages wake it, and the result it owes is still owed in the turns to come.
-    if (!aborted && hasParentWork && !reachedParent && this.children.waiting.length > 0) return;
-    Object.assign(this.turn, { hasParentWork: false, reachedParent: false, resultSent: false, lastWords: undefined, failure: undefined });
-    if (!hasParentWork || reachedParent) return;
-    void this.port.invoke({
-      type: "unreported_stop",
-      reason: aborted ? "aborted" : failure !== undefined ? "failed" : "ended",
-      ...(!aborted && failure ? { error: shortenLastWords(failure) } : {}),
-      ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
-    }).catch(() => { /* Dock tools are off or the Host is gone: no one can be told. */ });
   }
 
   async configure(action: "on" | "off" | "status"): Promise<boolean> {
@@ -337,6 +392,8 @@ export class DockToolsBridge {
     const before = this.children.position;
     const result = await this.port.invoke(request);
     this.children.noteWork(result, before);
+    // Whatever made the call, a tool inside another one included.
+    if (result.type === "work_message" && result.to === "parent" && result.done) this.owed?.resultDelivered();
     return result;
   }
 
@@ -491,6 +548,8 @@ function registerReport(pi: ExtensionAPI, bridge: DockToolsBridge, role: ChildRo
         type: "send", operationId: randomUUID(), message: params.message,
         ...(params.target === undefined ? {} : { target: params.target }),
         ...(params.done === undefined ? {} : { done: params.done }),
+        // A parent message newer than these crossed this result and is still owed.
+        ...(params.target === undefined && params.done === true ? { readThrough: bridge.parentMessagesRead } : {}),
       })));
       // A final result ends the turn: nothing the model would write after it reaches the parent.
       return params.done === true ? { ...result, terminate: true } : result;

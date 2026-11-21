@@ -73,8 +73,11 @@ export function shortenLastWords(text: string): string {
  * recipient's conversation as a message from that Work, never as the user's (card #666).
  */
 export type WorkMessage =
-  /** `done` marks a child Work's final result for the work it was handed. */
-  | { type: "message"; from: WorkMessageSender; text: string; done?: true }
+  /**
+   * `done` marks a child Work's final result for the work it was handed. A parent's messages to one child
+   * Work carry `number`, counted from 1, so the child's final result can say which of them it answered.
+   */
+  | { type: "message"; from: WorkMessageSender; text: string; done?: true; number?: number }
   /** Dock's notice that a child Work stopped while it still owed this Work a result. */
   | { type: "child_stopped"; from: WorkMessageSender; reason: ChildStopReason; error?: string; lastWords?: string };
 
@@ -90,10 +93,11 @@ export type DockToolsRequest =
   /** `assistant` is only accepted from older callers so they receive a clear refusal: Main already keeps one assistant. */
   | { type: "create"; operationId: string; cwd: string; createDirectory?: boolean; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
   /**
-   * A child Work omits target to message its parent, and `done` says whether this is its final result.
+   * A child Work omits target to message its parent, and `done` says whether this is its final result;
+   * `readThrough` is the number of the parent's last message it had read, so a newer one is still owed.
    * A lead child Work names one of its own child Works with target.
    */
-  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
+  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean; readThrough?: number }
   /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */
   | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string };
 
@@ -150,7 +154,9 @@ export type DockToolsResult =
     error?: string;
   }
   /** A message between a Work and its parent or child Work, taken by the recipient's Worker. */
-  | { type: "work_message"; to: "parent" | "child"; target: ObservedInstanceStatus; acceptedAt: string; done?: true }
+  /** A child Work learns only that its message reached its parent, nothing of the parent's state. */
+  | { type: "work_message"; to: "parent"; acceptedAt: string; done?: true }
+  | { type: "work_message"; to: "child"; target: ObservedInstanceStatus; acceptedAt: string }
   | { type: "unreported_stop"; notified: boolean };
 
 export interface DockToolsHostPort {

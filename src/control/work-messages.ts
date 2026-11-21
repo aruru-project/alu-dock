@@ -30,8 +30,16 @@ export class WorkMessages {
    * task, again after each parent message and each turn that ended without reporting, until a final message.
    */
   private readonly owing = new Set<string>();
-  /** Child Works whose parent interrupted them since it last sent them work: the parent needs no notice of that stop. */
+  /**
+   * Child Works whose parent interrupted them since it last sent them work. The parent took the work back,
+   * so it hears of no stop until it sends more: a lead's own child Works may still wake it meanwhile.
+   */
   private readonly interruptedByParent = new Set<string>();
+  /**
+   * The number of each child Work's latest message from its parent. A final result clears the debt only if
+   * it answers that message: a newer one may cross it in the same step (card #674).
+   */
+  private readonly parentMessages = new Map<string, number>();
   /** Per recipient, so the messages between one pair arrive in the order they were sent. */
   private readonly deliveries = new Map<string, Promise<void>>();
   private readonly mainIdentities = new Map<string, MainIdentity>();
@@ -59,8 +67,8 @@ export class WorkMessages {
       if (!parent || parent.snapshot().lifecycle !== "active") throw new Error("The Work that created you is no longer running, so nothing can reach it.");
       const done = request.done === true;
       await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done } : {}) });
-      if (done) this.owing.delete(source.id);
-      return { type: "work_message", to: "parent", target: observationStatus(parent.snapshot()), acceptedAt: this.port.now(), ...(done ? { done } : {}) };
+      if (done && (request.readThrough ?? Number.MAX_SAFE_INTEGER) >= (this.parentMessages.get(source.id) ?? 0)) this.owing.delete(source.id);
+      return { type: "work_message", to: "parent", acceptedAt: this.port.now(), ...(done ? { done } : {}) };
     }
     if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
     if (!child) throw new Error(source.parentId === undefined ? "Name one of your child Works with target." : "Name one of your own child Works with target, or leave target out to message the Work that created you.");
@@ -68,10 +76,14 @@ export class WorkMessages {
     // It owes a reply to this message as well, even if it already finished its earlier work.
     const owedBefore = this.owing.has(child.id);
     this.owing.add(child.id);
+    const number = (this.parentMessages.get(child.id) ?? 0) + 1;
+    this.parentMessages.set(child.id, number);
     try {
-      await this.deliver(child, { type: "message", from: { relation: "parent", id: source.id, name: source.displayName }, text: request.message });
+      await this.deliver(child, { type: "message", from: { relation: "parent", id: source.id, name: source.displayName }, text: request.message, number });
     } catch (error) {
       if (!owedBefore) this.owing.delete(child.id);
+      // The child never got it, so a final result need not answer it.
+      if (this.parentMessages.get(child.id) === number) this.parentMessages.set(child.id, number - 1);
       throw error;
     }
     this.interruptedByParent.delete(child.id);
@@ -86,8 +98,8 @@ export class WorkMessages {
   async unreportedStop(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
     const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
     if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
-    // The parent interrupted this turn itself and took the work back.
-    if (request.reason === "aborted" && this.interruptedByParent.delete(source.id)) return { type: "unreported_stop", notified: false };
+    // The parent interrupted it and took the work back; nothing is owed until the parent sends more.
+    if (this.interruptedByParent.has(source.id)) return { type: "unreported_stop", notified: false };
     this.owing.add(source.id);
     await this.deliver(parent, {
       type: "child_stopped", from: this.childSender(source), reason: request.reason,
@@ -136,6 +148,7 @@ export class WorkMessages {
     for (const id of instanceIds) {
       this.owing.delete(id);
       this.interruptedByParent.delete(id);
+      this.parentMessages.delete(id);
       this.mainIdentities.delete(id);
     }
   }

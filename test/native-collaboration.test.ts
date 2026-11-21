@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnDockWorker } from "../src/control/native-collaboration.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { WorkMessages } from "../src/control/work-messages.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import type { InstanceSnapshot } from "../src/core/instance-dto.js";
@@ -82,4 +83,44 @@ test("native collaboration wire validates tool selections, delivery and terminal
   assert.throws(() => parseDockToolsRequest({ ...spawn, cwd: "relative" }));
   // A SubHost reads Main's answers with this parser, and an older Main still sends this error.
   assert.doesNotThrow(() => parseDockToolsResult({ type: "spawn", instance: child, taskStatus: "accepted", error: "Reply unavailable; inspect child" }));
+});
+
+// Card #674 review (Astra): a lead may wait for its own child Works for hours, so two gaps in what the Host
+// thinks a child Work owes became real. A parent message that crossed the child's final result for earlier
+// work was cleared with it, so a later stop went unreported; and after the parent interrupted to take the
+// work back, a later report from the child still reached it. Its report receipt also carried the parent's state.
+test("a child Work still owes a parent message that crossed its final result, and nothing once the parent took the work back", async () => {
+  const sessions = { parent: new DelayedAgentWorkerConnection("parent"), lead: new DelayedAgentWorkerConnection("lead") };
+  const parent = new ManagedInstance({ id: "parent", name: "alu", cwd: process.cwd(), session: sessions.parent });
+  const lead = new ManagedInstance({ id: "lead", name: "Lead", cwd: process.cwd(), session: sessions.lead, parentId: parent.id });
+  const works = new Map([[parent.id, parent], [lead.id, lead]]);
+  const messages = new WorkMessages({ live: () => works.values(), get: (id) => works.get(id), now: () => "2026-11-21T00:00:00.000Z" });
+  messages.childStarted(lead.id);
+  const fromParent = (text: string) => messages.send(parent.snapshot(), { type: "send", operationId: text, target: "Lead", message: text }, lead);
+  const fromLead = (text: string, readThrough: number) => messages.send(lead.snapshot(), { type: "send", operationId: text, message: text, done: true, readThrough }, undefined);
+  const notices = async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return sessions.parent.workMessages.filter((message) => message.type === "child_stopped").length;
+  };
+
+  await fromParent("Q1");
+  await fromParent("Q2");
+  assert.deepEqual(sessions.lead.workMessages.map((message) => message.type === "message" ? message.number : undefined), [1, 2]);
+  const receipt = await fromLead("A1", 1);
+  assert.deepEqual(receipt, { type: "work_message", to: "parent", acceptedAt: "2026-11-21T00:00:00.000Z", done: true }, "a child learns only that its result arrived");
+  messages.childLeaving(lead);
+  assert.equal(await notices(), 1, "Q2 was still owed when the lead left");
+
+  await fromParent("Q3");
+  await fromLead("A3", 3);
+  messages.childLeaving(lead);
+  assert.equal(await notices(), 1, "a result that read the latest question settles it");
+
+  await fromParent("Q4");
+  messages.release(lead.id, true);
+  for (const reason of ["aborted", "ended"] as const) await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason });
+  assert.equal(await notices(), 1, "after taking the work back the parent hears of no stop");
+  await fromParent("Q5");
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended" });
+  assert.equal(await notices(), 2, "new work from the parent is owed a report again");
 });

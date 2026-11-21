@@ -68,6 +68,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   toolMutationCalls = 0;
   settingMutationCalls = 0;
   readonly observationNotifications: Array<Extract<AgentWorkerControl, { type: "observation_delivery" }>["notification"]> = [];
+  /** Messages from parent or child Works, as the Host delivered them. */
+  readonly workMessages: Array<Extract<AgentWorkerControl, { type: "work_message" }>["message"]> = [];
   settingsFailure: Error | undefined;
   settingsReadFailure: Error | undefined;
   sessionMutationError: Error | undefined;
@@ -261,6 +263,10 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     if (request.type === "wait_for_idle") return this.waitForIdle();
     if (request.type === "observation_delivery") {
       this.observationNotifications.push(structuredClone(request.notification));
+      return Promise.resolve(null);
+    }
+    if (request.type === "work_message") {
+      this.workMessages.push(structuredClone(request.message));
       return Promise.resolve(null);
     }
     if (request.type === "dispose") return this.dispose();

@@ -116,7 +116,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       ...(value.lastWords === undefined ? {} : { lastWords: boundedString(value.lastWords, MAX_CHILD_LAST_WORDS_CHARS, "Last words") }),
     };
   }
-  exactKeys(value, ["type", "operationId", "target", "message", "delivery", "done"], "Dock send request");
+  exactKeys(value, ["type", "operationId", "target", "message", "delivery", "done", "readThrough"], "Dock send request");
   if (value.type !== "send") throw new Error("Dock tools request type is invalid");
   if (value.done !== undefined && typeof value.done !== "boolean") throw new Error("done must be true or false");
   return {
@@ -126,6 +126,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
     ...(value.delivery === undefined ? {} : { delivery: oneOf(value.delivery, ["followUp", "steer"] as const, "Message delivery") }),
     ...(value.done === undefined ? {} : { done: value.done }),
+    ...(value.readThrough === undefined ? {} : { readThrough: nonNegativeInteger(value.readThrough, "Parent messages read") }),
   };
 }
 
@@ -134,9 +135,13 @@ export function parseWorkMessage(raw: unknown): WorkMessage {
   const value = record(raw, "Work message");
   const from = parseWorkMessageSender(value.from);
   if (value.type === "message") {
-    exactKeys(value, ["type", "from", "text", "done"], "Work message");
+    exactKeys(value, ["type", "from", "text", "done", "number"], "Work message");
     if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
-    return { type: "message", from, text: boundedString(value.text, MAX_DOCK_TOOL_MESSAGE_CHARS, "Work message text"), ...(value.done === true ? { done: true as const } : {}) };
+    return {
+      type: "message", from, text: boundedString(value.text, MAX_DOCK_TOOL_MESSAGE_CHARS, "Work message text"),
+      ...(value.done === true ? { done: true as const } : {}),
+      ...(value.number === undefined ? {} : { number: positiveInteger(value.number, "Work message number") }),
+    };
   }
   exactKeys(value, ["type", "from", "reason", "error", "lastWords"], "Work message");
   if (value.type !== "child_stopped" || from.relation !== "child") throw new Error("Work message type is invalid");
@@ -237,11 +242,15 @@ export function parseDockToolsResult(raw: unknown): void {
     return;
   }
   if (value.type === "work_message") {
-    exactKeys(value, ["type", "to", "target", "acceptedAt", "done"], "Work message result");
-    oneOf(value.to, ["parent", "child"] as const, "Work message recipient");
-    validateObservedStatus(value.target);
+    const to = oneOf(value.to, ["parent", "child"] as const, "Work message recipient");
+    if (to === "parent") {
+      exactKeys(value, ["type", "to", "acceptedAt", "done"], "Work message result");
+      if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
+    } else {
+      exactKeys(value, ["type", "to", "target", "acceptedAt"], "Work message result");
+      validateObservedStatus(value.target);
+    }
     timestampString(value.acceptedAt, "Work message acceptance time");
-    if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
     return;
   }
   if (value.type === "unreported_stop") {

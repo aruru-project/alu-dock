@@ -411,3 +411,104 @@ test("a child Work that sends its final result alongside another call is not rep
   unfinished.bridge.settled(false);
   assert.deepEqual(unfinished.invoked.map((request) => request.type), ["unreported_stop"], "a turn that only asked something and went on is still reported");
 });
+
+// Card #674 review (Astra): a lead owes its parent a result across turns while its own child Works work.
+// That debt leaked into the owner's own turns and swallowed real failures; it missed child messages that
+// reach the model through dock_wait, and a final result sent from inside another tool.
+test("a lead child Work reports a stop to its parent only while it owes a result, wherever its own child Works' messages reach it", async () => {
+  const lead = () => {
+    const reports: Array<Extract<DockToolsRequest, { type: "unreported_stop" }>> = [];
+    const sends: Array<Extract<DockToolsRequest, { type: "send" }>> = [];
+    const review = { ...notification.target, id: "review", name: "Review" };
+    const bridge = new DockToolsBridge(true, {
+      configure: async () => ({ enabled: true }),
+      invoke: async (request) => {
+        if (request.type === "unreported_stop") { reports.push(request); return { type: "unreported_stop", notified: true }; }
+        if (request.type === "spawn") return { type: "spawn", taskStatus: "accepted", instance: review };
+        if (request.type !== "send") return assert.fail(`unexpected ${request.type}`);
+        sends.push(request);
+        return request.target === undefined
+          ? { type: "work_message", to: "parent", acceptedAt: notification.firedAt, ...(request.done ? { done: true as const } : {}) }
+          : { type: "work_message", to: "child", target: review, acceptedAt: notification.firedAt };
+      },
+    }, "lead");
+    const { api, state } = fakeApi();
+    dockToolsExtension(bridge)(api as never);
+    let idle = false;
+    bridge.attach(api as never, { isIdle: () => idle } as never);
+    const send = state.tools.find((tool) => tool.name === "dock_send")!;
+    return {
+      bridge, reports, sends,
+      setIdle: (value: boolean) => { idle = value; },
+      /** The model ends its turn with these words. */
+      ends: (text: string, options: { aborted?: boolean; error?: string } = {}) => {
+        bridge.messageEnded({ role: "assistant", content: [{ type: "text", text }], ...(options.error === undefined ? {} : { stopReason: "error", errorMessage: options.error }) });
+        bridge.settled(options.aborted === true);
+      },
+      /** Its dock_send to its parent, made by the model or from inside another tool. */
+      toParent: async (done: boolean, insideCall?: string) => {
+        const result = await send.execute("send", { message: done ? "RESULT" : "PROGRESS", done });
+        bridge.toolEnded({ toolName: "dock_send", isError: false, result, ...(insideCall === undefined ? {} : { parentToolCallId: insideCall }) });
+      },
+      /** Its task comes, and it hands a review to a child Work of its own. */
+      startsReview: async () => {
+        bridge.runStarting("user");
+        await bridge.invoke({ type: "spawn", operationId: "spawn", name: "Review", task: "Review." });
+      },
+    };
+  };
+  const reviewSays = (text: string): WorkMessage => ({ type: "message", from: { relation: "child", id: "review", name: "Review" }, text, done: true });
+
+  // It ends its turn while its review runs: no stop. The owner then talks to it and stops that turn himself.
+  const waiting = lead();
+  await waiting.startsReview();
+  waiting.ends("Waiting for the review.");
+  waiting.bridge.runStarting("user");
+  waiting.ends("OWNER_CHAT", { aborted: true });
+  assert.deepEqual(waiting.reports, [], "the owner's own turn is not the parent's business");
+
+  const failing = lead();
+  await failing.startsReview();
+  failing.ends("", { error: "provider down" });
+  assert.deepEqual(failing.reports.map((report) => report.reason), ["failed"], "a failed turn is no wait, though its review still runs");
+
+  // After a progress report, the review's result reaches the model through dock_wait in a turn the owner
+  // started, before or while it waits. The lead owes its parent the result: ending without it is reported.
+  for (const arrivedFirst of [true, false]) {
+    const waits = lead();
+    await waits.startsReview();
+    await waits.toParent(false);
+    waits.ends("Progress sent.");
+    waits.bridge.runStarting("user");
+    if (arrivedFirst) waits.bridge.receive(reviewSays("REVIEW_DONE"));
+    const waited = waits.bridge.children.wait({ all: true, timeoutSeconds: 5 }, undefined, () => false, waits.bridge.takeArrivedChildMessages());
+    if (!arrivedFirst) waits.bridge.receive(reviewSays("REVIEW_DONE"));
+    assert.equal((await waited).ended, "received");
+    waits.ends("REVIEW_PASSED");
+    assert.deepEqual(waits.reports.map((report) => [report.reason, report.lastWords]), [["ended", "REVIEW_PASSED"]], `arrived ${arrivedFirst ? "before" : "during"} the wait`);
+  }
+
+  // A final result sent from inside another tool settles the debt, so the review's late message does not
+  // turn the next quiet turn into a stop.
+  const nested = lead();
+  await nested.startsReview();
+  await nested.toParent(false);
+  nested.ends("Progress sent.");
+  nested.bridge.runStarting("user");
+  await nested.toParent(true, "code-call");
+  nested.bridge.toolEnded({ toolName: "code", isError: false, result: {} });
+  nested.ends("Sent the result.");
+  nested.setIdle(true);
+  nested.bridge.receive(reviewSays("REVIEW_LATE"));
+  nested.bridge.runStarting("custom");
+  nested.ends("Noted.");
+  assert.deepEqual(nested.reports, []);
+
+  // Its final result says which of its parent's messages it had read; a newer one is still owed (Host side).
+  const crossing = lead();
+  crossing.bridge.runStarting("user");
+  crossing.setIdle(true);
+  crossing.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q2", number: 2 });
+  await crossing.toParent(true);
+  assert.equal(crossing.sends.at(-1)!.readThrough, 2);
+});

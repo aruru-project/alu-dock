@@ -183,7 +183,7 @@ const SPAWN_SCHEMA = {
 };
 
 /** The resident assistant's child Works do the work, so by default they may hand parts of it out (card #674). */
-const ASSISTANT_ALLOWED_TOOLS_DESCRIPTION = "Exact Pi tool names such as read, grep, find, ls, edit, write, bash, dock_spawn. Omit for normal full tool access, which includes dock_spawn: the child Work may then start child Works of its own for parts of the task, and theirs cannot. Leave dock_spawn out for one that should not, such as a reviewer. [] grants none. It can always message you and reaches no other Work. This limits tools, not what a granted shell can do.";
+const ASSISTANT_ALLOWED_TOOLS_DESCRIPTION = "Exact Pi tool names such as read, grep, find, ls, edit, write, bash, dock_spawn. Omit for normal full tool access, which includes dock_spawn: the child Work may then start child Works of its own for parts of the task, and theirs cannot. dock_spawn also brings the tools it needs for those child Works and no others: dock_wait, dock_models, dock_list, dock_inspect, dock_interrupt and dock_stop, and dock_send to them. Leave dock_spawn out for one that should not start any, such as a reviewer. [] grants none. It can always message you and reaches no other Work. This limits tools, not what a granted shell can do.";
 
 function spawnSchema(conversationCopy: boolean, assistantDelegation: boolean): object {
   const { withContext, allowedTools, ...rest } = SPAWN_SCHEMA.properties;

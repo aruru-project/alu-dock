@@ -978,8 +978,10 @@ export class DockRegistry implements LocalDockToolsHostPort {
     try {
       const receipt = await instance.stop(operationId);
       const snapshot = instance.snapshot();
+      // A Work leaves the runtime list only once the Works below it are retired, so a Stop of a Work above
+      // it still finds it and waits for them too (card #674).
+      await this.childRetirements.get(instance);
       if (snapshot.assistant && this.assistantWorkspace !== undefined) {
-        await this.childRetirements.get(instance);
         // Return the old Work's truthful stopped receipt. The same ID is already open again when
         // the client refreshes after this operation; Protocol V2 stop keeps its original contract.
         try { await this.recoverAssistant(); }

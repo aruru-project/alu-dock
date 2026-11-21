@@ -6,7 +6,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { exited, startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -178,16 +178,55 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   await settled(client, alu.id);
   // What the reviewer said went to the lead only.
   assert.ok(!coordinator.requests.some((request) => ["REVIEW_QUESTION", "REVIEW_NOTE", "REVIEW_DONE"].some((words) => given(request).includes(words))), "The reviewer's words never reach her");
+  // Its result answered her latest message, so stopping it now owes her no notice.
+  await client.stop(lead.id, "lead-stop");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(coordinator.requests.length, 8, "Stopping a Work that gave her its result tells her nothing");
 
   // A child Work she grants no dock_spawn, such as a reviewer, starts none. A lead's child Work gets no tool the lead was not given.
   const readOnly = await client.create(team.cwd, "只读审查", "read-only", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: alu.id, allowedTools: ["read"] });
   await assert.rejects(team.registry!.invokeDockTool(readOnly.id, { type: "spawn", operationId: "read-only-spawn", name: "x", task: "x" }));
   const limited = await client.create(team.cwd, "只读主 Work", "limited-lead", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: alu.id, allowedTools: ["read", "dock_spawn"] });
   await assert.rejects(client.create(team.cwd, "要 shell", "wants-bash", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: limited.id, allowedTools: ["read", "bash"] }), /bash/u);
+  const inherits = await client.create(team.cwd, "沿用上限", "inherits", undefined, undefined, { model: { provider: "reviewer", id: "fixture" } }, { parentId: limited.id });
+  assert.deepEqual((await client.tools(inherits.id)).tools.filter((tool) => tool.active).map((tool) => tool.name).sort(), ["dock_send", "read"], "Leaving out allowedTools keeps the lead's limit");
 
-  // Stopping her stops the whole tree below her.
+  // Stopping her stops the whole tree below her: every process has exited when her Stop returns.
+  const below = [...team.workerPids];
   await client.stop(alu.id, "alu-stop");
-  await waitFor(async () => !(await client.list()).some((work) => [lead.id, review.id, readOnly.id, limited.id].includes(work.id)), "A Work below her outlived her");
+  assert.deepEqual(below.filter((pid) => !exited(pid)), [], "A Work below her outlived her Stop");
+  assert.ok(!(await client.list()).some((work) => [lead.id, review.id, readOnly.id, limited.id, inherits.id].includes(work.id)));
+});
+
+// Card #674 review (Astra): a lead left the Host's list of running Works before its own child Works were
+// gone. Stopping the assistant meanwhile could not find them, and returned while a grandchild still ran.
+test("stopping the assistant while her child Work is stopping still waits for that Work's own child", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "implementer"], { prefix: "alu-assistant-tree-stop-", assistant: true });
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  const lead = await client.create(team.cwd, "主 Work", "tree-lead", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: alu.id });
+  const leadPid = team.workerPids.at(-1)!;
+  let held = false;
+  let release!: () => void;
+  team.holdNextChild = () => new Promise<void>((resolve) => { held = true; release = resolve; });
+  // A failure while it is held must not hold the Host's own Stop at cleanup.
+  team.onCleanup = () => release?.();
+  const late = client.create(team.cwd, "还在启动", "tree-late", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: lead.id });
+  void late.catch(() => {});
+  await waitFor(() => held, "The grandchild did not start");
+  const latePid = team.workerPids.at(-1)!;
+  const leadStopping = client.stop(lead.id, "stop-lead");
+  // The lead itself has stopped; only its child still holds its Stop open.
+  await waitFor(async () => exited(leadPid) && !(await client.list()).some((work) => work.id === lead.id), "The lead did not stop");
+  // Her Stop also opens her again, which takes a while, so the grandchild is let go well after that.
+  const letGo = setTimeout(release, 5_000);
+  await client.stop(alu.id, "stop-her");
+  const lateGone = exited(latePid);
+  clearTimeout(letGo);
+  release();
+  assert.ok(lateGone, "Her Stop returns only once the grandchild still starting has exited");
+  await leadStopping;
+  await assert.rejects(late);
 });
 
 test("the owner's steer and follow-up during a reply each renew the Work wake budget", { timeout: 90_000 }, async context => {
