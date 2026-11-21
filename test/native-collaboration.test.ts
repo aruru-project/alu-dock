@@ -180,27 +180,37 @@ test("what a child Work owes its parent is settled by the numbers of the message
   refusedAgain.answered(false);
   assert.equal(await leaves(), 5, "its result still settles Q9");
   assert.equal(parentView.owes(lead.id), false);
+  // With two take-backs under way, a stop report waits for both: one refused, the other taking it back.
+  await fromParent("Q9b");
+  const first = messages.takeBack(lead.id);
+  const second = messages.takeBack(lead.id);
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "aborted", readThrough: 10 });
+  first.answered(false);
+  second.answered(true);
+  parentView.noteWork({ type: "interrupt", instance: leadStatus, settlesThrough: second.settlesThrough });
+  assert.equal(await stopNotices(), 5);
+  assert.equal(parentView.owes(lead.id), false);
 
   // The child leaves while its final result is still on its way to the parent: the result settles it, so no
   // notice that it stopped without one follows the result.
-  await fromParent("Q10");
-  const answering = fromLead("A10", 10);
+  await fromParent("Q11");
+  const answering = fromLead("A11", 11);
   messages.childLeaving(lead);
   await answering;
   assert.equal(await stopNotices(), 5);
 
-  // The parent stops it and, in the same breath, hands it Q11, which reaches it before it starts stopping.
-  // The report of the turn the Stop took back is dropped; its leaving still settles Q11, although the Stop
+  // The parent stops it and, in the same breath, hands it Q12, which reaches it before it starts stopping.
+  // The report of the turn the Stop took back is dropped; its leaving still settles Q12, although the Stop
   // forgot its ledger before it answered.
   const stopping = messages.takeBack(lead.id);
-  await fromParent("Q11");
-  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "aborted", readThrough: 10 });
+  await fromParent("Q12");
+  await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "aborted", readThrough: 11 });
   messages.childLeaving(lead);
   messages.forget([lead.id]);
   stopping.answered(true);
   parentView.noteWork({ type: "stop", instance: leadStatus, settlesThrough: stopping.settlesThrough });
   assert.equal(await stopNotices(), 6);
-  assert.deepEqual(sessions.parent.workMessages.at(-1), { type: "child_stopped", from: { relation: "child", id: lead.id, name: "Lead" }, reason: "stopped", settlesThrough: 11 });
+  assert.deepEqual(sessions.parent.workMessages.at(-1), { type: "child_stopped", from: { relation: "child", id: lead.id, name: "Lead" }, reason: "stopped", settlesThrough: 12 });
   assert.equal(parentView.owes(lead.id), false);
 
   // The parent reloads just as its child Work is stopping: the first notice does not reach it, the one when
