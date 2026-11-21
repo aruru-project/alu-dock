@@ -8,6 +8,7 @@ import {
   type ObservationResult,
 } from "../src/core/instance-observation.js";
 import type { DockToolsRequest, WorkMessage } from "../src/core/dock-tools.js";
+import { ChildMessages } from "../src/worker/child-messages.js";
 import {
   DOCK_TOOL_NAMES,
   DockToolsBridge,
@@ -341,18 +342,21 @@ test("dock_wait waits only for child Works that still owe a result", async () =>
   // Dock gives a child Work its own ID; the name is what the parent called it.
   const ids: Record<string, string> = { "Reviewer #1": "w-reviewer-1" };
   const child = (name: string) => ({ ...notification.target, id: ids[name] ?? name, name, parentId: "parent" });
-  const final = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: `RESULT ${id}`, done: true });
+  // Like the Host, number each message to a child Work; its final result says which it answered.
+  const numbers: Record<string, number> = {};
+  const final = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: `RESULT ${id}`, done: true, settlesThrough: numbers[id] ?? 0 });
   let bridge!: DockToolsBridge;
   let finishBeforeReturning: string | undefined;
   bridge = new DockToolsBridge(true, {
     configure: async () => ({ enabled: true }),
     invoke: async (request) => {
       const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
+      const number = request.type === "send" ? numbers[id] = (numbers[id] ?? 0) + 1 : 0;
       // The Host hands a child Work's message over as soon as it is sent, even before this call returns.
       if (finishBeforeReturning === id) bridge.receive(final(id));
       return request.type === "spawn" ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
         : request.type === "interrupt" ? { type: "interrupt", instance: child(id) }
-          : { type: "work_message", to: "child", target: child(id), acceptedAt: notification.firedAt };
+          : { type: "work_message", to: "child", target: child(id), acceptedAt: notification.firedAt, number };
     },
   });
   const wait = () => bridge.children.wait({ timeoutSeconds: 1 }, undefined, () => false, []);
@@ -392,7 +396,7 @@ test("a child Work that sends its final result alongside another call is not rep
     const bridge = new DockToolsBridge(true, {
       configure: async () => ({ enabled: true }),
       invoke: async (request) => { invoked.push(request); return { type: "unreported_stop", notified: true }; },
-    }, true);
+    }, "helper");
     bridge.runStarting("user");
     return { bridge, invoked };
   };
@@ -410,4 +414,158 @@ test("a child Work that sends its final result alongside another call is not rep
   unfinished.bridge.toolEnded(wrote);
   unfinished.bridge.settled(false);
   assert.deepEqual(unfinished.invoked.map((request) => request.type), ["unreported_stop"], "a turn that only asked something and went on is still reported");
+});
+
+// Card #674 review (Astra): a lead owes its parent a result across turns while its own child Works work.
+// That debt leaked into the owner's own turns and swallowed real failures; it missed child messages that
+// reach the model through dock_wait, and a final result sent from inside another tool.
+test("a lead child Work reports a stop to its parent only while it owes a result, wherever its own child Works' messages reach it", async () => {
+  const lead = () => {
+    const reports: Array<Extract<DockToolsRequest, { type: "unreported_stop" }>> = [];
+    const sends: Array<Extract<DockToolsRequest, { type: "send" }>> = [];
+    const review = { ...notification.target, id: "review", name: "Review" };
+    let sentToReview = 0;
+    const bridge = new DockToolsBridge(true, {
+      configure: async () => ({ enabled: true }),
+      invoke: async (request) => {
+        if (request.type === "unreported_stop") { reports.push(request); return { type: "unreported_stop", notified: true }; }
+        if (request.type === "spawn") return { type: "spawn", taskStatus: "accepted", instance: review };
+        if (request.type !== "send") return assert.fail(`unexpected ${request.type}`);
+        sends.push(request);
+        return request.target === undefined
+          ? { type: "work_message", to: "parent", acceptedAt: notification.firedAt, ...(request.done ? { done: true as const } : {}) }
+          : { type: "work_message", to: "child", target: review, acceptedAt: notification.firedAt, number: ++sentToReview };
+      },
+    }, "lead");
+    const { api, state } = fakeApi();
+    dockToolsExtension(bridge)(api as never);
+    let idle = false;
+    bridge.attach(api as never, { isIdle: () => idle } as never);
+    const send = state.tools.find((tool) => tool.name === "dock_send")!;
+    const wait = state.tools.find((tool) => tool.name === "dock_wait")!;
+    return {
+      bridge, reports, sends, state,
+      /** The model calls dock_wait. */
+      waits: (params: object) => wait.execute("wait", params, undefined, undefined, { hasPendingMessages: () => false }) as Promise<{ content: Array<{ text: string }>; details: { ended: string } }>,
+      setIdle: (value: boolean) => { idle = value; },
+      /** The model ends its turn with these words. */
+      ends: (text: string, options: { aborted?: boolean; error?: string } = {}) => {
+        bridge.messageEnded({ role: "assistant", content: [{ type: "text", text }], ...(options.error === undefined ? {} : { stopReason: "error", errorMessage: options.error }) });
+        bridge.settled(options.aborted === true);
+      },
+      /** Its dock_send to its parent, made by the model or from inside another tool. */
+      toParent: async (done: boolean, insideCall?: string) => {
+        const result = await send.execute("send", { message: done ? "RESULT" : "PROGRESS", done });
+        bridge.toolEnded({ toolName: "dock_send", isError: false, result, ...(insideCall === undefined ? {} : { parentToolCallId: insideCall }) });
+      },
+      /** Its task comes, and it hands a review to a child Work of its own. */
+      startsReview: async () => {
+        bridge.runStarting("user");
+        await bridge.invoke({ type: "spawn", operationId: "spawn", name: "Review", task: "Review." });
+      },
+    };
+  };
+  const reviewSays = (text: string, settlesThrough = 0): WorkMessage => ({ type: "message", from: { relation: "child", id: "review", name: "Review" }, text, done: true, settlesThrough });
+
+  // It ends its turn while its review runs: no stop. The owner then talks to it and stops that turn himself.
+  const waiting = lead();
+  await waiting.startsReview();
+  waiting.ends("Waiting for the review.");
+  waiting.bridge.runStarting("user");
+  waiting.ends("OWNER_CHAT", { aborted: true });
+  assert.deepEqual(waiting.reports, [], "the owner's own turn is not the parent's business");
+
+  const failing = lead();
+  await failing.startsReview();
+  failing.ends("", { error: "provider down" });
+  assert.deepEqual(failing.reports.map((report) => report.reason), ["failed"], "a failed turn is no wait, though its review still runs");
+
+  // After a progress report, the review's result reaches the model through dock_wait in a turn the owner
+  // started, before or while it waits. The lead owes its parent the result: ending without it is reported.
+  for (const arrivedFirst of [true, false]) {
+    const waits = lead();
+    await waits.startsReview();
+    await waits.toParent(false);
+    waits.ends("Progress sent.");
+    waits.bridge.runStarting("user");
+    if (arrivedFirst) waits.bridge.receive(reviewSays("REVIEW_DONE"));
+    const waited = waits.waits({ all: true, timeoutSeconds: 5 });
+    if (!arrivedFirst) waits.bridge.receive(reviewSays("REVIEW_DONE"));
+    assert.equal((await waited).details.ended, "received");
+    waits.ends("REVIEW_PASSED");
+    assert.deepEqual(waits.reports.map((report) => [report.reason, report.lastWords]), [["ended", "REVIEW_PASSED"]], `arrived ${arrivedFirst ? "before" : "during"} the wait`);
+  }
+
+  // A final result sent from inside another tool settles the debt, so the review's late message does not
+  // turn the next quiet turn into a stop.
+  const nested = lead();
+  await nested.startsReview();
+  await nested.toParent(false);
+  nested.ends("Progress sent.");
+  nested.bridge.runStarting("user");
+  await nested.toParent(true, "code-call");
+  nested.bridge.toolEnded({ toolName: "code", isError: false, result: {} });
+  nested.ends("Sent the result.");
+  nested.setIdle(true);
+  nested.bridge.receive(reviewSays("REVIEW_LATE"));
+  nested.bridge.runStarting("custom");
+  nested.ends("Noted.");
+  assert.deepEqual(nested.reports, []);
+
+  // As a parent: its review's final result for the task arrives after it sent the review more. The review still
+  // owes the newer answer, whichever arrived first, so the lead's quiet turn is a wait, and it reads as such.
+  const parentOfReview = lead();
+  await parentOfReview.startsReview();
+  parentOfReview.bridge.receive(reviewSays("OLD_RESULT", 0));
+  await parentOfReview.bridge.invoke({ type: "send", operationId: "more", target: "Review", message: "Check the tests too." });
+  assert.deepEqual(parentOfReview.bridge.children.waiting.map((child) => child.id), ["review"]);
+  parentOfReview.ends("Waiting for the newer answer.");
+  assert.deepEqual(parentOfReview.reports, []);
+  // The earlier result is still waiting to go into the conversation, so dock_wait takes it, and says so too.
+  const waited = await parentOfReview.waits({ timeoutSeconds: 5 });
+  const waitText = waited.content[0]!.text;
+  assert.ok(waitText.includes("Still working: \"Review\"") && waitText.includes("[来自子 Work「Review」· 已完成，你后来发的消息它还没回]\nOLD_RESULT"), waitText);
+  parentOfReview.setIdle(true);
+  parentOfReview.bridge.receive(reviewSays("OLDER_STILL", 0));
+  assert.ok(parentOfReview.state.messages.some(({ message }) => String((message as { content?: unknown }).content).startsWith("[来自子 Work「Review」· 已完成，你后来发的消息它还没回]\nOLDER_STILL")));
+  parentOfReview.bridge.receive(reviewSays("NEW_RESULT", 1));
+  assert.deepEqual(parentOfReview.bridge.children.waiting, []);
+
+  // A final result's receipt that comes back late, after a newer parent message went in, does not settle it.
+  const late = lead();
+  late.bridge.runStarting("user");
+  late.setIdle(true);
+  late.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q1", number: 1 });
+  const answering = late.toParent(true, "code-call");
+  late.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q2", number: 2 });
+  await answering;
+  await late.startsReview();
+  late.ends("Waiting for the review.");
+  late.bridge.receive(reviewSays("REVIEW_DONE"));
+  late.bridge.runStarting("custom");
+  late.ends("Review passed.");
+  assert.deepEqual(late.reports.map((report) => [report.reason, report.readThrough]), [["ended", 2]], "Q2 was still owed, as the report says");
+
+  // Its final result says which of its parent's messages it had read; a newer one is still owed (Host side).
+  const crossing = lead();
+  crossing.bridge.runStarting("user");
+  crossing.setIdle(true);
+  crossing.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q2", number: 2 });
+  await crossing.toParent(true);
+  assert.equal(crossing.sends.at(-1)!.readThrough, 2);
+});
+
+// Card #674 review (Astra): a child Work whose final result came before its call's receipt was forgotten
+// once enough other child Works had finished, and its late receipt then made it owe that result again.
+test("a final result that came before its receipt is kept until the receipt pairs with it", () => {
+  const children = new ChildMessages();
+  const status = (id: string) => ({ ...notification.target, id, name: id });
+  const result = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: "done", done: true, settlesThrough: 0 });
+  children.receive(result("early"));
+  for (let index = 0; index < 100; index += 1) {
+    children.noteWork({ type: "spawn", taskStatus: "accepted", instance: status(`other-${index}`) });
+    children.receive(result(`other-${index}`));
+  }
+  children.noteWork({ type: "spawn", taskStatus: "accepted", instance: status("early") });
+  assert.deepEqual(children.waiting, []);
 });

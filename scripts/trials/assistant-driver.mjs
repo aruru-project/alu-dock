@@ -3,6 +3,7 @@
 // person to read. STEPS picks what to run, in order; MODEL=provider/id and THINKING pick her model.
 const { DockClient } = await import("/opt/alu/dist/src/control/dock-client.js");
 const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+const { execFileSync } = await import("node:child_process");
 
 const client = new DockClient({ socketPath: "/root/dock.sock", timeoutMs: 60_000, longMutationTimeoutMs: 180_000 });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -93,6 +94,27 @@ const count = async (id, match) => (await entries(id)).filter(match).length;
 const fromWork = (entry) => entry.type === "custom_message" && entry.customType === "dock-work-message";
 const herWords = (entry) => entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop";
 const file = (path) => existsSync(path) ? clip(readFileSync(path, "utf8").trim(), 400) : "（没有这个文件）";
+
+/** The Works under her, each under the Work that created it (card #674). */
+async function tree(id) {
+  const all = await client.list();
+  const lines = [];
+  const walk = (parentId, depth) => {
+    for (const work of all.filter((item) => item.parentId === parentId)) {
+      lines.push(`  ${"    ".repeat(depth)}「${work.name ?? work.displayName}」 ${work.lifecycle}/${work.execution}`);
+      walk(work.id, depth + 1);
+    }
+  };
+  walk(id, 0);
+  return lines.join("\n") || "  （没有）";
+}
+const grandchildren = async (id) => {
+  const all = await client.list();
+  const hers = new Set(all.filter((work) => work.parentId === id).map((work) => work.id));
+  return all.filter((work) => hers.has(work.parentId));
+};
+/** How many processes in this container run exactly `command`, not the shells around them. */
+const running = (command) => { try { return Number(execFileSync("pgrep", ["-fc", `^${command}$`], { encoding: "utf8" }).trim()); } catch { return 0; } };
 
 /** Waits for something to wake her on its own, and for the reply that follows. */
 async function woken(id, label, match, had, timeoutMs) {
@@ -195,9 +217,32 @@ const steps = {
   },
   /** The whole conversation again, from its start. */
   async transcript(id) { writeFileSync(PRINTED, "0"); await transcript(id); },
-  /** What a Work she handed something to was given and did: CHILD is part of its name. */
+  /** She hands one Work a task in parts, and that Work hands the parts to child Works of its own (card #674). */
+  async team(id) {
+    const had = await count(id, fromWork);
+    await say(id, `派一个 Work 负责这件事：在 ${PROJECT}/team 目录里准备 a.txt、b.txt、c.txt 三份文件，每份都要先跑 \`sleep 30\` 再把 \`date\` 的输出写进去。三份互不相干，让它再开三个子 Work 分头并行做，它自己汇总，做完告诉我三份文件里各写了什么。`);
+    if ((await children(id)).length === 0) { console.log("  （她没有派出 Work）"); return; }
+    await waitFor("她派出的 Work 再开子 Work", async () => (await grandchildren(id)).length > 0, 180_000).catch((error) => console.log(`  （${error.message}）`));
+    await sleep(5_000);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+    await woken(id, "派出的 Work 交回结果", fromWork, had, 480_000);
+    for (const name of ["a", "b", "c"]) console.log(`  ${PROJECT}/team/${name}.txt：${file(`${PROJECT}/team/${name}.txt`)}`);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+  },
+  /** Stopping what she handed out stops the child Works under it too. */
+  async teamstop(id) {
+    await say(id, `再派一个 Work 在 ${PROJECT} 里负责：让它开两个子 Work，各自跑 \`sleep 900\`，都跑完再告诉我。`);
+    if ((await children(id)).length === 0) { console.log("  （她没有派出 Work）"); return; }
+    await waitFor("两个子 Work 都跑起来", async () => running("sleep 900") >= 2, 240_000).catch((error) => console.log(`  （${error.message}）`));
+    console.log(`  她下面的 Work：\n${await tree(id)}\n  在跑的 sleep 900：${running("sleep 900")} 个\n`);
+    await say(id, "停，不用跑了，全停掉。");
+    await sleep(5_000);
+    console.log(`  之后她下面的 Work：\n${await tree(id)}\n  还在跑的 sleep 900：${running("sleep 900")} 个\n`);
+  },
+  async tree(id) { console.log(await tree(id)); },
+  /** What a Work under her was given and did: CHILD is part of its name. */
   async child(id) {
-    const work = (await client.list()).find((item) => item.parentId === id && (item.name ?? "").includes(process.env.CHILD ?? ""));
+    const work = (await client.list()).find((item) => !item.assistant && (item.name ?? "").includes(process.env.CHILD ?? ""));
     if (!work) { console.log("  （没有这个子 Work）"); return; }
     console.log(`  子 Work「${work.name}」 ${work.lifecycle}/${work.execution}`);
     for (const entry of await entries(work.id)) { const line = render(entry); if (line !== undefined) console.log(line.replace("【阿露】", "【子 Work】").replace("【主人】", "【交给它的】")); }

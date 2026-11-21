@@ -7,7 +7,7 @@ import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { DockClient } from "./dock-client.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
-import { dockTargetVisible, observationStatus, withReplyShortened } from "./instance-observation-service.js";
+import { controlledByOwnChild, dockTargetVisible, observationStatus, withReplyShortened } from "./instance-observation-service.js";
 import type { InstanceManager } from "./instance-manager.js";
 import type { MainMachineController } from "./machine-transport.js";
 import type { InstanceReadResult, MachineDto } from "./protocol.js";
@@ -62,7 +62,9 @@ export class MainMachineDockToolsAuthority {
     const source = snapshots.find((item) => item.id === sourceMainId);
     if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
     if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot act on other work. Open active work and try again.");
-    assertChildMayRequest(source, request);
+    // A child Work's own Host answers everything it asks; Main hears only from a machine with an older
+    // Alu Dock, whose child Works are all helpers.
+    assertChildMayRequest(source, request, false);
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
       const result = await this.observation.observe(sourceMainId, request);
@@ -78,7 +80,7 @@ export class MainMachineDockToolsAuthority {
       send,
     }, this.options.isResidentAssistant?.(sourceMainId) === true);
     if (request.type === "speed") {
-      const target = request.target === undefined ? source : requireHumanTarget(snapshots.filter(item => dockTargetVisible(source, item)), request.target);
+      const target = request.target === undefined ? source : controlTarget(source, snapshots, request.target);
       const setting = request.selection === undefined
         ? (await this.options.localClient.settings(target.id)).settings.find(item => item.key === "modelSpeed")
         : (await this.options.localClient.updateSetting(target.id, { key: "modelSpeed", value: request.selection }, request.operationId)).setting;
@@ -86,7 +88,7 @@ export class MainMachineDockToolsAuthority {
       return { type: "speed", setting };
     }
     if (request.type === "interrupt" || request.type === "stop") {
-      const target = requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), request.target);
+      const target = controlTarget(source, snapshots, request.target);
       const result = request.type === "interrupt" ? await this.options.localClient.abort(target.id, request.operationId) : await this.options.localClient.stop(target.id, request.operationId);
       return { type: request.type, instance: observationStatus(result.instance) };
     }
@@ -103,7 +105,7 @@ export class MainMachineDockToolsAuthority {
     }
     if (request.type === "send") return sendDockMessage(source, request, {
       send,
-      resolveTarget: (target) => requireHumanTarget(snapshots.filter(item => dockTargetVisible(source, item)), target),
+      resolveTarget: (target) => controlTarget(source, snapshots, target),
     });
     throw new Error("File delivery, the model list for child Works and messages between a Work and its child Works are answered by the source Host");
   }
@@ -180,4 +182,11 @@ function resolveCreateMachine(machines: readonly MachineDto[], sourceMachineId: 
   }
   if (matches.length > 1) throw new Error(`Several Machines are named ${JSON.stringify(requestedName)}. Use a unique Machine name and try again.`);
   return matches[0] as MachineDto;
+}
+
+/** A Work the source may control, by name or ID; one under its own child Work is that child Work's (card #674). */
+function controlTarget(source: InstanceSnapshot, snapshots: readonly InstanceSnapshot[], target: string): InstanceSnapshot {
+  const owned = controlledByOwnChild(source, snapshots, target);
+  if (owned !== undefined) throw new Error(owned);
+  return requireHumanTarget(snapshots.filter((item) => dockTargetVisible(source, item)), target);
 }

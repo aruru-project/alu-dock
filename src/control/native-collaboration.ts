@@ -1,13 +1,22 @@
 import { ASSISTANT_CHILD_THINKING_LEVEL, dockMessageText } from "../core/dock-tools.js";
 import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
+import { MISSING_WORKING_DIRECTORY } from "../core/local-path.js";
 import { systemToolOperation } from "./system-tools.js";
 
-/** A child Work talks only to its parent: it may message it, and its Worker reports a turn that ended without doing so. */
-export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">, request: DockToolsRequest): void {
-  if (source.parentId !== undefined && request.type !== "send" && request.type !== "unreported_stop") {
-    throw new Error("A child Work can only message the Work that created it. Use dock_send to ask it something or to give it your result.");
-  }
+/** What a lead child Work asks about its own child Works (card #674), besides messaging its parent. */
+const LEAD_REQUESTS: ReadonlySet<DockToolsRequest["type"]> = new Set(["spawn", "models", "interrupt", "stop", "list", "inspect"]);
+
+/**
+ * A child Work talks only to its parent: it may message it, and its Worker reports a turn that ended without
+ * doing so. A lead also starts and manages child Works of its own, and reaches no other Work.
+ */
+export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">, request: DockToolsRequest, lead: boolean): void {
+  if (source.parentId === undefined || request.type === "send" || request.type === "unreported_stop") return;
+  if (lead && LEAD_REQUESTS.has(request.type)) return;
+  throw new Error(lead
+    ? "A child Work can only message the Work that created it and start, message, check, interrupt or stop its own child Works."
+    : "A child Work can only message the Work that created it. Use dock_send to ask it something or to give it your result.");
 }
 
 /** The creation of the child Work a spawn request makes; a SubHost finds the child it created for Main by it. */
@@ -59,17 +68,25 @@ export async function spawnDockWorker(
   // model goes through the target's normal Pi default; her chat settings are not engineering defaults.
   // Pi still clamps the requested thinking level to what the selected model supports.
   const thinkingLevel = request.thinkingLevel ?? (residentAssistant ? ASSISTANT_CHILD_THINKING_LEVEL : source.executor.thinkingLevel);
-  const created = await port.create({
-    type: "create", operationId: childCreationOperation(request.operationId),
-    cwd: request.cwd ?? source.cwd, name: request.name,
-    model: request.model ?? (residentAssistant ? undefined : source.executor.model),
-    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-    child: {
-      parentId: source.id,
-      ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
-      ...(request.withContext ? { withParentContext: true } : {}),
-    },
-  });
+  let created: Awaited<ReturnType<typeof port.create>>;
+  try {
+    created = await port.create({
+      type: "create", operationId: childCreationOperation(request.operationId),
+      cwd: request.cwd ?? source.cwd, name: request.name,
+      ...(request.createDirectory ? { createDirectory: true } : {}),
+      model: request.model ?? (residentAssistant ? undefined : source.executor.model),
+      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+      child: {
+        parentId: source.id,
+        ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
+        ...(request.withContext ? { withParentContext: true } : {}),
+      },
+    });
+  } catch (error) {
+    // The task may call for a directory that does not exist yet: say how to have Dock create it.
+    if (request.createDirectory || !(error instanceof Error) || !error.message.includes(MISSING_WORKING_DIRECTORY)) throw error;
+    throw new Error(`${error.message}. If the task calls for this new directory, start the child Work again with createDirectory=true.`);
+  }
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
   let sent: Awaited<ReturnType<typeof port.send>>;
   try {

@@ -12,7 +12,7 @@ import { waitFor } from "./support/plan-goal-provider.js";
 // The requested workflow: one Work, its current/future children and the independent assistant.
 // Only model HTTP replies are fake. No subscription, credentials or external service is used.
 test("Work speed can be shared with children, overridden individually and extended through Main's support data", { timeout: 60_000 }, async context => {
-  const team = await startNativeTeam(context, ["coordinator", "worker"], { prefix: "alu-model-speed-", modelService: true, assistant: true, settings: { compaction: { enabled: false, keepRecentTokens: 32, reserveTokens: 100 } } });
+  const team = await startNativeTeam(context, ["coordinator", "worker", "helper"], { prefix: "alu-model-speed-", modelService: true, assistant: true, settings: { compaction: { enabled: false, keepRecentTokens: 32, reserveTokens: 100 } } });
   const supportFile = join(team.root, "model-speed-support.json");
   const support = { providers: { upstream: { fast: ["fixture"], ultrafast: [] as string[] } }, aliases: {} as Record<string, string> };
   await writeFile(supportFile, JSON.stringify(support));
@@ -33,7 +33,7 @@ test("Work speed can be shared with children, overridden individually and extend
   const assistant = await team.assistantWork();
   const parent = await trustOnce(trust => client.create(team.cwd, "parent", "speed-parent", trust));
   const other = await trustOnce(trust => client.create(team.cwd, "independent", "speed-independent", trust));
-  const { coordinator, worker } = team.providers;
+  const { coordinator, worker, helper } = team.providers;
   const tier = (request: { body: unknown }) => (request.body as { service_tier?: string }).service_tier;
   const setting = async (id: string) => (await client.settings(id)).settings.find(item => item.key === "modelSpeed")!;
   const supportNotices: string[] = [];
@@ -55,7 +55,7 @@ test("Work speed can be shared with children, overridden individually and extend
   // the machine model picker. Read the same settings/model queries the speed UI uses.
   assert.deepEqual((await setting(parent.id)).allowedValues, ["standard"]);
   assert.deepEqual((await setting(assistant.id)).allowedValues, ["standard"]);
-  Object.assign(support.aliases, { coordinator: "upstream", worker: "upstream" });
+  Object.assign(support.aliases, { coordinator: "upstream", worker: "upstream", helper: "upstream" });
   await writeFile(supportFile, JSON.stringify(support));
   assert.deepEqual((await catalogReader.read()).models.find(model => model.provider === "worker")?.speedTiers, ["standard", "fast"]);
   await client.models(parent.id); // Also starts an optional support refresh.
@@ -142,6 +142,25 @@ test("Work speed can be shared with children, overridden individually and extend
   const hers = await coordinator.request(2);
   assert.equal(tier(hers), "ultrafast", "The assistant uses the same speed path without a Pi extension");
   hers.text("你好。");
+  await idle(assistant.id);
+  // Card #674: her child Work may start child Works of its own. Shared speed passes through it to them.
+  await client.updateSetting(assistant.id, { key: "modelSpeed", value: { tier: "fast", scope: "all" } });
+  const lead = await team.registry!.invokeDockTool(assistant.id, { type: "spawn", operationId: "her-lead", task: "Have a helper read the memo.", name: "lead", model: { provider: "worker", id: "fixture" } });
+  assert.ok(lead.type === "spawn");
+  const leadFirst = await worker.request(7);
+  assert.equal(tier(leadFirst), "priority");
+  leadFirst.tools({ id: "lead-spawn", name: "dock_spawn", arguments: { name: "helper", task: "Read the memo.", model: { provider: "helper", id: "fixture" } } });
+  const helperFirst = await helper.request(0);
+  assert.equal(tier(helperFirst), "priority", "A child of her child Work follows her shared speed through it");
+  (await worker.request(8)).text("Waiting for the helper.");
+  await idle(lead.instance.id);
+  await client.updateSetting(assistant.id, { key: "modelSpeed", value: { tier: "ultrafast", scope: "all" } });
+  helperFirst.tools({ id: "helper-read", name: "read", arguments: { path: memo } });
+  const helperNext = await helper.request(1);
+  assert.equal(tier(helperNext), "ultrafast", "Her change reaches it through its parent, which still follows her");
+  helperNext.tools({ id: "helper-done", name: "dock_send", arguments: { message: "Memo read.", done: true } });
+  (await worker.request(9)).tools({ id: "lead-done", name: "dock_send", arguments: { message: "Done.", done: true } });
+  (await coordinator.request(3)).text("收到。");
   await idle(assistant.id);
   assert.equal((await client.assistantSettings()).extractionSpeed, "fast", "Background memory has a separate selection");
   for (const original of [parent, assistant]) {

@@ -640,7 +640,7 @@ class AssistantAgent implements WorkerAgent {
     const wokenBy = message.type === "child_stopped" ? `子 Work${name}没交结果就停下了`
       : message.from.relation === "parent" ? `父 Work${name}的消息`
         : `子 Work${name}${message.done ? "交来的结果" : "的消息"}`;
-    this.arrive("work", workMessageEntry(message), wokenBy, message.from.relation === "child" ? message.from.id : undefined);
+    this.arrive("work", workMessageEntry(message, this.desk.owes(message.from.id)), wokenBy, message.from.relation === "child" ? message.from.id : undefined);
   }
 
   private watchFired(notification: ObservationNotification): void {

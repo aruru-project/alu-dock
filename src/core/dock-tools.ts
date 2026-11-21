@@ -73,26 +73,37 @@ export function shortenLastWords(text: string): string {
  * recipient's conversation as a message from that Work, never as the user's (card #666).
  */
 export type WorkMessage =
-  /** `done` marks a child Work's final result for the work it was handed. */
-  | { type: "message"; from: WorkMessageSender; text: string; done?: true }
-  /** Dock's notice that a child Work stopped while it still owed this Work a result. */
-  | { type: "child_stopped"; from: WorkMessageSender; reason: ChildStopReason; error?: string; lastWords?: string };
+  /**
+   * `done` marks a child Work's final result for the work it was handed. A parent's messages to one child
+   * Work carry `number`, counted from 1 (its task counts as 0), so its final result can say which of them
+   * it answered: `settlesThrough`.
+   */
+  | { type: "message"; from: WorkMessageSender; text: string; done?: true; number?: number; settlesThrough?: number }
+  /** Dock's notice that a child Work stopped while it still owed this Work a result, for the messages handed to it through `settlesThrough`. */
+  | { type: "child_stopped"; from: WorkMessageSender; reason: ChildStopReason; error?: string; lastWords?: string; settlesThrough?: number };
 
 export type DockToolsRequest =
   | ObservationRequest
   | { type: "machines" }
   | { type: "models" }
   | { type: "speed"; operationId: string; target?: string; selection?: ModelSpeedSelection | null }
-  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
+  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; createDirectory?: boolean; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
   /** `assistant` is only accepted from older callers so they receive a clear refusal: Main already keeps one assistant. */
   | { type: "create"; operationId: string; cwd: string; createDirectory?: boolean; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
-  /** A child Work omits target: it can only message its parent, and `done` says whether this is its final result. */
-  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
-  /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */
-  | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string };
+  /**
+   * A child Work omits target to message its parent, and `done` says whether this is its final result;
+   * `readThrough` is the number of the parent's last message it had read, so a newer one is still owed.
+   * A lead child Work names one of its own child Works with target.
+   */
+  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean; readThrough?: number }
+  /**
+   * A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is
+   * still owed; `readThrough` is the number of the parent's last message that turn had read.
+   */
+  | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string; readThrough?: number };
 
 /** What the Host creates for dock_create, plus what dock_spawn chooses for a child. */
 export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
@@ -100,7 +111,19 @@ export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
   child?: DockChildSelection;
 };
 
-/** A child belongs to a top-level Work on the same Host; its tools never exceed what the parent named. */
+/** The Dock tool that starts a child Work. A child Work granted it may become a lead (card #674). */
+export const DOCK_SPAWN_TOOL = "dock_spawn";
+/** Every child Work can report to its parent with this tool, whatever else its parent allowed. */
+export const DOCK_REPORT_TOOL = "dock_send";
+
+/**
+ * What a child Work may do besides reporting to its parent (card #674). A lead starts child Works of its
+ * own: no Work above it does the work itself, as when the resident assistant hands work out. A helper
+ * works for a Work that does, and starts none.
+ */
+export type ChildRole = "helper" | "lead";
+
+/** A child belongs to a Work on the same Host that may start child Works; its tools never exceed what the parent named. */
 export interface DockChildSelection {
   parentId: string;
   allowedTools?: string[];
@@ -108,16 +131,23 @@ export interface DockChildSelection {
   withParentContext?: boolean;
 }
 
-/** What starts a child's Worker; the Registry has already turned `withParentContext` into its session file. */
-export type DockChildStart = Omit<DockChildSelection, "withParentContext">;
+/**
+ * What starts a child's Worker; the Registry has already turned `withParentContext` into its session file,
+ * applied its parent's tool ceiling to `allowedTools` and decided its role.
+ */
+export type DockChildStart = Omit<DockChildSelection, "withParentContext"> & { role: ChildRole };
 
 export type DockToolsResult =
   | ObservationResult
   | ({ type: "models" } & ChildModelList)
   | { type: "speed"; setting: SettingDto }
   | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; error?: string }
-  | { type: "interrupt"; instance: ObservedInstanceStatus }
-  | { type: "stop"; instance: ObservedInstanceStatus }
+  /**
+   * On a parent's own child Work, `settlesThrough` is the number of the parent's messages it took back by this
+   * (card #674): one still on its way when it was taken back stays settled, one sent after it does not.
+   */
+  | { type: "interrupt"; instance: ObservedInstanceStatus; settlesThrough?: number }
+  | { type: "stop"; instance: ObservedInstanceStatus; settlesThrough?: number }
   /** `currentHostId` is the source Work's own Machine; only the source Host adds it. */
   | { type: "machines"; machines: MachineDto[]; currentHostId?: string }
   | { type: "deliver"; deliverable: DeliverableDto }
@@ -132,7 +162,10 @@ export type DockToolsResult =
     error?: string;
   }
   /** A message between a Work and its parent or child Work, taken by the recipient's Worker. */
-  | { type: "work_message"; to: "parent" | "child"; target: ObservedInstanceStatus; acceptedAt: string; done?: true }
+  /** A child Work learns only that its message reached its parent, nothing of the parent's state. */
+  | { type: "work_message"; to: "parent"; acceptedAt: string; done?: true }
+  /** `number` is the message's number for this child Work; its final result says which numbers it answered. */
+  | { type: "work_message"; to: "child"; target: ObservedInstanceStatus; acceptedAt: string; number: number }
   | { type: "unreported_stop"; notified: boolean };
 
 export interface DockToolsHostPort {

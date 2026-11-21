@@ -37,6 +37,8 @@ export async function createAssistantInstance(options: CreateAssistantInstanceOp
     assistant: true,
     cwd,
     executor: { kind: ASSISTANT_EXECUTOR_KIND, version: DOCK_VERSION },
+    // She writes no files and runs no commands: the child Works she hands work to do it (card #674).
+    handsOn: false,
     launch: (environment) => assistantWorkerLaunch(init, environment, workerEntry),
   });
 }

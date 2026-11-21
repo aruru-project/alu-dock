@@ -373,17 +373,25 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   const groupedWorks = computed(() => {
     const groups: Record<'assistant' | 'current' | 'continue' | 'history', Work[]> = { assistant: [], current: [], continue: [], history: [] }
+    // A child Work the assistant handed work to may have child Works of its own (card #674); each sits under its parent.
+    const withChildren = (parent: Work): Work[] => [parent, ...app.works.filter(work => work.parentId === parent.id).flatMap(withChildren)]
     const parents = app.works.filter(work => !work.parentId)
     for (const parent of parents) {
       const group = groups[isResidentAssistant(parent) ? 'assistant' : workGroup(parent)]
-      if (!isResidentAssistant(parent)) group.push(parent)
-      group.push(...app.works.filter(work => work.parentId === parent.id))
+      const tree = withChildren(parent)
+      group.push(...(isResidentAssistant(parent) ? tree.slice(1) : tree))
     }
     // A failed cleanup must stay visible even after its parent retired.
-    const parentIds = new Set(app.works.filter(work => !work.parentId).map(work => work.id))
-    for (const child of app.works.filter(work => work.parentId && !parentIds.has(work.parentId))) groups.current.push(child)
+    const listedIds = new Set(app.works.map(work => work.id))
+    for (const child of app.works.filter(work => work.parentId && !listedIds.has(work.parentId))) groups.current.push(...withChildren(child))
     return groups
   })
+
+  /** A child Work whose parent is itself a listed child Work sits one step further in. */
+  function isGrandchild(work: Work) {
+    const parent = work.parentId ? app.works.find(candidate => candidate.id === work.parentId) : undefined
+    return !!parent?.parentId
+  }
 
   function workMachineTag(work: Work) {
     return subhostMachineName(hostMachines.value, work.hostId)
@@ -504,6 +512,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, checkContinuedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, refreshHostMachinesQuietly, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, retryAssistantHandoff, handoffRetryError, handoffRetryPending, acceptCreatedWork,
+    hostMachines, machineListError, refreshHostMachinesQuietly, newWorkMachinesLoading, newWorkCompact, groupedWorks, isGrandchild, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, retryAssistantHandoff, handoffRetryError, handoffRetryPending, acceptCreatedWork,
   }
 })

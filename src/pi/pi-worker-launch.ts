@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 
+import type { ChildRole } from "../core/dock-tools.js";
 import type { JsonObject } from "../core/json-value.js";
 import type { WorkerLaunch } from "../worker/worker-process.js";
 import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
@@ -11,8 +12,8 @@ export interface PiWorkerInitOptions {
   tools?: string[];
   excludeTools?: string[];
   workerConfig?: JsonObject;
-  /** A child Work reports only to its parent. */
-  child?: true;
+  /** A child Work reports only to its parent; a lead also manages child Works of its own (card #674). */
+  child?: ChildRole;
   /** A child's exact tool ceiling, chosen by its parent. */
   allowedTools?: string[];
   projectTrusted: boolean;

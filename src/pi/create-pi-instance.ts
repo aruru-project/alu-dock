@@ -38,7 +38,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     ...(tools === undefined ? {} : { tools }),
     ...(excludeTools === undefined ? {} : { excludeTools }),
     ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
-    ...(child === undefined ? {} : { child: true }),
+    ...(child === undefined ? {} : { child: child.role }),
     ...(child?.allowedTools === undefined ? {} : { allowedTools: child.allowedTools }),
     projectTrusted: options.projectTrusted,
     ...(sessionFile === undefined ? {} : { sessionFile: resolve(sessionFile) }),
@@ -51,6 +51,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     ...(child === undefined ? {} : { parentId: child.parentId }),
     cwd,
     executor: { kind: "pi-sdk", version: PI_SDK_VERSION },
+    handsOn: true,
     launch: (environment) => piWorkerLaunch(init, environment, workerEntry),
   });
 }

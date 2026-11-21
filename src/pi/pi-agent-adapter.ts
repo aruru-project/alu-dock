@@ -32,7 +32,8 @@ import {
   type UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
 
-import { CHILD_DOCK_TOOL_NAMES, dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
+import { CHILD_DOCK_TOOL_NAMES, dockToolsExtension, LEAD_DOCK_TOOL_NAMES, type DockToolsBridge } from "./dock-tools-extension.js";
+import type { ChildRole } from "../core/dock-tools.js";
 import { dockAttachmentsExtension } from "./dock-attachments-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachment-access.js";
 import { appendDockAttachmentContext, extractDockAttachmentContext } from "./dock-attachment-context.js";
@@ -168,6 +169,9 @@ export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker manag
 
 export const ALU_DOCK_CHILD_GUIDANCE = "You are a child Work that another Dock Work, your parent, created for its task. You and your parent work at the same time, and it sees only what you send it with dock_send. While you work, send with done: false what it should know or answer now, such as a finding that affects its work, a question or a point to agree on, then keep working; never send acknowledgments or empty progress. When you finish the work it handed you, send your result with done: true, which ends your turn. Your parent's messages to you begin with [来自父 Work「its name」]. When the user talks to you directly, answer the user. You cannot reach any other Work.";
 
+/** Card #674: the child Work of a parent that does no work itself, such as the resident assistant, may hand parts of it out. */
+export const ALU_DOCK_LEAD_GUIDANCE = "You are a child Work that another Dock Work, your parent, created for its task. You and your parent work at the same time, and it sees only what you send it with dock_send without target. While you work, send it with done: false what it should know or answer now, such as a finding that affects its work, a question or a point to agree on, then keep working; never send acknowledgments or empty progress. When you finish the work it handed you, send your result with done: true, which ends your turn. Your parent does not do the work itself, so you may hand parts of it to child Works of your own with dock_spawn, such as an implementer or an independent reviewer. They report to you, not to your parent; weigh what they send before you pass any of it on. They cannot start child Works and never get a tool you were not given. While they work you may end your turn: that does not count as stopping without your result, and their messages wake you. Your parent's messages to you begin with [来自父 Work「its name」]. When the user talks to you directly, answer the user. You cannot reach any Work other than your parent and your own child Works.";
+
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
   "setBeforeSessionInvalidate" | "setRebindSession" | "newSession" | "switchSession" | "fork" | "dispose"
@@ -219,8 +223,8 @@ export interface CreatePiAgentAdapterOptions {
   excludeTools?: string[];
   /** Pi owns the meaning of these JSON-safe createAgentSession fields. */
   workerConfig?: JsonObject;
-  /** A child Work that reports only to the Work that created it. */
-  child?: boolean;
+  /** A child Work, which reports only to the Work that created it; a lead also manages child Works of its own. */
+  child?: ChildRole;
   /** Exact tools this Work may ever use, enforced in Pi's tool registry. */
   allowedTools?: string[];
   projectTrusted: boolean;
@@ -2082,9 +2086,11 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
-  // A child can always report to its parent, whatever else it was allowed.
+  // A child can always report to its parent, whatever else it was allowed. A lead was allowed dock_spawn,
+  // and with it the tools that manage the child Works it starts.
   const allowedTools = options.allowedTools === undefined ? undefined
-    : options.child ? [...new Set([...options.allowedTools, ...CHILD_DOCK_TOOL_NAMES])] : options.allowedTools;
+    : options.child === undefined ? options.allowedTools
+      : [...new Set([...options.allowedTools, ...(options.child === "lead" ? LEAD_DOCK_TOOL_NAMES : CHILD_DOCK_TOOL_NAMES)])];
   const planGoalPort: PlanGoalPort = {};
   const modelSpeed = options.modelSpeed ?? new ModelSpeedRuntime();
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
@@ -2097,7 +2103,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
   const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
-  let childStarting = options.child === true;
+  let childStarting = options.child !== undefined;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
     const settingsManager = SettingsManager.create(canonicalCwd, agentDir, {
@@ -2121,7 +2127,8 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
         extensionsOverride: ownCanonicalShowImage,
-        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.child ? [ALU_DOCK_CHILD_GUIDANCE] : [])],
+        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE,
+          ...(options.child === "lead" ? [ALU_DOCK_LEAD_GUIDANCE] : options.child === "helper" ? [ALU_DOCK_CHILD_GUIDANCE] : [])],
         ...(options.dockAttachmentPort === undefined ? {} : {
           additionalSkillPaths: [bundledDockSkillPath("dock-attachments")],
         }),

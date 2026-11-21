@@ -51,6 +51,8 @@ export interface CreateWorkerInstanceOptions extends WorkerInstanceOptions {
   cwd: string;
   /** Which kind of Agent runs in the Worker, as clients see it. */
   executor: { kind: string; version: string };
+  /** false for a kind of Agent that only coordinates and never does the work itself; see `ManagedInstance.handsOn`. */
+  handsOn: boolean;
   /** The kind's process, started in the workspace's environment. */
   launch: (workspaceEnvironment: NodeJS.ProcessEnv) => WorkerLaunch;
 }
@@ -123,6 +125,7 @@ export async function createWorkerInstance(options: CreateWorkerInstanceOptions)
       dockToolsEnabled,
       ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
       ...(options.assistant ? { assistant: true as const } : {}),
+      handsOn: options.handsOn,
     });
     await runtime.control({ type: "activate" });
     instance.synchronizeModelState();

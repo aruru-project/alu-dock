@@ -35,7 +35,7 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
   const dockToolsBridge: DockToolsBridge = new DockToolsBridge(host.dockToolsEnabled(), {
     configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),
     invoke: host.invokeDockTool,
-  }, init.child === true);
+  }, init.child);
 
   const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
   const reopened = sessionPath
@@ -124,7 +124,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     return input.map((item) => text(item, 256, label) as string);
   };
   if (typeof value.projectTrusted !== "boolean") throw new Error("Worker init project trust is invalid");
-  if (value.child !== undefined && value.child !== true) throw new Error("Worker init child role is invalid");
+  if (value.child !== undefined && value.child !== "helper" && value.child !== "lead") throw new Error("Worker init child role is invalid");
   return {
     cwd: text(value.cwd, 16_384, "Worker cwd") as string,
     agentDir: text(value.agentDir, 16_384, "Worker agent directory") as string,
@@ -132,7 +132,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(list(value.tools, "Worker tools") === undefined ? {} : { tools: list(value.tools, "Worker tools") }),
     ...(list(value.excludeTools, "Worker excluded tools") === undefined ? {} : { excludeTools: list(value.excludeTools, "Worker excluded tools") }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, "Worker configuration") }),
-    ...(value.child === undefined ? {} : { child: true as const }),
+    ...(value.child === undefined ? {} : { child: value.child }),
     ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
     projectTrusted: value.projectTrusted,
     ...(text(value.sessionFile, 16_384, "Worker session file", true) === undefined ? {} : { sessionFile: value.sessionFile as string }),

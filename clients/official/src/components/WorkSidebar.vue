@@ -21,7 +21,7 @@ const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const workActions = useWorkActionsStore()
 const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions)
-const { workMachineTag, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant } = workActions
+const { workMachineTag, isGrandchild, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant } = workActions
 const assistant = useAssistantStore()
 const assistantMemory = useAssistantMemoryStore()
 const assistantSearch = useAssistantSearchStore()
@@ -73,7 +73,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <div v-if="machineListError" class="alu-sidebar-error">{{ machineListError }}</div>
       <section v-for="group in (['assistant', 'current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group" :aria-label="groupTitle(group)">
         <div class="alu-instance-group-title">{{ groupTitle(group) }}<span>{{ groupedWorks[group].length }}</span></div>
-        <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
+        <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId, 'is-grandchild': isGrandchild(work) }">
           <button class="alu-instance-link" :aria-label="`${work.displayName}，${workPresence(work).label}`" @click="selectWork(work.id)">
             <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
             <span class="alu-instance-copy"><span class="alu-instance-name"><span v-if="work.assistant" class="alu-instance-assistant-tag">助手</span>{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
@@ -187,6 +187,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   overflow: hidden;
 }
 .alu-instance-row.is-child { margin-left: 18px; }
+.alu-instance-row.is-grandchild { margin-left: 36px; }
 .alu-instance-row:hover { background: var(--alu-hover); }
 .alu-instance-row.is-selected { background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); }
 .alu-instance-link { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px 8px; padding-right: 48px; }
