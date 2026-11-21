@@ -1,6 +1,7 @@
 import { ASSISTANT_CHILD_THINKING_LEVEL, dockMessageText } from "../core/dock-tools.js";
 import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
+import { MISSING_WORKING_DIRECTORY } from "../core/local-path.js";
 import { systemToolOperation } from "./system-tools.js";
 
 /** What a lead child Work asks about its own child Works (card #674), besides messaging its parent. */
@@ -67,18 +68,25 @@ export async function spawnDockWorker(
   // model goes through the target's normal Pi default; her chat settings are not engineering defaults.
   // Pi still clamps the requested thinking level to what the selected model supports.
   const thinkingLevel = request.thinkingLevel ?? (residentAssistant ? ASSISTANT_CHILD_THINKING_LEVEL : source.executor.thinkingLevel);
-  const created = await port.create({
-    type: "create", operationId: childCreationOperation(request.operationId),
-    cwd: request.cwd ?? source.cwd, name: request.name,
-    ...(request.createDirectory ? { createDirectory: true } : {}),
-    model: request.model ?? (residentAssistant ? undefined : source.executor.model),
-    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-    child: {
-      parentId: source.id,
-      ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
-      ...(request.withContext ? { withParentContext: true } : {}),
-    },
-  });
+  let created: Awaited<ReturnType<typeof port.create>>;
+  try {
+    created = await port.create({
+      type: "create", operationId: childCreationOperation(request.operationId),
+      cwd: request.cwd ?? source.cwd, name: request.name,
+      ...(request.createDirectory ? { createDirectory: true } : {}),
+      model: request.model ?? (residentAssistant ? undefined : source.executor.model),
+      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+      child: {
+        parentId: source.id,
+        ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
+        ...(request.withContext ? { withParentContext: true } : {}),
+      },
+    });
+  } catch (error) {
+    // The task may call for a directory that does not exist yet: say how to have Dock create it.
+    if (request.createDirectory || !(error instanceof Error) || !error.message.includes(MISSING_WORKING_DIRECTORY)) throw error;
+    throw new Error(`${error.message}. If the task calls for this new directory, start the child Work again with createDirectory=true.`);
+  }
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
   let sent: Awaited<ReturnType<typeof port.send>>;
   try {

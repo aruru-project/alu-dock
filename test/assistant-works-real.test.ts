@@ -100,9 +100,11 @@ test("the assistant's child Work hands parts of its task to child Works of its o
   const client = await team.startHost();
   const alu = await team.assistantWork();
 
+  // Without createDirectory, a directory that does not exist yet fails, saying how to have Dock create it.
+  const newDirectory = join(team.cwd, "新目录", "修 sum");
+  await assert.rejects(team.registry!.invokeDockTool(alu.id, { type: "spawn", operationId: "missing-directory", name: "x", task: "x", cwd: newDirectory }), /start the child Work again with createDirectory=true/u);
   await client.prompt(alu.id, "把 sum.js 修好，找人独立审查一下。", "auto", "lead-start");
   // She hands it out in a directory that does not exist yet: Dock creates it, and the Work starts trusted there.
-  const newDirectory = join(team.cwd, "新目录", "修 sum");
   (await coordinator.request(0)).tools({ id: "spawn-lead", name: "dock_spawn", arguments: { name: "修 sum", task: "修好 sum.js，并找人独立审查。", cwd: newDirectory, createDirectory: true, model: { provider: "implementer", id: "fixture" } } });
   const leadStarted = await implementer.request(0);
   (await coordinator.request(1)).text("派出去了。");

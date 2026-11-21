@@ -25,7 +25,7 @@ import {
   type LocalDockToolsHostPort,
 } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
-import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath } from "../core/local-path.js";
+import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, MISSING_WORKING_DIRECTORY } from "../core/local-path.js";
 import type { JsonObject } from "../core/json-value.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
 import { InstanceBusyError, InstanceNotActiveError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
@@ -1272,6 +1272,6 @@ async function createMissingWorkingDirectory(path: string): Promise<boolean> {
 async function canonicalDirectory(path: string): Promise<string> {
   const lexical = resolve(path);
   const info = await stat(lexical).catch(() => undefined);
-  if (!info?.isDirectory()) throw new Error(`Working directory does not exist: ${lexical}`);
+  if (!info?.isDirectory()) throw new Error(`${MISSING_WORKING_DIRECTORY}: ${lexical}`);
   return realpath(lexical);
 }

@@ -174,7 +174,7 @@ const SPAWN_SCHEMA = {
     name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
     task: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS },
     cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
-    createDirectory: { type: "boolean", description: "true creates cwd and any missing parents when it does not exist yet, and the child Work starts trusted there. Without it a missing directory fails creation." },
+    createDirectory: { type: "boolean", description: "Set true when the task calls for a directory that does not exist yet, such as a new folder the user named: Dock creates cwd and any missing parents, and the child Work starts trusted there. Without it a missing directory fails creation." },
     model: CREATE_SCHEMA.properties.model,
     thinkingLevel: { type: "string", enum: THINKING_LEVELS },
     allowedTools: { type: "array", maxItems: MAX_ALLOWED_TOOLS, items: { type: "string", minLength: 1, maxLength: MAX_ALLOWED_TOOL_NAME_CHARS }, uniqueItems: true, description: "Exact Pi tool names such as read, grep, find, ls, edit, write, bash. Omit for normal full tool access; [] grants none. It never gets a tool you were not given. The child can always message you; it never gets other Dock tools. This limits tools, not what a granted shell can do." },

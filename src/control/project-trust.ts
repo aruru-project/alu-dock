@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath } from "../core/local-path.js";
+import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, MISSING_WORKING_DIRECTORY } from "../core/local-path.js";
 
 export const PROJECT_TRUST_CHOICES = [
   "trust_once",
@@ -236,7 +236,7 @@ async function canonicalDirectory(path: string): Promise<string> {
   }
   const lexical = resolve(path);
   const info = await stat(lexical).catch(() => undefined);
-  if (!info?.isDirectory()) throw new Error(`Working directory does not exist: ${lexical}`);
+  if (!info?.isDirectory()) throw new Error(`${MISSING_WORKING_DIRECTORY}: ${lexical}`);
   return realpath(lexical);
 }
 

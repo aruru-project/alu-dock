@@ -220,7 +220,7 @@ const steps = {
   /** She hands one Work a task in parts, and that Work hands the parts to child Works of its own (card #674). */
   async team(id) {
     const had = await count(id, fromWork);
-    await say(id, `派一个 Work 在 ${PROJECT} 里负责这件事：新建 team 目录，在里面准备 a.txt、b.txt、c.txt 三份文件，每份都要先跑 \`sleep 30\` 再把 \`date\` 的输出写进去。三份互不相干，让它再开三个子 Work 分头并行做，它自己汇总，做完告诉我三份文件里各写了什么。`);
+    await say(id, `派一个 Work 负责这件事：在 ${PROJECT}/team 目录里准备 a.txt、b.txt、c.txt 三份文件，每份都要先跑 \`sleep 30\` 再把 \`date\` 的输出写进去。三份互不相干，让它再开三个子 Work 分头并行做，它自己汇总，做完告诉我三份文件里各写了什么。`);
     if ((await children(id)).length === 0) { console.log("  （她没有派出 Work）"); return; }
     await waitFor("她派出的 Work 再开子 Work", async () => (await grandchildren(id)).length > 0, 180_000).catch((error) => console.log(`  （${error.message}）`));
     await sleep(5_000);

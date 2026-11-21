@@ -43,3 +43,6 @@ export function isPortableLocalRootPath(value: string, platform: "linux" | "wind
 export function resolvePortableAbsoluteLocalPath(value: string): string {
   return WINDOWS_DRIVE_ABSOLUTE_PATH.test(value) ? win32.resolve(value) : posix.resolve(value);
 }
+
+/** How Dock says a Work's working directory is missing; dock_spawn recognises it to say how to create one. */
+export const MISSING_WORKING_DIRECTORY = "Working directory does not exist";
