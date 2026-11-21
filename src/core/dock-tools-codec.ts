@@ -135,21 +135,24 @@ export function parseWorkMessage(raw: unknown): WorkMessage {
   const value = record(raw, "Work message");
   const from = parseWorkMessageSender(value.from);
   if (value.type === "message") {
-    exactKeys(value, ["type", "from", "text", "done", "number"], "Work message");
+    exactKeys(value, ["type", "from", "text", "done", "number", "settlesThrough"], "Work message");
     if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
+    if (value.settlesThrough !== undefined && value.done !== true) throw new Error("Only a final result settles messages");
     return {
       type: "message", from, text: boundedString(value.text, MAX_DOCK_TOOL_MESSAGE_CHARS, "Work message text"),
       ...(value.done === true ? { done: true as const } : {}),
       ...(value.number === undefined ? {} : { number: positiveInteger(value.number, "Work message number") }),
+      ...(value.settlesThrough === undefined ? {} : { settlesThrough: nonNegativeInteger(value.settlesThrough, "Messages settled") }),
     };
   }
-  exactKeys(value, ["type", "from", "reason", "error", "lastWords"], "Work message");
+  exactKeys(value, ["type", "from", "reason", "error", "lastWords", "settlesThrough"], "Work message");
   if (value.type !== "child_stopped" || from.relation !== "child") throw new Error("Work message type is invalid");
   return {
     type: "child_stopped", from,
     reason: oneOf(value.reason, ["ended", "aborted", "failed", "stopped", "crashed"] as const, "Child stop reason"),
     ...(value.error === undefined ? {} : { error: boundedString(value.error, MAX_CHILD_LAST_WORDS_CHARS, "Child stop error") }),
     ...(value.lastWords === undefined ? {} : { lastWords: boundedString(value.lastWords, MAX_CHILD_LAST_WORDS_CHARS, "Child last words") }),
+    ...(value.settlesThrough === undefined ? {} : { settlesThrough: nonNegativeInteger(value.settlesThrough, "Messages settled") }),
   };
 }
 
@@ -247,8 +250,9 @@ export function parseDockToolsResult(raw: unknown): void {
       exactKeys(value, ["type", "to", "acceptedAt", "done"], "Work message result");
       if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
     } else {
-      exactKeys(value, ["type", "to", "target", "acceptedAt"], "Work message result");
+      exactKeys(value, ["type", "to", "target", "acceptedAt", "number"], "Work message result");
       validateObservedStatus(value.target);
+      positiveInteger(value.number, "Work message number");
     }
     timestampString(value.acceptedAt, "Work message acceptance time");
     return;

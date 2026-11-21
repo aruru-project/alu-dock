@@ -38,6 +38,8 @@ export class WorkDesk {
   }
 
   get notes(): ReadonlyMap<string, WorkNote> { return this.works; }
+  /** The child Work still owes her the result of the latest work she handed it. */
+  owes(id: string): boolean { return this.children.owes(id); }
   get following(): ReadonlySet<string> { return this.followed; }
 
   /** Names of child Works a restart ended while they still owed her a result; told once. */
@@ -60,9 +62,8 @@ export class WorkDesk {
 
   /** One Dock tool call of hers. */
   async invoke(request: DockToolsRequest): Promise<DockToolsResult> {
-    const before = this.children.position;
     const result = await this.host.invokeDockTool(request);
-    this.children.noteWork(result, before);
+    this.children.noteWork(result);
     if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) this.know(result.instance);
     else if (result.type === "create") { this.know(result.instance); this.followed.add(result.instance.id); }
     else if (result.type === "watch") {

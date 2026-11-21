@@ -227,6 +227,28 @@ test("stopping the assistant while her child Work is stopping still waits for th
   assert.ok(lateGone, "Her Stop returns only once the grandchild still starting has exited");
   await leadStopping;
   await assert.rejects(late);
+
+  // The same through the other way a Work leaves the list: the owner removes a lead that crashed while its
+  // child was still starting.
+  const reopened = await team.assistantWork();
+  const crashing = await client.create(team.cwd, "会崩的主 Work", "tree-crash", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: reopened.id });
+  const crashingPid = team.workerPids.at(-1)!;
+  held = false;
+  team.holdNextChild = () => new Promise<void>((resolve) => { held = true; release = resolve; });
+  const stranded = client.create(team.cwd, "也还在启动", "tree-stranded", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: crashing.id });
+  void stranded.catch(() => {});
+  await waitFor(() => held, "The second grandchild did not start");
+  const strandedPid = team.workerPids.at(-1)!;
+  process.kill(crashingPid, "SIGKILL");
+  await waitFor(async () => (await client.status(crashing.id)).lifecycle === "runtime_error", "The lead's crash was not observed");
+  await client.forget(crashing.id, "forget-crashed");
+  const letGoAgain = setTimeout(release, 5_000);
+  await client.stop(reopened.id, "stop-her-again");
+  const strandedGone = exited(strandedPid);
+  clearTimeout(letGoAgain);
+  release();
+  assert.ok(strandedGone, "Removing the crashed lead does not let her Stop skip its child");
+  await assert.rejects(stranded);
 });
 
 test("the owner's steer and follow-up during a reply each renew the Work wake budget", { timeout: 90_000 }, async context => {

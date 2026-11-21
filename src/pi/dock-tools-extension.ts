@@ -129,8 +129,13 @@ class OwedResult {
     this.reachedParent = toParent || this.resultSent;
   }
 
-  /** The final result reached the parent, by any call, nested ones included. */
-  resultDelivered(): void { this.owed = false; }
+  /**
+   * A final result reached the parent, by any call, nested ones included. It settles the debt only if it
+   * answered every parent message read by now: its receipt may come back after a newer one went in.
+   */
+  resultDelivered(readThrough: number): void {
+    if (readThrough >= this.read) this.owed = false;
+  }
 
   /** The turn ended: what the parent must hear, if anything. The turn's own facts are cleared either way. */
   turnEnded(aborted: boolean, childrenOwe: boolean): UnreportedStop | undefined {
@@ -338,7 +343,7 @@ export class DockToolsBridge {
     if (this.deliveryFenceDepth > 0) return;
     while (this.inbox.length > 0) {
       const item = this.inbox[0]!;
-      api.sendMessage<unknown>(item.kind === "work" ? workMessageEntry(item.message) : watchNoticeEntry(item.notification), { triggerTurn: false });
+      api.sendMessage<unknown>(item.kind === "work" ? workMessageEntry(item.message, this.children.owes(item.message.from.id)) : watchNoticeEntry(item.notification), { triggerTurn: false });
       this.inbox.shift();
       this.awaitingReply = true;
       if (item.kind !== "work") continue;
@@ -389,11 +394,12 @@ export class DockToolsBridge {
         this.endDeliveryFence();
       }
     }
-    const before = this.children.position;
     const result = await this.port.invoke(request);
-    this.children.noteWork(result, before);
+    this.children.noteWork(result);
     // Whatever made the call, a tool inside another one included.
-    if (result.type === "work_message" && result.to === "parent" && result.done) this.owed?.resultDelivered();
+    if (result.type === "work_message" && result.to === "parent" && result.done && request.type === "send") {
+      this.owed?.resultDelivered(request.readThrough ?? Number.MAX_SAFE_INTEGER);
+    }
     return result;
   }
 

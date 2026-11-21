@@ -3,6 +3,7 @@ import test from "node:test";
 import { spawnDockWorker } from "../src/control/native-collaboration.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { WorkMessages } from "../src/control/work-messages.js";
+import { ChildMessages } from "../src/worker/child-messages.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import type { InstanceSnapshot } from "../src/core/instance-dto.js";
@@ -85,42 +86,81 @@ test("native collaboration wire validates tool selections, delivery and terminal
   assert.doesNotThrow(() => parseDockToolsResult({ type: "spawn", instance: child, taskStatus: "accepted", error: "Reply unavailable; inspect child" }));
 });
 
-// Card #674 review (Astra): a lead may wait for its own child Works for hours, so two gaps in what the Host
-// thinks a child Work owes became real. A parent message that crossed the child's final result for earlier
-// work was cleared with it, so a later stop went unreported; and after the parent interrupted to take the
-// work back, a later report from the child still reached it. Its report receipt also carried the parent's state.
-test("a child Work still owes a parent message that crossed its final result, and nothing once the parent took the work back", async () => {
+// Card #674 review (Astra): a lead may wait for its own child Works for hours, so gaps in what the Host and
+// the parent think a child Work owes became real. A parent message that crossed the child's final result for
+// earlier work was cleared with it; a failed delivery undid another send's debt; after the parent interrupted
+// to take the work back, a later report or an earlier send's late receipt undid that. Each is now settled by
+// the numbers of the parent's messages, which the parent's own view uses too, so arrival order does not matter.
+test("what a child Work owes its parent is settled by the numbers of the messages it answered, whatever arrives first", async () => {
   const sessions = { parent: new DelayedAgentWorkerConnection("parent"), lead: new DelayedAgentWorkerConnection("lead") };
   const parent = new ManagedInstance({ id: "parent", name: "alu", cwd: process.cwd(), session: sessions.parent });
   const lead = new ManagedInstance({ id: "lead", name: "Lead", cwd: process.cwd(), session: sessions.lead, parentId: parent.id });
   const works = new Map([[parent.id, parent], [lead.id, lead]]);
   const messages = new WorkMessages({ live: () => works.values(), get: (id) => works.get(id), now: () => "2026-11-21T00:00:00.000Z" });
   messages.childStarted(lead.id);
-  const fromParent = (text: string) => messages.send(parent.snapshot(), { type: "send", operationId: text, target: "Lead", message: text }, lead);
+  // The parent's own view, fed what its Worker gets: its call results and the messages the Host delivers.
+  const parentView = new ChildMessages();
+  parentView.noteWork({ type: "spawn", taskStatus: "accepted", instance: { ...child, id: lead.id, name: "Lead" } });
+  let read = 0;
+  const parentHears = () => { for (const message of sessions.parent.workMessages.slice(read)) parentView.receive(message); read = sessions.parent.workMessages.length; };
+  const fromParent = async (text: string) => { const receipt = await messages.send(parent.snapshot(), { type: "send", operationId: text, target: "Lead", message: text }, lead); parentView.noteWork(receipt); return receipt; };
   const fromLead = (text: string, readThrough: number) => messages.send(lead.snapshot(), { type: "send", operationId: text, message: text, done: true, readThrough }, undefined);
-  const notices = async () => {
+  const leaves = async () => {
+    messages.childLeaving(lead);
     await new Promise((resolve) => setImmediate(resolve));
+    parentHears();
     return sessions.parent.workMessages.filter((message) => message.type === "child_stopped").length;
   };
 
+  // Q2 crosses the answer to Q1: the Host and the parent both still wait for it.
   await fromParent("Q1");
   await fromParent("Q2");
   assert.deepEqual(sessions.lead.workMessages.map((message) => message.type === "message" ? message.number : undefined), [1, 2]);
   const receipt = await fromLead("A1", 1);
   assert.deepEqual(receipt, { type: "work_message", to: "parent", acceptedAt: "2026-11-21T00:00:00.000Z", done: true }, "a child learns only that its result arrived");
-  messages.childLeaving(lead);
-  assert.equal(await notices(), 1, "Q2 was still owed when the lead left");
+  parentHears();
+  assert.equal(parentView.owes(lead.id), true, "the parent still waits for Q2");
+  assert.equal(await leaves(), 1, "Q2 was still owed when the lead left");
+  assert.equal(parentView.owes(lead.id), false);
 
+  // A message that never arrived is owed by nobody, and does not undo another send that did.
   await fromParent("Q3");
   await fromLead("A3", 3);
-  messages.childLeaving(lead);
-  assert.equal(await notices(), 1, "a result that read the latest question settles it");
+  sessions.lead.failWorkMessages = 1;
+  const [lost, sent] = await Promise.allSettled([fromParent("Q4"), fromParent("Q5")]);
+  assert.equal(lost.status, "rejected");
+  assert.equal(sent.status === "fulfilled" && sent.value.type === "work_message" && sent.value.to === "child" ? sent.value.number : undefined, 5);
+  assert.equal(await leaves(), 2, "Q5 arrived, so it was owed");
+  sessions.lead.failWorkMessages = 1;
+  await assert.rejects(fromParent("Q6"));
+  await fromLead("A5", 5);
+  assert.equal(await leaves(), 2, "a result for all that arrived settles it");
 
-  await fromParent("Q4");
+  // Taking the work back holds against a message sent before it, even when that message arrives after.
+  const sending = fromParent("Q7");
   messages.release(lead.id, true);
+  await sending;
   for (const reason of ["aborted", "ended"] as const) await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason });
-  assert.equal(await notices(), 1, "after taking the work back the parent hears of no stop");
-  await fromParent("Q5");
+  assert.equal(await leaves(), 2, "after taking the work back the parent hears of no stop");
+  await fromParent("Q8");
   await messages.unreportedStop(lead.snapshot(), { type: "unreported_stop", reason: "ended" });
-  assert.equal(await notices(), 2, "new work from the parent is owed a report again");
+  assert.equal(sessions.parent.workMessages.filter((message) => message.type === "child_stopped").length, 3, "new work from the parent is owed a report again");
+});
+
+// Card #674 review (Astra): the Host took the work back before the interrupt ran; when the interrupt was
+// refused, the child kept working and its parent was never told when it stopped.
+test("a parent whose interrupt was refused still hears when its child Work stops without the result", async (context) => {
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
+  const registry = new DockRegistry(async (input) => {
+    const session = new DelayedAgentWorkerConnection(input.id);
+    sessions.set(input.id, session);
+    return new ManagedInstance({ ...input, session, ...(input.child === undefined ? {} : { parentId: input.child.parentId }) });
+  });
+  context.after(() => registry.stopAll());
+  registry.bindDockToolsMutationPort({ interrupt: async () => { throw new Error("The Work is busy taking back its Queue."); } } as never);
+  const parent = await registry.create({ operationId: "parent", cwd: process.cwd(), name: "Coordinator" });
+  const child = await registry.create({ operationId: "child", cwd: process.cwd(), name: "Reviewer", child: { parentId: parent.id } });
+  await assert.rejects(registry.invokeDockTool(parent.id, { type: "interrupt", operationId: "interrupt", target: child.id }), /busy/u);
+  await registry.invokeDockTool(child.id, { type: "unreported_stop", reason: "ended" });
+  assert.deepEqual(sessions.get(parent.id)!.workMessages.map((message) => message.type), ["child_stopped"]);
 });

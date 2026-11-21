@@ -4,8 +4,8 @@ export const DEFAULT_WAIT_SECONDS = 1_800;
 export const MAX_WAIT_SECONDS = 7_200;
 /** How often dock_wait checks whether a message from the user is waiting for this Work. */
 const WAIT_POLL_MS = 200;
-/** Child Works whose last finish is remembered, to tell a finish that came before its call's result. */
-const MAX_REMEMBERED_FINISHES = 64;
+/** Child Works that owe nothing are remembered this long, for a result that arrives before its call's receipt. */
+const MAX_SETTLED_CHILDREN = 64;
 
 /** A child Work this Work handed work to. */
 export interface OwedChild { id: string; name: string }
@@ -20,48 +20,80 @@ export interface ChildWaitResult {
 }
 
 /**
+ * What one child Work owes this Work, by the numbers the Host gives this Work's messages to it; its task
+ * counts as 0 (card #674). Numbers make the order things arrive in irrelevant: a final result for earlier
+ * work leaves a newer message owed, and one that arrives before its message's receipt still answers it.
+ */
+interface ChildLedger extends OwedChild {
+  /** The latest work handed to it, by its receipt. */
+  handed: number;
+  /** The latest work its final results or Dock's stop notices settled, or this Work took back. */
+  settled: number;
+}
+
+/**
  * Which child Works owe this Work a result, for dock_wait (card #666). A child owes one from the time it is
- * handed work until its final result arrives or Dock says it stopped.
+ * handed work until its final result for that work arrives or Dock says it stopped.
  */
 export class ChildMessages {
-  private readonly owed = new Map<string, OwedChild>();
-  /** When each child Work last finished, on a counter that orders finishes and calls. */
-  private readonly finishes = new Map<string, number>();
-  private count = 0;
+  /** Oldest first, so the child Works that owe nothing longest are forgotten first. */
+  private readonly ledgers = new Map<string, ChildLedger>();
   private waiter: { take(message: WorkMessage): void } | undefined;
 
   /** The child Works that still owe this Work a result. */
-  get waiting(): OwedChild[] { return [...this.owed.values()]; }
+  get waiting(): OwedChild[] {
+    return [...this.ledgers.values()].filter(owes).map(({ id, name }) => ({ id, name }));
+  }
 
-  /** Read before a Dock call, so a finish that arrives before the call returns is not awaited again. */
-  get position(): number { return this.count; }
-
-  noteWork(result: DockToolsResult, before: number): void {
+  noteWork(result: DockToolsResult): void {
     // Stopping or interrupting a child Work takes its work back; Dock tells nothing more about it.
     if (result.type === "stop" || result.type === "interrupt") {
-      this.owed.delete(result.instance.id);
+      const ledger = this.ledgers.get(result.instance.id);
+      if (ledger) ledger.settled = Math.max(ledger.settled, ledger.handed);
       return;
     }
-    const child = result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined ? result.instance
-      : result.type === "work_message" && result.to === "child" ? result.target
-        : undefined;
-    // A child that failed or finished at once may have reported before this call returned.
-    if (child && (this.finishes.get(child.id) ?? 0) <= before) this.owed.set(child.id, { id: child.id, name: child.name ?? child.id });
+    if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) this.hand(result.instance, 0);
+    else if (result.type === "work_message" && result.to === "child") this.hand(result.target, result.number);
   }
 
   /** A message to this Work. True when a running dock_wait took it as its result. */
   receive(message: WorkMessage): boolean {
     if (message.from.relation !== "child") return false;
-    if (finished(message)) {
-      const id = message.from.id;
-      this.owed.delete(id);
-      this.finishes.delete(id);
-      this.finishes.set(id, ++this.count);
-      if (this.finishes.size > MAX_REMEMBERED_FINISHES) this.finishes.delete(this.finishes.keys().next().value!);
+    if (message.type === "child_stopped" || message.done === true) {
+      const ledger = this.ledger(message.from.id, message.from.name);
+      // Without a number, from an older Host: it settles everything.
+      ledger.settled = Math.max(ledger.settled, message.settlesThrough ?? Number.MAX_SAFE_INTEGER);
+      this.forgetSettled();
     }
     if (!this.waiter) return false;
     this.waiter.take(message);
     return true;
+  }
+
+  /** It still owes this Work the result of the latest work handed to it. */
+  owes(id: string): boolean {
+    const ledger = this.ledgers.get(id);
+    return ledger !== undefined && owes(ledger);
+  }
+
+  private hand(child: { id: string; name?: string }, number: number): void {
+    const ledger = this.ledger(child.id, child.name ?? child.id);
+    ledger.handed = Math.max(ledger.handed, number);
+    this.forgetSettled();
+  }
+
+  private ledger(id: string, name: string): ChildLedger {
+    let ledger = this.ledgers.get(id);
+    if (ledger) this.ledgers.delete(id);
+    else ledger = { id, name, handed: -1, settled: -1 };
+    ledger.name = name;
+    this.ledgers.set(id, ledger);
+    return ledger;
+  }
+
+  private forgetSettled(): void {
+    const settled = [...this.ledgers.values()].filter((ledger) => !owes(ledger));
+    for (const ledger of settled.slice(0, Math.max(0, settled.length - MAX_SETTLED_CHILDREN))) this.ledgers.delete(ledger.id);
   }
 
   /**
@@ -76,7 +108,7 @@ export class ChildMessages {
     arrived: readonly WorkMessage[],
   ): Promise<ChildWaitResult> {
     if (this.waiter) throw new Error("dock_wait is already waiting in another call.");
-    const owed = [...this.owed.values()];
+    const owed = this.waiting;
     const named = (child: { id: string; name: string }) => child.id === request.target || child.name === request.target;
     const chosen = request.target === undefined ? owed : owed.filter(named);
     if (chosen.length > 1 && request.target !== undefined) throw new Error(`More than one child Work is named ${request.target}; use its id.`);
@@ -90,16 +122,18 @@ export class ChildMessages {
     const finish = (reason: ChildWaitResult["ended"]): void => { ended ??= reason; wake(); };
     const take = (message: WorkMessage): void => {
       messages.push(message);
-      if (!finished(message)) finish("received");
-      else if (request.all === true ? chosen.every((child) => !this.owed.has(child.id)) : request.target === undefined || chosenIds.has(message.from.id)) finish("received");
+      // A question, a finding, or a final result for earlier work: answer it now. receive() counted it already.
+      const final = message.type === "child_stopped" || message.done === true;
+      if (!final || this.owes(message.from.id)) finish("received");
+      else if (request.all === true ? chosen.every((child) => !this.owes(child.id)) : request.target === undefined || chosenIds.has(message.from.id)) finish("received");
     };
     for (const message of arrived) take(message);
     const result = (): ChildWaitResult => ({
-      messages, waiting: [...this.owed.values()], ended: ended!,
+      messages, waiting: this.waiting, ended: ended!,
       ...(ended === "timeout" ? { timeoutSeconds } : {}),
     });
     if (ended) return result();
-    if (chosen.length === 0) return { messages, waiting: [...this.owed.values()], ended: messages.length > 0 ? "received" : "nothing_pending" };
+    if (chosen.length === 0) return { messages, waiting: this.waiting, ended: messages.length > 0 ? "received" : "nothing_pending" };
     const waiter = { take };
     this.waiter = waiter;
     const timer = setTimeout(() => finish("timeout"), timeoutSeconds * 1_000);
@@ -120,7 +154,4 @@ export class ChildMessages {
   }
 }
 
-/** A child Work's final result, or Dock's notice that it stopped without one. */
-function finished(message: WorkMessage): boolean {
-  return message.type === "child_stopped" || message.done === true;
-}
+function owes(ledger: ChildLedger): boolean { return ledger.settled < ledger.handed; }

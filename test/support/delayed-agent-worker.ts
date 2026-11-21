@@ -70,6 +70,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   readonly observationNotifications: Array<Extract<AgentWorkerControl, { type: "observation_delivery" }>["notification"]> = [];
   /** Messages from parent or child Works, as the Host delivered them. */
   readonly workMessages: Array<Extract<AgentWorkerControl, { type: "work_message" }>["message"]> = [];
+  /** How many of the next Work messages fail to arrive, as when the Worker reloaded meanwhile. */
+  failWorkMessages = 0;
   settingsFailure: Error | undefined;
   settingsReadFailure: Error | undefined;
   sessionMutationError: Error | undefined;
@@ -266,6 +268,10 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       return Promise.resolve(null);
     }
     if (request.type === "work_message") {
+      if (this.failWorkMessages > 0) {
+        this.failWorkMessages -= 1;
+        return Promise.reject(new Error("The Worker reloaded before the message arrived"));
+      }
       this.workMessages.push(structuredClone(request.message));
       return Promise.resolve(null);
     }

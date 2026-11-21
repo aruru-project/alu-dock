@@ -75,11 +75,12 @@ export function shortenLastWords(text: string): string {
 export type WorkMessage =
   /**
    * `done` marks a child Work's final result for the work it was handed. A parent's messages to one child
-   * Work carry `number`, counted from 1, so the child's final result can say which of them it answered.
+   * Work carry `number`, counted from 1 (its task counts as 0), so its final result can say which of them
+   * it answered: `settlesThrough`.
    */
-  | { type: "message"; from: WorkMessageSender; text: string; done?: true; number?: number }
-  /** Dock's notice that a child Work stopped while it still owed this Work a result. */
-  | { type: "child_stopped"; from: WorkMessageSender; reason: ChildStopReason; error?: string; lastWords?: string };
+  | { type: "message"; from: WorkMessageSender; text: string; done?: true; number?: number; settlesThrough?: number }
+  /** Dock's notice that a child Work stopped while it still owed this Work a result, for the messages handed to it through `settlesThrough`. */
+  | { type: "child_stopped"; from: WorkMessageSender; reason: ChildStopReason; error?: string; lastWords?: string; settlesThrough?: number };
 
 export type DockToolsRequest =
   | ObservationRequest
@@ -156,7 +157,8 @@ export type DockToolsResult =
   /** A message between a Work and its parent or child Work, taken by the recipient's Worker. */
   /** A child Work learns only that its message reached its parent, nothing of the parent's state. */
   | { type: "work_message"; to: "parent"; acceptedAt: string; done?: true }
-  | { type: "work_message"; to: "child"; target: ObservedInstanceStatus; acceptedAt: string }
+  /** `number` is the message's number for this child Work; its final result says which numbers it answered. */
+  | { type: "work_message"; to: "child"; target: ObservedInstanceStatus; acceptedAt: string; number: number }
   | { type: "unreported_stop"; notified: boolean };
 
 export interface DockToolsHostPort {

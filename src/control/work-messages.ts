@@ -20,26 +20,33 @@ type SendRequest = Extract<DockToolsRequest, { type: "send" }>;
 type WorkMessageResult = Extract<DockToolsResult, { type: "work_message" }>;
 
 /**
+ * What a child Work owes its parent, counted by the numbers of the parent's messages to it; its task counts
+ * as 0 (card #674). It owes a result while what its final results settled is behind what reached it, so a
+ * parent message that crosses a final result for earlier work stays owed, in whatever order they arrive.
+ */
+interface Ledger {
+  /** The next message's number. Numbers are never reused: a message that failed to arrive leaves a gap. */
+  next: number;
+  /** The latest message that reached it. */
+  handed: number;
+  /** The latest message its final results answered, or that its parent took back by interrupting or stopping it. */
+  settled: number;
+  /**
+   * The parent interrupted it after sending messages through this number and took that work back: no stop is
+   * reported until a newer message reaches it. A message sent before the interrupt does not undo it, even
+   * if it arrives later.
+   */
+  interruptedAt?: number;
+}
+
+/**
  * Messages between a Work and its own child Works on the Host that runs both, and whether each child
  * Work still owes its parent a result (card #666). They reach the recipient as Work messages, never
  * through the user's input.
  */
 export class WorkMessages {
-  /**
-   * Child Works that owe their parent a result, for the stops and crashes this Host sees itself: from their
-   * task, again after each parent message and each turn that ended without reporting, until a final message.
-   */
-  private readonly owing = new Set<string>();
-  /**
-   * Child Works whose parent interrupted them since it last sent them work. The parent took the work back,
-   * so it hears of no stop until it sends more: a lead's own child Works may still wake it meanwhile.
-   */
-  private readonly interruptedByParent = new Set<string>();
-  /**
-   * The number of each child Work's latest message from its parent. A final result clears the debt only if
-   * it answers that message: a newer one may cross it in the same step (card #674).
-   */
-  private readonly parentMessages = new Map<string, number>();
+  /** Per child Work, for the stops and crashes this Host sees itself. */
+  private readonly ledgers = new Map<string, Ledger>();
   /** Per recipient, so the messages between one pair arrive in the order they were sent. */
   private readonly deliveries = new Map<string, Promise<void>>();
   private readonly mainIdentities = new Map<string, MainIdentity>();
@@ -47,7 +54,7 @@ export class WorkMessages {
   constructor(private readonly port: WorkMessagesPort) {}
 
   /** A child Work starts owing its parent the result of the task it was created for. */
-  childStarted(childId: string): void { this.owing.add(childId); }
+  childStarted(childId: string): void { this.ledgers.set(childId, { next: 1, handed: 0, settled: -1 }); }
 
   /** The source's own child Work that `target` names, by ID, Main's ID, key, name or ID prefix. */
   ownChild(source: InstanceSnapshot, target: string): ManagedInstance | "ambiguous" | undefined {
@@ -65,59 +72,71 @@ export class WorkMessages {
     if (source.parentId !== undefined && request.target === undefined) {
       const parent = this.port.get(source.parentId);
       if (!parent || parent.snapshot().lifecycle !== "active") throw new Error("The Work that created you is no longer running, so nothing can reach it.");
+      const ledger = this.ledgers.get(source.id);
+      // What this result answers: the parent messages the child had read when it sent it.
+      const settlesThrough = request.readThrough ?? ledger?.handed ?? 0;
       const done = request.done === true;
-      await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done } : {}) });
-      if (done && (request.readThrough ?? Number.MAX_SAFE_INTEGER) >= (this.parentMessages.get(source.id) ?? 0)) this.owing.delete(source.id);
+      await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done, settlesThrough } : {}) });
+      if (done && ledger) ledger.settled = Math.max(ledger.settled, settlesThrough);
       return { type: "work_message", to: "parent", acceptedAt: this.port.now(), ...(done ? { done } : {}) };
     }
     if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
     if (!child) throw new Error(source.parentId === undefined ? "Name one of your child Works with target." : "Name one of your own child Works with target, or leave target out to message the Work that created you.");
     if (child.snapshot().lifecycle !== "active") throw new Error("That child Work is no longer running, so it cannot receive messages. Check it with dock_list.");
+    const ledger = this.ledger(child.id);
+    const number = ledger.next++;
+    await this.deliver(child, { type: "message", from: { relation: "parent", id: source.id, name: source.displayName }, text: request.message, number });
     // It owes a reply to this message as well, even if it already finished its earlier work.
-    const owedBefore = this.owing.has(child.id);
-    this.owing.add(child.id);
-    const number = (this.parentMessages.get(child.id) ?? 0) + 1;
-    this.parentMessages.set(child.id, number);
-    try {
-      await this.deliver(child, { type: "message", from: { relation: "parent", id: source.id, name: source.displayName }, text: request.message, number });
-    } catch (error) {
-      if (!owedBefore) this.owing.delete(child.id);
-      // The child never got it, so a final result need not answer it.
-      if (this.parentMessages.get(child.id) === number) this.parentMessages.set(child.id, number - 1);
-      throw error;
-    }
-    this.interruptedByParent.delete(child.id);
-    return { type: "work_message", to: "child", target: this.forParent(child.snapshot()), acceptedAt: this.port.now() };
+    ledger.handed = Math.max(ledger.handed, number);
+    if (ledger.interruptedAt !== undefined && number > ledger.interruptedAt) delete ledger.interruptedAt;
+    return { type: "work_message", to: "child", target: this.forParent(child.snapshot()), acceptedAt: this.port.now(), number };
   }
 
   /**
    * A child Work's Worker saw a turn carry its parent's work and end without its last call reaching the
-   * parent, so the parent hears of it. Whether a final message came earlier does not matter: a parent
-   * message and that final message can cross in one step. The child Work owes the result again.
+   * parent, so the parent hears of it. Only the Worker knows what that turn still owed, so the child Work
+   * owes the result again whatever the Host settled.
    */
   async unreportedStop(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
     const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
     if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
+    const ledger = this.ledgers.get(source.id);
     // The parent interrupted it and took the work back; nothing is owed until the parent sends more.
-    if (this.interruptedByParent.has(source.id)) return { type: "unreported_stop", notified: false };
-    this.owing.add(source.id);
+    if (ledger?.interruptedAt !== undefined) return { type: "unreported_stop", notified: false };
+    if (ledger) ledger.settled = Math.min(ledger.settled, ledger.handed - 1);
     await this.deliver(parent, {
       type: "child_stopped", from: this.childSender(source), reason: request.reason,
       ...(request.error === undefined ? {} : { error: request.error }),
       ...(request.lastWords === undefined ? {} : { lastWords: request.lastWords }),
+      settlesThrough: ledger?.handed ?? 0,
     });
     return { type: "unreported_stop", notified: true };
   }
 
-  /** The parent took the work back by interrupting or stopping its child Work itself. */
-  release(childId: string, interrupted: boolean): void {
-    this.owing.delete(childId);
-    if (interrupted) this.interruptedByParent.add(childId);
+  /**
+   * The parent takes the work back by interrupting or stopping its child Work itself. The returned function
+   * undoes this when that request fails: the child Work may still be at work, and its stops matter again.
+   */
+  release(childId: string, interrupted: boolean): () => void {
+    const ledger = this.ledger(childId);
+    const before = { settled: ledger.settled, interruptedAt: ledger.interruptedAt };
+    // Everything sent so far is taken back, a message still on its way included.
+    const sent = ledger.next - 1;
+    ledger.settled = Math.max(ledger.settled, sent);
+    if (interrupted) ledger.interruptedAt = sent;
+    const after = { settled: ledger.settled, interruptedAt: ledger.interruptedAt };
+    return () => {
+      // A result or a newer parent message that came meanwhile stays as it set things.
+      if (ledger.settled === after.settled) ledger.settled = before.settled;
+      if (ledger.interruptedAt === after.interruptedAt) ledger.interruptedAt = before.interruptedAt;
+    };
   }
 
-  /** A child Work is stopping or crashed. Its parent hears of it if a result was still owed, unless the parent is leaving too. */
+  /** A child Work is stopping or crashed. Its parent hears of it once if a result was still owed, unless the parent is leaving too. */
   childLeaving(child: ManagedInstance): void {
-    if (!this.owing.delete(child.id)) return;
+    const ledger = this.ledgers.get(child.id);
+    if (!ledger || ledger.settled >= ledger.handed) return;
+    ledger.settled = ledger.handed;
     const snapshot = child.snapshot();
     const parent = snapshot.parentId === undefined ? undefined : this.port.get(snapshot.parentId);
     if (!parent || parent.snapshot().lifecycle !== "active") return;
@@ -127,6 +146,7 @@ export class WorkMessages {
       type: "child_stopped", from: this.childSender(snapshot), reason: crashed ? "crashed" : "stopped",
       ...(crashed && snapshot.lastError ? { error: shortenLastWords(snapshot.lastError) } : {}),
       ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
+      settlesThrough: ledger.handed,
     }).catch(() => { /* The parent's Worker is gone as well. */ });
   }
 
@@ -146,11 +166,15 @@ export class WorkMessages {
 
   forget(instanceIds: readonly string[]): void {
     for (const id of instanceIds) {
-      this.owing.delete(id);
-      this.interruptedByParent.delete(id);
-      this.parentMessages.delete(id);
+      this.ledgers.delete(id);
       this.mainIdentities.delete(id);
     }
+  }
+
+  private ledger(childId: string): Ledger {
+    let ledger = this.ledgers.get(childId);
+    if (!ledger) this.ledgers.set(childId, ledger = { next: 1, handed: 0, settled: 0 });
+    return ledger;
   }
 
   private childSender(child: InstanceSnapshot): WorkMessageSender {

@@ -895,8 +895,14 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (request.type === "interrupt" || request.type === "stop") {
       if (child) {
         // The parent takes back the work it handed out, so nothing is owed for it any more.
-        this.workMessages.release(child.id, request.type === "interrupt");
-        await mutations[request.type](child.id, request.operationId);
+        const undo = this.workMessages.release(child.id, request.type === "interrupt");
+        try {
+          await mutations[request.type](child.id, request.operationId);
+        } catch (error) {
+          // Refused, or not known to have happened: the child may still be at work on it.
+          undo();
+          throw error;
+        }
         return { type: request.type, instance: this.workMessages.forParent(child.snapshot()) };
       }
       if (source.parentId !== undefined) throw new Error("You can interrupt or stop only your own child Works. Name one as dock_list shows it.");
@@ -1110,7 +1116,12 @@ export class DockRegistry implements LocalDockToolsHostPort {
         }
       });
       if (!removed) throw new InstanceNotFoundError(instanceId);
-      this.instances.delete(instanceId);
+      // A crashed child Work's own child Works may still be retiring: until they are, a Stop of a Work above
+      // it still finds it and waits for them (card #674). The record is gone at once either way.
+      const instance = this.instances.get(instanceId);
+      const retiring = instance === undefined ? undefined : this.childRetirements.get(instance);
+      if (retiring === undefined) this.instances.delete(instanceId);
+      else void retiring.then(() => { if (this.instances.get(instanceId) === instance) this.instances.delete(instanceId); });
       await this.cleanupObservationForForgottenTargets([instanceId]);
       this.notifyCatalogRemoval([instanceId]);
       return { forgottenId: removed.id, previousLifecycle: removed.lifecycle as "stopped" | "host_lost" | "runtime_error" };

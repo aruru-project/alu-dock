@@ -196,7 +196,8 @@ test("a child Work that stops without giving its parent the result is reported t
   more.text("The tests look fine.");
   await waitFor(async () => (await client.status(child.id)).execution === "idle", "The reviewer did not settle");
   const secondNotice = await coordinatorSees(5, "> The tests look fine.");
-  assert.ok(coordinator.requests.some((request) => sent(request, "[来自子 Work「Reviewer」· 已完成]\\nFILES").length === 1), "The final result for the first question arrives as such");
+  // Card #674: it answered only the first question, so it still owes the second.
+  assert.ok(coordinator.requests.some((request) => sent(request, "[来自子 Work「Reviewer」· 已完成，你后来发的消息它还没回]\\nFILES").length === 1), "The final result for the first question arrives as such, saying the second is still owed");
   assert.ok(JSON.stringify(secondNotice.body.messages).includes("> The tests look fine."), "The notice quotes what the reviewer said on the second message");
   secondNotice.text("I will look at the tests myself.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle after the notice");
