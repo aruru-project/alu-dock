@@ -9,6 +9,8 @@ const client = new DockClient({ socketPath: "/root/dock.sock", timeoutMs: 60_000
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const [provider, ...modelId] = (process.env.MODEL ?? "openai-sub/gpt-6-luna").split("/");
 const PROJECT = "/root/project", PRINTED = "/root/trial-printed";
+/** The owner names the model of the Works she sends to Laptop, which has no model settings of its own. */
+const REMOTE_MODEL = process.env.REMOTE_MODEL ?? "openai-sub/gpt-6-luna";
 const clip = (text, max = 700) => text.length <= max ? text : `${text.slice(0, max)}…（共 ${text.length} 字）`;
 const seconds = (since) => `${((Date.now() - since) / 1000).toFixed(1)}s`;
 
@@ -95,13 +97,14 @@ const fromWork = (entry) => entry.type === "custom_message" && entry.customType 
 const herWords = (entry) => entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop";
 const file = (path) => existsSync(path) ? clip(readFileSync(path, "utf8").trim(), 400) : "（没有这个文件）";
 
-/** The Works under her, each under the Work that created it (card #674). */
+/** The Works under her, each under the Work that created it (card #674), and the machine it runs on (card #676). */
 async function tree(id) {
   const all = await client.list();
+  const machines = new Map((await client.machines()).machines.map((machine) => [machine.hostId, machine.name]));
   const lines = [];
   const walk = (parentId, depth) => {
     for (const work of all.filter((item) => item.parentId === parentId)) {
-      lines.push(`  ${"    ".repeat(depth)}「${work.name ?? work.displayName}」 ${work.lifecycle}/${work.execution}`);
+      lines.push(`  ${"    ".repeat(depth)}「${work.name ?? work.displayName}」 ${work.lifecycle}/${work.execution} 在 ${machines.get(work.hostId) ?? "Main"}`);
       walk(work.id, depth + 1);
     }
   };
@@ -240,6 +243,57 @@ const steps = {
     console.log(`  之后她下面的 Work：\n${await tree(id)}\n  还在跑的 sleep 900：${running("sleep 900")} 个\n`);
   },
   async tree(id) { console.log(await tree(id)); },
+  /** Card #676: the project is on Laptop. The Work she hands it to runs there and hands parts out there. */
+  async remote(id) {
+    const had = await count(id, fromWork);
+    await say(id, `项目在 Laptop 那台机器上。派一个 Work 去 Laptop 负责这件事：在 Laptop 的 ${PROJECT}/remote 目录里准备 a.txt 和 b.txt，每份都要先跑 \`sleep 20\` 再把 \`hostname\` 的输出写进去。两份互不相干，让它再开两个子 Work 分头并行做，它自己汇总，做完告诉我两份文件里各写了什么。派出去的 Work 都用 ${REMOTE_MODEL}。`);
+    if ((await children(id)).length === 0) { console.log("  （她没有派出 Work）"); return; }
+    await waitFor("她派出的 Work 再开子 Work", async () => (await grandchildren(id)).length > 0, 180_000).catch((error) => console.log(`  （${error.message}）`));
+    await sleep(5_000);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+    await woken(id, "派出的 Work 交回结果", fromWork, had, 480_000);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+  },
+  /** She stops the Work on Laptop; its child Works there stop too. The sleeps on Laptop are counted from outside. */
+  async remotestop(id) {
+    await say(id, `再派一个 Work 去 Laptop 的 ${PROJECT} 负责：让它开两个子 Work，各自跑 \`sleep 900\`，都跑完再告诉我。派出去的 Work 都用 ${REMOTE_MODEL}。`);
+    if ((await children(id)).length === 0) { console.log("  （她没有派出 Work）"); return; }
+    await waitFor("两个子 Work 都在跑", async () => { const below = await grandchildren(id); return below.length >= 2 && below.every((work) => work.execution === "running"); }, 240_000).catch((error) => console.log(`  （${error.message}）`));
+    await sleep(5_000);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+    await say(id, "停，不用跑了，全停掉。");
+    await sleep(5_000);
+    console.log(`  之后她下面的 Work：\n${await tree(id)}\n`);
+  },
+  /** A long command on Laptop, for restarting her or Main from outside. */
+  async remotelong(id) {
+    await say(id, `派一个 Work 去 Laptop 的 ${PROJECT} 里跑 \`sleep 900\`，不用再开子 Work，跑完告诉我。派出去的 Work 用 ${REMOTE_MODEL}。`);
+    await waitFor("它跑起来", async () => (await children(id)).some((work) => work.execution === "running"), 120_000).catch((error) => console.log(`  （${error.message}）`));
+    await sleep(5_000);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+  },
+  /** Restarts her as a Stop does; Main reopens her, and what she handed out stops with her old run. */
+  async restart(id) {
+    await client.stop(id);
+    await waitFor("她重新打开", async () => (await client.status(id)).lifecycle === "active", 60_000);
+    await sleep(8_000);
+    console.log(`  她重启后下面的 Work：\n${await tree(id)}\n`);
+  },
+  /** Laptop is cut off from Main while the Work waits on a command; once it is back, the result still reaches her. */
+  async remotenet(id) {
+    const had = await count(id, fromWork);
+    await say(id, `派一个 Work 去 Laptop 的 ${PROJECT} 里跑 \`sleep 60 && hostname > net.txt\`，不用再开子 Work，跑完告诉我 net.txt 里写了什么。派出去的 Work 用 ${REMOTE_MODEL}。`);
+    await waitFor("它跑起来", async () => (await children(id)).some((work) => work.execution === "running"), 120_000);
+    // The script outside cuts Laptop off once this file appears, and connects it again.
+    writeFileSync("/shared/remotenet-running", new Date().toISOString());
+    console.log(`  它在跑，通知外面断开 Laptop：\n${await tree(id)}\n`);
+    await waitFor("Laptop 断开", async () => (await client.machines()).machines.some((machine) => machine.name === "Laptop" && !machine.available), 60_000)
+      .then(() => tree(id)).then((lines) => console.log(`  Laptop 断开时：\n${lines}\n`), (error) => console.log(`  （${error.message}）`));
+    await waitFor("Laptop 重新连上", async () => (await client.machines()).machines.some((machine) => machine.name === "Laptop" && machine.available), 120_000);
+    console.log(`  Laptop 重新连上：\n${await tree(id)}\n`);
+    await woken(id, "重连后它交回结果", fromWork, had, 300_000);
+    console.log(`  她下面的 Work：\n${await tree(id)}\n`);
+  },
   /** What a Work under her was given and did: CHILD is part of its name. */
   async child(id) {
     const work = (await client.list()).find((item) => !item.assistant && (item.name ?? "").includes(process.env.CHILD ?? ""));
