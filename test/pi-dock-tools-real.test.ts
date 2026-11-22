@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Socket } from "node:net";
@@ -7,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { AssistantChildrenElsewhere } from "../src/control/assistant-children-elsewhere.js";
 import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
@@ -278,8 +280,9 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
     await assert.rejects(dockTools.invoke(reviewer.id, remote.hostId!, { type, target: remote.id, operationId: `main-denied-${type}` }), `the child's ${type} is refused`);
     assert.equal(waiting.closed, false);
   }
-  // A child runs on its parent's machine: a parent on Main cannot own a child on a SubHost.
-  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, { parentId: sentinel.id }));
+  // An ordinary Work's child runs on its Machine: one on Main cannot own a child on a SubHost. Only the resident
+  // assistant's may run elsewhere (card #676), and Main starts those itself.
+  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, { parentId: sentinel.id }), /Only the resident assistant's child Works/u);
   assert.ok(!(await client.list()).some((work) => work.displayName === "CrossHostChild"));
   assert.equal(typeof ready.nativeInstanceId, "string");
   assert.notEqual(remote.id, ready.nativeInstanceId);
@@ -366,6 +369,156 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   await waitFor(() => [Number(ready.workerPid), childPid!].every(exited), "Routed parent stop must terminate both real SubHost Worker processes");
   await waitFor(async () => !(await client.list()).some(work => work.id === reviewer.id), "Retired SubHost child remained in Main's inventory");
   assert.equal((await client.status(sentinel.id)).lifecycle, "active");
+});
+
+// Card #676 (user decision 2026-11-22): the resident assistant stays on Main, and the Work she hands engineering
+// work to runs where the project is. It reports to her through Main and stops with her.
+test("the resident assistant's child Work runs on a SubHost, reports to her through Main and stops with her", { timeout: 50_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-assistant-child-elsewhere-"));
+  await chmod(root, 0o700);
+  const workspace = join(root, "workspace");
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  const workerHome = join(root, "worker-home");
+  await Promise.all([mkdir(workspace), mkdir(agentDir), mkdir(sessionDir), mkdir(workerHome)]);
+  const leadProvider = new PlanGoalProvider();
+  await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { "remote-lead": {
+    baseUrl: await leadProvider.start(), api: "openai-completions", apiKey: "fixture-only",
+    models: [{ id: "fixture", name: "remote-lead", reasoning: true, input: ["text"], contextWindow: 32_000, maxTokens: 2_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+  } } }), "utf8");
+  await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "remote-lead", defaultModel: "fixture", retry: { enabled: false } }), "utf8");
+
+  const mainCatalog = join(root, "main", "catalog.json");
+  const joinPath = join(root, "join.json");
+  const socketPath = join(root, "main.sock");
+  const port = await reservePort();
+  const machineState = new MainMachineState(machineStateRoot(mainCatalog), "Assistant Main");
+  await machineState.initialize();
+  await writeMachineJoinFile(joinPath, await machineState.createJoin());
+  const listenerSettings = new MachineSettingsState(join(root, "main-listener"));
+  await listenerSettings.writeMainConnections({ enabled: true, port });
+
+  const mainSessions = new Map<string, DelayedAgentWorkerConnection>();
+  let controller!: MainMachineController;
+  let mainHost!: DockHost;
+  const client = new DockClient({ socketPath, timeoutMs: 3_000, longMutationTimeoutMs: 20_000 });
+  const elsewhere: AssistantChildrenElsewhere = new AssistantChildrenElsewhere({
+    local: (instanceId) => mainRegistry.list().find((item) => item.id === instanceId),
+    snapshots: () => mainHost.instanceDirectory().snapshots(),
+    isResidentAssistant: (instanceId) => instanceId === assistant.id,
+    machineAvailable: async (machineId) => (await controller.machines()).some((machine) => machine.hostId === machineId && machine.available),
+    deliver: (parentId, message) => mainRegistry.get(parentId).deliverWorkMessage(message),
+    stop: async (instanceId) => { await client.stop(instanceId, randomUUID()); },
+    speedOf: (parentId) => mainRegistry.passedDownSpeed(parentId),
+    sendSpeed: (machineId, parentId, tier) => controller.sendParentSpeed(machineId, parentId, tier),
+  });
+  const mainRegistry: DockRegistry = new DockRegistry(async (input) => {
+    const session = new DelayedAgentWorkerConnection(`main-worker-${input.id}`);
+    mainSessions.set(input.id, session);
+    return new ManagedInstance({ id: input.id, creationOperationId: input.creationOperationId, hostEpoch: input.hostEpoch, cwd: input.cwd, name: input.name, key: input.key, session });
+  }, undefined, { remoteChildren: elsewhere });
+  // The resident assistant's own Worker is not needed here: Main's authority knows her by this ID.
+  const assistant = await mainRegistry.create({ operationId: "assistant-stand-in", cwd: workspace, name: "Alu" });
+  const ordinary = await mainRegistry.create({ operationId: "ordinary", cwd: workspace, name: "Ordinary Main Work" });
+  let dockTools!: MainMachineDockToolsAuthority;
+  controller = new MainMachineController({
+    state: machineState, settingsState: listenerSettings, bindAddress: "::1", mainHostEpoch: mainRegistry.hostEpoch,
+    localSnapshots: () => mainRegistry.list(),
+    invokeDockTool: (sourceMainId, sourceMachineId, request) => dockTools.invoke(sourceMainId, sourceMachineId, request),
+    remoteChildren: elsewhere,
+  });
+  dockTools = new MainMachineDockToolsAuthority({
+    controller: () => controller, instances: () => mainHost.instanceDirectory(), localClient: new DockClient({ socketPath }),
+    deliverLocalNotification: async () => {}, isResidentAssistant: (instanceId) => instanceId === assistant.id, childrenElsewhere: elsewhere,
+  });
+  mainHost = new DockHost({ socketPath, registry: mainRegistry, remoteInstances: controller });
+  let child: ChildProcess | undefined;
+  context.after(async () => {
+    if (child) await stopChild(child);
+    await mainHost.stop().catch(() => {});
+    await leadProvider.stop();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mainHost.start();
+  child = spawn(process.execPath, [
+    new URL("./fixtures/subhost-machine.js", import.meta.url).pathname,
+    join(root, "sub", "catalog.json"), workspace, "::1", String(port), joinPath, "real-pi-dock-tools", agentDir, sessionDir, workerHome,
+  ], { stdio: ["ignore", "pipe", "pipe"], env: isolatedProcessEnvironment(root, { XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data") }) });
+  let childStdout = "";
+  let childStderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => { childStdout += chunk.toString("utf8"); });
+  child.stderr?.on("data", (chunk: Buffer) => { childStderr += chunk.toString("utf8"); });
+  const remote = await waitForRemotePi(client).catch((error) => { throw new Error(`${String(error)}; SubHost stderr: ${childStderr}`); });
+  await waitForFixtureReady(() => childStdout);
+  const mainHostId = (await controller.machines()).find((machine) => machine.kind === "main")!.hostId;
+  const her = mainSessions.get(assistant.id)!;
+  const workerOf = (parentId: string): number | undefined => childStdout.split("\n").filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line) as { kind: string; parentId?: string; pid?: number })
+    .filter((record) => record.kind === "worker_started" && record.parentId === parentId).at(-1)?.pid;
+  const spawnThere = (source: string, operationId: string, name: string, cwd: string | null = workspace) => dockTools.invoke(source, mainHostId, {
+    type: "spawn", operationId, name, task: `${name}: lead the remote work.`, ...(cwd === null ? {} : { cwd }), machine: "Fixture SubHost",
+    model: { provider: "remote-lead", id: "fixture" }, thinkingLevel: "low",
+  });
+
+  // An ordinary Work keeps its child Works on its own Machine, and she names a directory on the other one.
+  await assert.rejects(spawnThere(ordinary.id, "ordinary-elsewhere", "Elsewhere"), /runs on the Machine of the Work that starts it/u);
+  await assert.rejects(spawnThere(assistant.id, "no-directory", "Nowhere", null), /Give cwd/u);
+
+  const spawned = await spawnThere(assistant.id, "remote-lead", "Remote lead");
+  assert.ok(spawned.type === "spawn" && spawned.taskStatus === "accepted", JSON.stringify(spawned));
+  const lead = spawned.instance;
+  assert.equal(lead.parentId, assistant.id, "it appears under her");
+  assert.equal((await client.status(lead.id)).hostId, remote.hostId);
+  const first = await leadProvider.request(0);
+  assert.ok(first.toolNames.includes("dock_spawn"), "she does no work herself, so it may hand parts out on its Machine");
+  assert.match(JSON.stringify(first.body.messages), /Remote lead: lead the remote work/u);
+
+  // What it tells her reaches her under the ID her dock_spawn result gave her.
+  first.tools({ id: "lead-note", name: "dock_send", arguments: { message: "LEAD_NOTE", done: false } });
+  await waitFor(() => her.workMessages.length > 0, "The child Work's message did not reach her on Main");
+  assert.deepEqual(her.workMessages[0], { type: "message", from: { relation: "child", id: lead.id, name: "Remote lead" }, text: "LEAD_NOTE" });
+  const noted = await leadProvider.request(1);
+  assert.match(JSON.stringify(noted.body.messages?.filter((message) => message.role === "tool").at(-1)), /Your message reached your parent Work/u);
+  // It reads on and ends its turn without the result: Dock tells her.
+  noted.tools({ id: "lead-read", name: "read", arguments: { path: join(workspace, "notes.txt") } });
+  (await leadProvider.request(2)).text("Still reading.");
+  await waitFor(() => her.workMessages.some((message) => message.type === "child_stopped"), "She was not told her child Work stopped without its result");
+  const notice = her.workMessages.find((message) => message.type === "child_stopped")!;
+  assert.deepEqual(notice.from, { relation: "child", id: lead.id, name: "Remote lead" });
+
+  // Her message reaches it numbered, and its final result answers it.
+  const asked = await dockTools.invoke(assistant.id, mainHostId, { type: "send", operationId: "followup", target: lead.id, message: "PARENT_FOLLOWUP" });
+  assert.ok(asked.type === "work_message" && asked.to === "child");
+  assert.equal(asked.target.id, lead.id);
+  assert.equal(asked.number, 1);
+  const followup = await leadProvider.request(3);
+  assert.ok(JSON.stringify(followup.body.messages).includes("[来自父 Work「Alu」]\\nPARENT_FOLLOWUP"));
+  followup.tools({ id: "lead-done", name: "dock_send", arguments: { message: "LEAD_DONE", done: true } });
+  await waitFor(() => her.workMessages.some((message) => message.type === "message" && message.done === true), "Her child Work's final result did not reach her");
+  assert.deepEqual(her.workMessages.at(-1), { type: "message", from: { relation: "child", id: lead.id, name: "Remote lead" }, text: "LEAD_DONE", done: true, settlesThrough: 1 });
+
+  // She stops it: nothing is owed any more, and its Worker exits on its Machine.
+  const leadPid = workerOf(assistant.id);
+  assert.equal(typeof leadPid, "number");
+  const heard = her.workMessages.length;
+  const stopped = await dockTools.invoke(assistant.id, mainHostId, { type: "stop", operationId: "stop-lead", target: lead.id });
+  assert.ok(stopped.type === "stop");
+  assert.equal(stopped.instance.id, lead.id);
+  assert.equal(stopped.settlesThrough, 1);
+  await waitFor(() => exited(leadPid!), "The stopped child Work's Worker kept running on its Machine");
+  assert.equal(her.workMessages.length, heard, "no stop notice follows her own Stop");
+
+  // When she stops, her child Work on the other Machine stops with her.
+  const again = await spawnThere(assistant.id, "second-lead", "Second lead");
+  assert.ok(again.type === "spawn" && again.taskStatus === "accepted");
+  await leadProvider.request(4);
+  const secondPid = workerOf(assistant.id);
+  assert.ok(secondPid !== undefined && secondPid !== leadPid);
+  await mainRegistry.stop(assistant.id, "assistant-stop");
+  await waitFor(() => exited(secondPid), "Her child Work on the SubHost outlived her");
+  await waitFor(async () => !(await client.list()).some((work) => work.id === again.instance.id), "Her stopped child Work stayed in Main's list");
+  assert.equal((await client.status(remote.id)).lifecycle, "active", "the SubHost's own Work is not hers");
 });
 
 class DockListLoopbackProvider {

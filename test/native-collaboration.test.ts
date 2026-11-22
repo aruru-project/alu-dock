@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnDockWorker } from "../src/control/native-collaboration.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { observationStatus } from "../src/control/instance-observation-service.js";
 import { WorkMessages } from "../src/control/work-messages.js";
+import type { DockChildStart, WorkMessage } from "../src/core/dock-tools.js";
 import { ChildMessages } from "../src/worker/child-messages.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
@@ -96,7 +98,11 @@ test("what a child Work owes its parent is settled by the numbers of the message
   const parent = new ManagedInstance({ id: "parent", name: "alu", cwd: process.cwd(), session: sessions.parent });
   const lead = new ManagedInstance({ id: "lead", name: "Lead", cwd: process.cwd(), session: sessions.lead, parentId: parent.id });
   const works = new Map([[parent.id, parent], [lead.id, lead]]);
-  const messages = new WorkMessages({ live: () => works.values(), get: (id) => works.get(id), now: () => "2026-11-21T00:00:00.000Z" });
+  const messages = new WorkMessages({
+    live: () => works.values(),
+    parent: (work) => { const found = work.parentId === undefined ? undefined : works.get(work.parentId); return found?.snapshot().lifecycle === "active" ? found : undefined; },
+    now: () => "2026-11-21T00:00:00.000Z",
+  });
   messages.childStarted(lead.id);
   // The parent's own view, fed what its Worker gets: its call results and the messages the Host delivers.
   const parentView = new ChildMessages();
@@ -242,4 +248,63 @@ test("a parent whose interrupt was refused still hears when its child Work stops
   await assert.rejects(registry.invokeDockTool(parent.id, { type: "interrupt", operationId: "interrupt", target: child.id }), /busy/u);
   await registry.invokeDockTool(child.id, { type: "unreported_stop", reason: "ended" });
   assert.deepEqual(sessions.get(parent.id)!.workMessages.map((message) => message.type), ["child_stopped"]);
+});
+
+// Card #676 (user decision 2026-11-22): the resident assistant runs on Main and her child Works may run on a SubHost.
+// That SubHost keeps what each owes her, hands what it tells her to Main, and takes what she asks of it from Main.
+test("a SubHost carries the assistant's child Work's messages to her on Main, and hers to it", async (context) => {
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
+  const starts = new Map<string, DockChildStart | undefined>();
+  const toMain: Array<{ parentId: string; message: WorkMessage }> = [];
+  let mainConnected = true;
+  const registry = new DockRegistry(async (input) => {
+    const session = new DelayedAgentWorkerConnection(input.id);
+    sessions.set(input.name!, session);
+    starts.set(input.name!, input.child);
+    return new ManagedInstance({ ...input, session, ...(input.child === undefined ? {} : { parentId: input.child.parentId }) });
+  }, undefined, { mainParent: { deliver: async (parentId, message) => {
+    if (!mainConnected) throw new Error("This Machine is not connected to Main, where the Work that created you runs.");
+    toMain.push({ parentId, message });
+  } } });
+  context.after(() => registry.stopAll());
+  registry.bindDockToolsMutationPort({
+    interrupt: async (instanceId: string) => registry.observationStatus(instanceId),
+    stop: async (instanceId: string, operationId: string) => observationStatus((await registry.stop(instanceId, operationId)).instance),
+  } as never);
+  const her = { id: "assistant-on-main", name: "Alu" };
+  const lead = await registry.create({ operationId: "lead", cwd: process.cwd(), name: "Lead", child: { parentId: her.id } });
+  await registry.create({ operationId: "reviewer", cwd: process.cwd(), name: "Reviewer", child: { parentId: her.id, allowedTools: ["read"] } });
+  assert.equal(lead.parentId, her.id, "it keeps her Main ID as its parent");
+  assert.equal(starts.get("Lead")?.role, "lead", "she does no work herself, so her child Work may hand parts out");
+  assert.equal(starts.get("Reviewer")?.role, "helper");
+  await assert.rejects(registry.create({ operationId: "copy", cwd: process.cwd(), name: "Copy", child: { parentId: her.id, withParentContext: true } }), /only its task/u);
+
+  // Her message carries its number; what it tells her goes to Main under the ID this Host knows it by.
+  const asked = await registry.actForMainParent(her, lead.id, { type: "send", operationId: "q1", message: "Q1" });
+  assert.equal(asked.type === "work_message" && asked.to === "child" ? asked.number : undefined, 1);
+  assert.deepEqual(sessions.get("Lead")!.workMessages.at(-1), { type: "message", from: { relation: "parent", id: her.id, name: "Alu" }, text: "Q1", number: 1 });
+  await registry.invokeDockTool(lead.id, { type: "send", operationId: "note", message: "NOTE", done: false });
+  assert.deepEqual(toMain.at(-1), { parentId: her.id, message: { type: "message", from: { relation: "child", id: lead.id, name: "Lead" }, text: "NOTE" } });
+  await registry.invokeDockTool(lead.id, { type: "unreported_stop", reason: "ended", readThrough: 1 });
+  assert.deepEqual(toMain.at(-1)?.message, { type: "child_stopped", from: { relation: "child", id: lead.id, name: "Lead" }, reason: "ended", settlesThrough: 1 });
+  await assert.rejects(registry.actForMainParent({ id: "another-work", name: "Other" }, lead.id, { type: "send", operationId: "other", message: "hi" }), /no longer running/u);
+
+  // Cut off from Main, its message fails and says why; it still owes her the result.
+  mainConnected = false;
+  await assert.rejects(registry.invokeDockTool(lead.id, { type: "send", operationId: "cut-off", message: "LOST", done: true }), /not connected to Main/u);
+  mainConnected = true;
+
+  // Her speed reaches the child Works that follow it, and one she starts later begins with it.
+  await registry.followMainParentSpeed(her.id, "fast");
+  const speed = async (name: string) => (await sessions.get(name)!.getSettings()).find((setting) => setting.key === "modelSpeed")?.value;
+  assert.deepEqual(await speed("Lead"), { tier: "fast", scope: "work" });
+  await registry.create({ operationId: "later", cwd: process.cwd(), name: "Later", child: { parentId: her.id } });
+  assert.deepEqual(await speed("Later"), { tier: "fast", scope: "work" });
+
+  // She takes the work back by stopping it: nothing more is owed, so no notice follows.
+  const notices = toMain.length;
+  const stopped = await registry.actForMainParent(her, lead.id, { type: "stop", operationId: "stop", target: "Lead" });
+  assert.equal(stopped.type === "stop" ? stopped.settlesThrough : undefined, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(toMain.length, notices);
 });

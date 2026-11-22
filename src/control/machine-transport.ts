@@ -14,8 +14,10 @@ import { DOCK_VERSION } from "../version.js";
 import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
 import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { StaleRuntimeGenerationError, type InstanceSnapshot } from "../core/managed-instance.js";
-import type { DockToolsHostPort, DockToolsRequest, DockToolsResult, LocalDockToolsHostPort } from "../core/dock-tools.js";
-import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
+import { MAX_DOCK_TOOL_NAME_CHARS, type DockToolsHostPort, type DockToolsRequest, type DockToolsResult, type LocalDockToolsHostPort, type MainParentRequest, type WorkMessage } from "../core/dock-tools.js";
+import { parseDockToolsRequest, parseDockToolsResult, parseWorkMessage } from "../core/dock-tools-codec.js";
+import type { WorkParent } from "./work-messages.js";
+import { MODEL_SPEED_TIERS, type ModelSpeedTier } from "../core/model-speed.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
 import { requestOptionCapabilities, capabilityForRequest, decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseHelloReply, parseInstanceSnapshot, parseResponseTransferFrame, ProtocolHelloRejectedError, requiredCapabilities } from "./protocol.js";
@@ -23,7 +25,7 @@ import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
 import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerConfiguration, type MachineSettings } from "./machine-settings-state.js";
-import { recordForMainHost, requestForNativeHost, snapshotForMain, type MachineRouteIdentity } from "./machine-route-identity.js";
+import { dockResultForMain, recordForMainHost, requestForNativeHost, snapshotForMain, type MachineRouteIdentity } from "./machine-route-identity.js";
 import { type RemoteEndpointDecision, type RemoteInstanceDirectory, type RemoteProtocolEndpoint, type RoutedProtocolProxy } from "./instance-manager.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONSE_TRANSFER_CHUNKS } from "../core/transport-bounds.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
@@ -74,6 +76,17 @@ type MachineWireRecord =
   | { kind: "machine_model_cancel"; requestId: string }
   | { kind: "machine_model_answer"; requestId: string; index: number; count: number; data: string }
   | { kind: "machine_model_failure"; requestId: string; error: string }
+  /*
+   * Between the resident assistant on Main and her own child Works on a SubHost (card #676): what a child Work
+   * tells her, answered once Main delivered it, and what she asks of one.
+   */
+  | { kind: "machine_parent_message"; requestId: string; parentId: string; message: WorkMessage }
+  | { kind: "machine_parent_message_ack"; requestId: string; error?: string }
+  | { kind: "machine_child_action"; requestId: string; parent: WorkParent; childNativeId: string; request: MainParentRequest }
+  | { kind: "machine_child_action_result"; requestId: string; ok: true; result: DockToolsResult }
+  | { kind: "machine_child_action_result"; requestId: string; ok: false; error: string }
+  /* The speed she passes down now; her child Works there that follow it take it. */
+  | { kind: "machine_parent_speed"; parentId: string; tier: ModelSpeedTier }
   | { kind: "machine_ping" }
   | { kind: "machine_pong" };
 
@@ -93,6 +106,19 @@ type MachineModelQuestion =
    * itself is read only when answered, so one Main cannot read fails alone, not the connection.
    */
   | { op: "assistant"; sourceNativeId: string; request: unknown };
+
+/**
+ * The resident assistant's child Works on SubHosts (card #676), kept by Main's Dock-tool authority. Main names
+ * a parent on another Machine only for them, and only that authority knows which run of her each belongs to.
+ */
+export interface MainRemoteChildren {
+  /** Main is starting this child Work on that Machine for this parent. */
+  expected(machineId: string, creationOperationId: string, parentId: string): boolean;
+  /** A message from a child Work on that Machine to its parent here; `child` is its route under Main's ID. */
+  deliver(machineId: string, child: MachineRouteRecord, parentId: string, message: WorkMessage): Promise<void>;
+  /** What Main now knows runs on that Machine, after it reported its Works; `connected` the first time on a connection. */
+  reconciled(machineId: string, routes: readonly MachineRouteRecord[], connected: boolean): void;
+}
 
 /** Main's side of the SubHosts' questions. */
 export interface MainModels {
@@ -213,6 +239,8 @@ interface MainConnection {
    * which refuses rather than waits, so several at once would fail on a slow connection.
    */
   modelAnswers: Promise<void>;
+  /** What the resident assistant asked of her child Works on this SubHost, still unanswered. */
+  childActions: Map<string, { resolve: (result: DockToolsResult) => void; reject: (error: Error) => void }>;
 }
 
 /** Connection-fed remote directory/transport backend; InstanceManager remains the client request authority. */
@@ -254,6 +282,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     /** Main's model service and model lists, which answer the SubHosts too. */
     models?: MainModels;
     localSnapshots: () => InstanceSnapshot[];
+    remoteChildren?: MainRemoteChildren;
   }) {}
 
   async start(): Promise<void> {
@@ -431,6 +460,53 @@ export class MainMachineController implements RemoteInstanceDirectory {
     const connection = this.connections.get(sourceMachineId);
     if (!route || !connection) return;
     await writeMachine(connection.socket, { kind: "machine_tool_notification", sourceNativeId: route.nativeInstanceId, notification });
+  }
+
+  /**
+   * The resident assistant messages, interrupts or stops her own child Work on a SubHost (card #676). That
+   * SubHost keeps what the child Work owes her, as it does for its own Works' child Works.
+   */
+  async actOnRemoteChild(parent: WorkParent, childMainId: string, request: MainParentRequest): Promise<DockToolsResult> {
+    const binding = this.instanceBindings.get(childMainId);
+    if (!binding) throw new Error("That child Work is no longer available. Check it with dock_list.");
+    const connection = this.liveConnection(binding.machineId);
+    if (!connection) throw new Error("That child Work's Machine is offline. It keeps its work until the Machine reconnects; try again then.");
+    const requestId = randomUUID();
+    // A record the SubHost cannot read drops the whole connection; her name fits a Work message's.
+    const sender = { id: parent.id, name: parent.name.slice(0, MAX_DOCK_TOOL_NAME_CHARS) };
+    const result = await new Promise<DockToolsResult>((resolve, reject) => {
+      connection.childActions.set(requestId, { resolve, reject });
+      void writeMachine(connection.socket, { kind: "machine_child_action", requestId, parent: sender, childNativeId: binding.route.nativeInstanceId, request }).catch((error: unknown) => {
+        connection.childActions.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+    return dockResultForMain(result, this.routeWithParentIds({
+      hostId: binding.machineId, mainInstanceId: childMainId, nativeInstanceId: binding.route.nativeInstanceId,
+      mainHostEpoch: this.options.mainHostEpoch, nativeHostEpoch: connection.hostEpoch,
+    }));
+  }
+
+  /** A child Work on that SubHost tells its parent here, the resident assistant, something (card #676). */
+  private async deliverToMainParent(connection: MainConnection, record: Extract<MachineWireRecord, { kind: "machine_parent_message" }>): Promise<void> {
+    const route = (await this.options.state.get(connection.machine.id))?.routes.find((item) => item.nativeInstanceId === record.message.from.id);
+    if (!route || !this.options.remoteChildren) throw new Error("The Work that created you is no longer running, so nothing can reach it.");
+    await this.options.remoteChildren.deliver(connection.machine.id, route, record.parentId, record.message);
+  }
+
+  /** That SubHost's Works as Main now knows them, for the resident assistant's child Works there. */
+  private async remoteChildrenReconciled(machineId: string, connected = false): Promise<void> {
+    if (!this.options.remoteChildren) return;
+    const routes = (await this.options.state.get(machineId))?.routes ?? [];
+    this.options.remoteChildren.reconciled(machineId, routes, connected);
+  }
+
+  /** The speed the resident assistant passes down now, for her child Works on that SubHost (card #676). */
+  sendParentSpeed(machineId: string, parentId: string, tier: ModelSpeedTier): Promise<void> {
+    const connection = this.liveConnection(machineId);
+    // An offline SubHost is told when it reconnects.
+    if (!connection) return Promise.resolve();
+    return writeMachine(connection.socket, { kind: "machine_parent_speed", parentId, tier });
   }
 
   async getByKey(key: string): Promise<InstanceSnapshot | undefined> {
@@ -682,8 +758,13 @@ export class MainMachineController implements RemoteInstanceDirectory {
     if (nativeRequest.type === "instance.create" && nativeRequest.params.child !== undefined) {
       const child = nativeRequest.params.child;
       const parent = [...this.parentIdsForMachine(machine.id)].find(([, mainId]) => mainId === child.parentId);
-      if (!parent) throw new Error("The parent is no longer available on this machine.");
-      nativeRequest.params.child = { ...child, parentId: parent[0] };
+      if (parent) nativeRequest.params.child = { ...child, parentId: parent[0] };
+      // The resident assistant's own child Work keeps her Main ID as its parent there (card #676).
+      else if (!this.options.remoteChildren?.expected(machine.id, nativeRequest.params.operationId, child.parentId)) {
+        throw new Error(this.options.localSnapshots().some((snapshot) => snapshot.id === child.parentId)
+          ? "A child Work runs on its parent's Machine. Only the resident assistant's child Works, started with dock_spawn, may run on another Machine."
+          : "The parent is no longer available on this machine.");
+      }
     }
     const streamId = randomUUID();
     if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine is busy right now. Try again shortly.");
@@ -841,6 +922,8 @@ export class MainMachineController implements RemoteInstanceDirectory {
             initialInventoryPending = false;
             await writeMachine(socket, { kind: "machine_ready", mainHostEpoch: this.options.mainHostEpoch });
             this.markAcceptedSocketReady(socket);
+            // After it is ready: what this may stop reaches the SubHost as routed requests.
+            await this.remoteChildrenReconciled(connection.machine.id, true);
             continue;
           }
           await this.consumeMainRecord(connection, record);
@@ -879,6 +962,9 @@ export class MainMachineController implements RemoteInstanceDirectory {
     connection.streams.clear();
     for (const question of connection.modelQuestions.values()) question.abort();
     connection.modelQuestions.clear();
+    // Whether the SubHost did it is unknown; the child Work stays until its parent decides again.
+    for (const action of connection.childActions.values()) action.reject(new Error("The child Work's Machine went offline before it answered, so whether it took effect is unknown. Check the child Work with dock_list once the Machine reconnects."));
+    connection.childActions.clear();
     if (markRoutesOffline) void this.markOfflineUnlessConnected(connection.machine.id);
   }
 
@@ -971,7 +1057,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       this.nextCandidateOrdinal += 1;
       return { machine, candidateOrdinal: this.nextCandidateOrdinal };
     });
-    return { machine: admitted.machine, socket, hostEpoch: hello.hostEpoch, streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: admitted.candidateOrdinal, closed: false, modelQuestions: new Map(), modelAnswers: Promise.resolve() };
+    return { machine: admitted.machine, socket, hostEpoch: hello.hostEpoch, streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: admitted.candidateOrdinal, closed: false, modelQuestions: new Map(), modelAnswers: Promise.resolve(), childActions: new Map() };
   }
 
   private async consumeMainRecord(connection: MainConnection, record: MachineWireRecord): Promise<void> {
@@ -1004,11 +1090,29 @@ export class MainMachineController implements RemoteInstanceDirectory {
     }
     if (record.kind === "machine_model_request") { this.answerModelQuestion(connection, record.requestId, record.request); return; }
     if (record.kind === "machine_model_cancel") { connection.modelQuestions.get(record.requestId)?.abort(); return; }
+    if (record.kind === "machine_parent_message") {
+      void this.deliverToMainParent(connection, record).then(
+        () => writeMachine(connection.socket, { kind: "machine_parent_message_ack", requestId: record.requestId }),
+        (error: unknown) => writeMachine(connection.socket, { kind: "machine_parent_message_ack", requestId: record.requestId, error: machineError(error) }),
+      ).catch(() => { /* The SubHost is gone; its child Work hears that from its own connection. */ });
+      return;
+    }
+    if (record.kind === "machine_child_action_result") {
+      const pending = connection.childActions.get(record.requestId);
+      if (!pending) return;
+      connection.childActions.delete(record.requestId);
+      if (record.ok) pending.resolve(record.result);
+      else pending.reject(new Error(record.error));
+      return;
+    }
     if (record.kind === "machine_inventory_chunk") {
       const snapshots = consumeInventoryChunk(connection, record);
       if (snapshots) {
         await this.reconcileInventoryFromConnection(connection, snapshots);
-        if (this.currentConnection(connection)) connection.hostEpoch = record.hostEpoch;
+        if (this.currentConnection(connection)) {
+          connection.hostEpoch = record.hostEpoch;
+          await this.remoteChildrenReconciled(connection.machine.id);
+        }
       }
       return;
     }
@@ -1484,6 +1588,8 @@ export class SubHostMachineConnection {
   private streams: StreamAcceptor | undefined;
   private readonly toolRequests = new Map<string, { resolve: (result: DockToolsResult) => void; reject: (error: Error) => void }>();
   private readonly sourceOffRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  /** Messages from child Works here to the resident assistant on Main, until Main delivered them. */
+  private readonly parentMessages = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly modelQuestions = new Map<string, { chunks: Buffer[]; bytes: number; count?: number; resolve: (result: unknown) => void; reject: (error: Error) => void }>();
   private readonly readyWaiters = new Set<() => void>();
   private readonly observationSinks = new Map<string, ObservationDeliverySink>();
@@ -1502,6 +1608,10 @@ export class SubHostMachineConnection {
     snapshots: () => InstanceSnapshot[] | Promise<InstanceSnapshot[]>;
     acceptProtocolSocket: (socket: Socket) => void;
     onConnectionChanged?: (connected: boolean) => void | Promise<void>;
+    /** What the resident assistant on Main asks of her own child Works here (card #676). */
+    childActions?: (parent: WorkParent, childNativeId: string, request: MainParentRequest) => Promise<DockToolsResult>;
+    /** The speed she passes to her child Works here now. */
+    parentSpeed?: (parentId: string, tier: ModelSpeedTier) => Promise<void>;
   }) {}
 
   async start(initialRecovery?: Promise<void>): Promise<void> {
@@ -1547,6 +1657,8 @@ export class SubHostMachineConnection {
     this.toolRequests.clear();
     for (const pending of this.sourceOffRequests.values()) pending.reject(new Error("Main went offline before Dock tools were disabled"));
     this.sourceOffRequests.clear();
+    for (const pending of this.parentMessages.values()) pending.reject(new Error("Main went offline before your message reached the Work that created you. Send it again once this Machine is connected to Main."));
+    this.parentMessages.clear();
     for (const pending of this.modelQuestions.values()) pending.reject(new ModelServiceUnavailableError("Main went offline before it answered the model question"));
     this.modelQuestions.clear();
     for (const wake of [...this.readyWaiters]) wake();
@@ -1564,6 +1676,20 @@ export class SubHostMachineConnection {
     return new Promise<DockToolsResult>((resolve, reject) => {
       this.toolRequests.set(requestId, { resolve, reject });
       void writeMachine(socket, { kind: "machine_tool_request", requestId, sourceNativeId, request }).catch((error) => { this.toolRequests.delete(requestId); reject(error instanceof Error ? error : new Error(String(error))); });
+    });
+  }
+
+  /** A child Work here tells its parent, the resident assistant on Main, something; done once Main delivered it (card #676). */
+  deliverToMainParent(parentId: string, message: WorkMessage): Promise<void> {
+    const socket = this.socket;
+    if (!this.ready || !socket || socket.destroyed) return Promise.reject(new Error("This Machine is not connected to Main, where the Work that created you runs. Send it again once the connection is back."));
+    const requestId = randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      this.parentMessages.set(requestId, { resolve, reject });
+      void writeMachine(socket, { kind: "machine_parent_message", requestId, parentId, message }).catch((error: unknown) => {
+        this.parentMessages.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 
@@ -1782,6 +1908,31 @@ export class SubHostMachineConnection {
     if (record.kind === "machine_tool_notification") {
       const sink = this.observationSinks.get(record.sourceNativeId);
       if (sink) void sink(record.notification).catch(() => {});
+      return;
+    }
+    if (record.kind === "machine_parent_message_ack") {
+      const pending = this.parentMessages.get(record.requestId);
+      if (!pending) return;
+      this.parentMessages.delete(record.requestId);
+      if (record.error === undefined) pending.resolve();
+      else pending.reject(new Error(record.error));
+      return;
+    }
+    if (record.kind === "machine_parent_speed") {
+      void this.options.parentSpeed?.(record.parentId, record.tier).catch(() => { /* A child Work that cannot take it keeps its speed. */ });
+      return;
+    }
+    if (record.kind === "machine_child_action") {
+      const act = this.options.childActions;
+      void (async () => {
+        try {
+          if (!act) throw new Error("This Machine does not run child Works for Main.");
+          const result = await act(record.parent, record.childNativeId, record.request);
+          await writeMachine(socket, { kind: "machine_child_action_result", requestId: record.requestId, ok: true, result });
+        } catch (error) {
+          await writeMachine(socket, { kind: "machine_child_action_result", requestId: record.requestId, ok: false, error: machineError(error) }).catch(() => {});
+        }
+      })();
       return;
     }
     const stream = machineStreamRecord(record);
@@ -2024,6 +2175,37 @@ function parseMachineRecord(line: string): MachineWireRecord {
     return { kind, requestId: wireText(value.requestId, "model question ID", 128), index: wireUnsigned(value.index, "model answer index"), count: wirePositive(value.count, "model answer count"), data: wireBase64(value.data, "model answer", MAX_MACHINE_INVENTORY_CHUNK_BYTES) };
   }
   if (kind === "machine_model_failure") { wireExact(value, ["kind", "requestId", "error"]); return { kind, requestId: wireText(value.requestId, "model question ID", 128), error: wireText(value.error, "model error", 2_048) }; }
+  if (kind === "machine_parent_message") {
+    wireExact(value, ["kind", "requestId", "parentId", "message"]);
+    const message = parseWorkMessage(value.message);
+    if (message.from.relation !== "child") throw new Error("A message to a parent comes from its child Work");
+    return { kind, requestId: wireText(value.requestId, "parent message ID", 128), parentId: wireText(value.parentId, "parent ID", 128), message };
+  }
+  if (kind === "machine_parent_message_ack") {
+    wireExact(value, ["kind", "requestId", "error"]);
+    return { kind, requestId: wireText(value.requestId, "parent message ID", 128), ...(value.error === undefined ? {} : { error: wireText(value.error, "parent message error", 2_048) }) };
+  }
+  if (kind === "machine_child_action") {
+    wireExact(value, ["kind", "requestId", "parent", "childNativeId", "request"]);
+    const parent = wireObject(value.parent, "child Work's parent");
+    wireExact(parent, ["id", "name"]);
+    if (typeof parent.name !== "string" || parent.name.length < 1 || parent.name.length > MAX_DOCK_TOOL_NAME_CHARS) throw new Error("child Work's parent name is invalid");
+    const request = parseDockToolsRequest(value.request);
+    if (request.type !== "send" && request.type !== "interrupt" && request.type !== "stop") throw new Error("A parent may only message, interrupt or stop its child Work");
+    return { kind, requestId: wireText(value.requestId, "child action ID", 128), parent: { id: wireText(parent.id, "parent ID", 128), name: parent.name }, childNativeId: wireText(value.childNativeId, "child Work ID", 128), request };
+  }
+  if (kind === "machine_parent_speed") {
+    wireExact(value, ["kind", "parentId", "tier"]);
+    if (!MODEL_SPEED_TIERS.includes(value.tier as ModelSpeedTier)) throw new Error("model speed is invalid");
+    return { kind, parentId: wireText(value.parentId, "parent ID", 128), tier: value.tier as ModelSpeedTier };
+  }
+  if (kind === "machine_child_action_result") {
+    wireExact(value, ["kind", "requestId", "ok", "result", "error"]);
+    const requestId = wireText(value.requestId, "child action ID", 128);
+    if (value.ok === true) { if (value.error !== undefined) throw new Error("Successful child action carries an error"); parseDockToolsResult(value.result); return { kind, requestId, ok: true, result: structuredClone(value.result) as DockToolsResult }; }
+    if (value.ok === false) { if (value.result !== undefined) throw new Error("Failed child action carries a result"); return { kind, requestId, ok: false, error: wireText(value.error, "child action error", 2_048) }; }
+    throw new Error("Child action outcome is invalid");
+  }
   if (kind === "machine_ping" || kind === "machine_pong") { wireExact(value, ["kind"]); return { kind }; }
   throw new Error("Machine record kind is invalid");
 }

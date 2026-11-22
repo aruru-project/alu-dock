@@ -87,7 +87,8 @@ export type DockToolsRequest =
   | { type: "machines" }
   | { type: "models" }
   | { type: "speed"; operationId: string; target?: string; selection?: ModelSpeedSelection | null }
-  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; createDirectory?: boolean; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
+  /** `machine` is the resident assistant's alone: only her child Works may run on another Machine than their parent. */
+  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; createDirectory?: boolean; machine?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
@@ -104,6 +105,9 @@ export type DockToolsRequest =
    * still owed; `readThrough` is the number of the parent's last message that turn had read.
    */
   | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string; readThrough?: number };
+
+/** What the resident assistant on Main asks of her own child Work on a SubHost, through Main (card #676). */
+export type MainParentRequest = Extract<DockToolsRequest, { type: "send" | "interrupt" | "stop" }>;
 
 /** What the Host creates for dock_create, plus what dock_spawn chooses for a child. */
 export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {

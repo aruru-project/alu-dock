@@ -4,10 +4,20 @@ import type { ObservedInstanceStatus } from "../core/instance-observation.js";
 import type { ManagedInstance } from "../core/managed-instance.js";
 import { observationStatus } from "./instance-observation-service.js";
 
+/** Who receives a Work message: a Work this Host runs, or the parent on Main of a child Work here. */
+export interface WorkMessageRecipient {
+  readonly id: string;
+  deliverWorkMessage(message: WorkMessage): Promise<void>;
+}
+
+/** The Work that hands a child Work its work, as the child Work knows it. */
+export interface WorkParent { id: string; name: string }
+
 interface WorkMessagesPort {
   /** Every Work this Host runs, including a crashed child Work that waits to be stopped. */
   live(): Iterable<ManagedInstance>;
-  get(instanceId: string): ManagedInstance | undefined;
+  /** A child Work's parent while it can take messages: one running here, or the resident assistant on Main. */
+  parent(child: InstanceSnapshot): WorkMessageRecipient | undefined;
   now(): string;
 }
 
@@ -46,9 +56,10 @@ interface Ledger {
 const owes = (ledger: Ledger): boolean => Math.max(ledger.answered, ledger.closed) < ledger.handed;
 
 /**
- * Messages between a Work and its own child Works on the Host that runs both, and whether each child
- * Work still owes its parent a result (card #666). They reach the recipient as Work messages, never
- * through the user's input.
+ * Messages between a Work and its own child Works on the Host that runs the child Work, and whether each
+ * child Work still owes its parent a result (card #666). The parent runs here too, except the resident
+ * assistant on Main, whose messages pass through Main (card #676). They reach the recipient as Work
+ * messages, never through the user's input.
  */
 export class WorkMessages {
   /** Per child Work, for the stops and crashes this Host sees itself. */
@@ -76,8 +87,8 @@ export class WorkMessages {
   async send(source: InstanceSnapshot, request: SendRequest, child: ManagedInstance | undefined): Promise<WorkMessageResult> {
     // A lead child Work names one of its own child Works; without a target it messages its parent.
     if (source.parentId !== undefined && request.target === undefined) {
-      const parent = this.port.get(source.parentId);
-      if (!parent || parent.snapshot().lifecycle !== "active") throw new Error("The Work that created you is no longer running, so nothing can reach it.");
+      const parent = this.port.parent(source);
+      if (!parent) throw new Error("The Work that created you is no longer running, so nothing can reach it.");
       const ledger = this.ledgers.get(source.id);
       // What this result answers: the parent messages the child had read when it sent it.
       const settlesThrough = request.readThrough ?? ledger?.handed ?? 0;
@@ -90,10 +101,15 @@ export class WorkMessages {
     }
     if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
     if (!child) throw new Error(source.parentId === undefined ? "Name one of your child Works with target." : "Name one of your own child Works with target, or leave target out to message the Work that created you.");
+    return this.toChild({ id: source.id, name: source.displayName }, request.message, child);
+  }
+
+  /** A parent's message to its own child Work; a parent on Main sends it through Main. */
+  async toChild(parent: WorkParent, text: string, child: ManagedInstance): Promise<WorkMessageResult> {
     if (child.snapshot().lifecycle !== "active") throw new Error("That child Work is no longer running, so it cannot receive messages. Check it with dock_list.");
     const ledger = this.ledger(child.id);
     const number = ledger.next++;
-    await this.deliver(child, { type: "message", from: { relation: "parent", id: source.id, name: source.displayName }, text: request.message, number });
+    await this.deliver(child, { type: "message", from: { relation: "parent", id: parent.id, name: parent.name }, text, number });
     // It owes a reply to this message as well, even if it already finished its earlier work.
     ledger.handed = Math.max(ledger.handed, number);
     return { type: "work_message", to: "child", target: this.forParent(child.snapshot()), acceptedAt: this.port.now(), number };
@@ -142,8 +158,8 @@ export class WorkMessages {
     }
     if (!owes(ledger)) return;
     const snapshot = child.snapshot();
-    const parent = snapshot.parentId === undefined ? undefined : this.port.get(snapshot.parentId);
-    if (!parent || parent.snapshot().lifecycle !== "active") return;
+    const parent = snapshot.parentId === undefined ? undefined : this.port.parent(snapshot);
+    if (!parent) return;
     const crashed = snapshot.lifecycle === "runtime_error";
     const lastWords = child.lastAgentReply();
     // Decided when its turn comes: a final result queued before it may settle everything yet. Nothing follows,
@@ -163,8 +179,8 @@ export class WorkMessages {
   }
 
   private async reportUnreported(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>, ledger: Ledger | undefined): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
-    const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
-    if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
+    const parent = source.parentId === undefined ? undefined : this.port.parent(source);
+    if (!parent) return { type: "unreported_stop", notified: false };
     // While the parent is taking the work back, whether to tell it waits for that to answer.
     if (ledger && ledger.takingBack > 0) {
       ledger.held.push(() => { void this.reportUnreported(source, request, ledger).catch(() => { /* The parent's Worker is gone. */ }); });
@@ -217,7 +233,7 @@ export class WorkMessages {
    * After what is already on its way to the same recipient. `message` may be decided only when its turn comes,
    * and `delivered` runs as soon as it arrived, before the next one is decided.
    */
-  private deliver(recipient: ManagedInstance, message: WorkMessage | (() => WorkMessage | undefined), delivered?: () => void): Promise<void> {
+  private deliver(recipient: WorkMessageRecipient, message: WorkMessage | (() => WorkMessage | undefined), delivered?: () => void): Promise<void> {
     const previous = this.deliveries.get(recipient.id) ?? Promise.resolve();
     const delivery = previous.then(async () => {
       const decided = typeof message === "function" ? message() : message;

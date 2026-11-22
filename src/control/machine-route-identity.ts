@@ -62,6 +62,14 @@ export function recordForMainHost(input: unknown, route: MachineRouteIdentity): 
   return envelope;
 }
 
+/** A Dock-tool result about one Work on that Machine, such as her child Work's answer to the resident assistant (card #676), under Main's IDs. */
+export function dockResultForMain<T extends object>(input: T, route: MachineRouteIdentity): T {
+  const result = structuredClone(input) as Record<string, unknown>;
+  if (isObservedStatus(result.instance)) result.instance = mapObservedStatus(result.instance, route);
+  if (isObservedStatus(result.target)) result.target = mapObservedStatus(result.target, route);
+  return result as T;
+}
+
 function mapResult(source: Record<string, unknown>, route: MachineRouteIdentity): Record<string, unknown> {
   const result = structuredClone(source);
   if (result.instanceId === route.nativeInstanceId) result.instanceId = route.mainInstanceId;
