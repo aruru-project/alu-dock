@@ -28,6 +28,7 @@ import { WorkerIncidentStore, workerIncidentStoreRoot } from "./control/worker-i
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
 import { MachineSettingsState, SubHostStatusReporter, machineSettingsStateRoot, machineStatePersistenceDiagnostic } from "./control/machine-settings-state.js";
 import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "./control/machine-transport.js";
+import { AssistantChildrenElsewhere } from "./control/assistant-children-elsewhere.js";
 import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./control/main-machine-dock-tools.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
 import { humanControlErrorText } from "./human-control-error.js";
@@ -374,7 +375,12 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       hostEpoch: subHostEpoch,
       snapshots: () => registry.list(),
       acceptProtocolSocket: (socket) => host.acceptProtocolSocket(socket),
-      onConnectionChanged: (connected) => statusReporter.update(connected),
+      onConnectionChanged: (connected) => {
+        if (connected) registry.mainReconnected();
+        return statusReporter.update(connected);
+      },
+      childActions: (parent, childNativeId, request) => registry.actForMainParent(parent, childNativeId, request),
+      parentSpeed: (parentId, tier) => registry.followMainParentSpeed(parentId, tier),
     });
     upstream = upstreamConnection;
     subHostModels = new SubHostModelPort(upstreamConnection);
@@ -389,7 +395,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       attachmentHostPort: attachmentService,
       dockToolsHostPort: dockToolsPort,
-
+      mainParent: { deliver: (parentId, message) => upstreamConnection.deliverToMainParent(parentId, message) },
     });
     host = new DockHost({
       socketPath: join(dirname(catalogPath as string), "subhost-private.sock"),
@@ -406,6 +412,18 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     const durable = catalogPath !== undefined;
     let remoteInstances: MainMachineController | undefined;
     let dockToolsAuthority: MainMachineDockToolsAuthority | undefined;
+    const localClient = new DockClient({ socketPath });
+    // The resident assistant's child Works on SubHosts (card #676).
+    const childrenElsewhere = options.role === "main" && durable ? new AssistantChildrenElsewhere({
+      local: (instanceId) => registry.list().find((work) => work.id === instanceId),
+      snapshots: () => host.instanceDirectory().snapshots(),
+      isResidentAssistant: (instanceId) => registry.isResidentAssistant(instanceId),
+      machineAvailable: async (machineId) => (await (remoteInstances as MainMachineController).machines()).some((machine) => machine.hostId === machineId && machine.available),
+      deliver: (parentId, message) => registry.get(parentId).deliverWorkMessage(message),
+      stop: async (instanceId) => { await localClient.stop(instanceId, randomUUID()); },
+      speedOf: (parentId) => registry.passedDownSpeed(parentId),
+      sendSpeed: (machineId, parentId, tier) => (remoteInstances as MainMachineController).sendParentSpeed(machineId, parentId, tier),
+    }) : undefined;
     const mainDockToolsPort = options.role === "main" && durable ? new MainMachineDockToolsPort({
       local: () => registry,
       authority: () => dockToolsAuthority as MainMachineDockToolsAuthority,
@@ -418,6 +436,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ...(mainDockToolsPort ? { dockToolsHostPort: mainDockToolsPort } : {}),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       ...(assistantWorkspace === undefined ? {} : { assistantWorkspace }),
+      ...(childrenElsewhere ? { remoteChildren: childrenElsewhere } : {}),
     });
     if (options.role === "main" && durable) {
       remoteInstances = new MainMachineController({
@@ -434,13 +453,15 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
           ...(assistantService === undefined ? {} : { assistant: assistantService }),
         },
         localSnapshots: () => registry.list(),
+        ...(childrenElsewhere ? { remoteChildren: childrenElsewhere } : {}),
       });
       dockToolsAuthority = new MainMachineDockToolsAuthority({
         controller: () => remoteInstances as MainMachineController,
         instances: () => host.instanceDirectory(),
-        localClient: new DockClient({ socketPath }),
+        localClient,
         deliverLocalNotification: (sourceMainId, notification) => registry.get(sourceMainId).deliverObservation(notification),
         isResidentAssistant: (sourceMainId) => registry.isResidentAssistant(sourceMainId),
+        ...(childrenElsewhere ? { childrenElsewhere } : {}),
       });
     }
     host = new DockHost({

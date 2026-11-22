@@ -23,6 +23,8 @@ import {
   type DockToolsRequest,
   type DockToolsResult,
   type LocalDockToolsHostPort,
+  type MainParentRequest,
+  type WorkMessage,
 } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, MISSING_WORKING_DIRECTORY } from "../core/local-path.js";
@@ -37,7 +39,7 @@ import { ProtocolValidationError } from "./protocol.js";
 import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { inheritedModelSpeed, type ModelSpeedSelection, type ModelSpeedTier } from "../core/model-speed.js";
 import type { SettingDto, SettingUpdate } from "../core/config-projection.js";
-import { WorkMessages } from "./work-messages.js";
+import { WorkMessages, type WorkMessageRecipient, type WorkParent } from "./work-messages.js";
 import {
   catalogReopenSessionFile,
   catalogSnapshotFromRecord,
@@ -101,6 +103,22 @@ export interface ReopenRegistryInstanceInput {
 
 export interface ReopenTargetResolver {
   resolve(sessionFile: string): Promise<{ cwd: string }>;
+}
+
+/**
+ * A SubHost's way to the resident assistant on Main (card #676). Main starts child Works here only for
+ * her; what they tell her goes through Main.
+ */
+export interface MainParentPort {
+  deliver(parentId: string, message: WorkMessage): Promise<void>;
+}
+
+/** Main's child Works on other Machines, whose parent runs here (card #676). */
+export interface RemoteChildrenPort {
+  /** Their parent is stopping: they stop as well. Never rejects. */
+  retire(parentId: string): Promise<void>;
+  /** The speed their parent passes down is now `tier`. Never rejects. */
+  passSpeed(parentId: string, tier: ModelSpeedTier): Promise<void>;
 }
 
 export interface CreateTrustPreflight {
@@ -171,6 +189,12 @@ export class DockRegistry implements LocalDockToolsHostPort {
    * are retired (card #674): a parent no longer finds them by name, a Stop of a Work above still waits.
    */
   private readonly departed = new WeakSet<ManagedInstance>();
+  /** On a SubHost: child Works Main started here for its resident assistant (card #676). */
+  private readonly mainParented = new WeakSet<ManagedInstance>();
+  /** On a SubHost: the speed the resident assistant passes to her child Works here, when not standard. */
+  private readonly mainParentSpeeds = new Map<string, ModelSpeedTier>();
+  private readonly mainParent: MainParentPort | undefined;
+  private readonly remoteChildren: RemoteChildrenPort | undefined;
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, Promise<unknown>>();
@@ -214,9 +238,15 @@ export class DockRegistry implements LocalDockToolsHostPort {
       dockToolsHostPort?: DockToolsHostPort;
       /** Main owns one resident assistant here; SubHosts omit it. */
       assistantWorkspace?: string;
+      /** A SubHost's way to the resident assistant, for the child Works Main starts here for her. */
+      mainParent?: MainParentPort;
+      /** Main's child Works on other Machines, stopped with their parent here. */
+      remoteChildren?: RemoteChildrenPort;
     } = {},
   ) {
     this.assistantWorkspace = options.assistantWorkspace;
+    this.mainParent = options.mainParent;
+    this.remoteChildren = options.remoteChildren;
     if (options.catalogCommitPort && options.catalogStore) throw new Error("Configure either catalogCommitPort or catalogStore, not both");
     this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.startedAt = options.startedAt ?? new Date().toISOString();
@@ -255,9 +285,22 @@ export class DockRegistry implements LocalDockToolsHostPort {
     });
     this.workMessages = new WorkMessages({
       live: () => [...this.instances.values()].filter((instance) => !this.departed.has(instance)),
-      get: (instanceId) => this.instances.get(instanceId),
+      parent: (child) => this.workParent(child),
       now: () => new Date().toISOString(),
     });
+  }
+
+  /** A child Work's parent while it can take messages: an active Work here, or the resident assistant on Main. */
+  private workParent(child: InstanceSnapshot): WorkMessageRecipient | undefined {
+    if (child.parentId === undefined) return undefined;
+    const local = this.instances.get(child.parentId);
+    if (local) return local.snapshot().lifecycle === "active" ? local : undefined;
+    const instance = this.instances.get(child.id);
+    const port = this.mainParent;
+    if (!port || !instance || !this.mainParented.has(instance)) return undefined;
+    // Main tells the child Work if she is gone or her Machine is offline.
+    const parentId = child.parentId;
+    return { id: parentId, deliverWorkMessage: (message) => port.deliver(parentId, message) };
   }
 
   private readonly trustPreflight: CreateTrustPreflight | undefined;
@@ -318,6 +361,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (this.catalog.current().instances.some((record) => record.creationOperationId === input.operationId)) {
       throw new CatalogOperationRecordedError(input.operationId);
     }
+    // Main names a parent this Host does not run only for its resident assistant (card #676).
+    if (input.child !== undefined && this.mainParent !== undefined
+      && !this.catalog.current().instances.some((record) => record.id === input.child!.parentId)) return this.startForMainParent(input, key);
     const parent = input.child === undefined ? undefined : this.get(input.child.parentId);
     const parentActive = () => parent === undefined || (this.instances.get(parent.id) === parent
       && this.mayStartChildren(parent) && parent.lifecycle === "active");
@@ -344,6 +390,18 @@ export class DockRegistry implements LocalDockToolsHostPort {
     return instance.parentId === undefined || this.childGrants.get(instance)?.role === "lead";
   }
 
+  /**
+   * A child Work of the resident assistant, who does no work herself and runs on Main (card #676). It leads
+   * unless she left dock_spawn out of its tools, and starts with only its task.
+   */
+  private startForMainParent(input: CreateRegistryInstanceInput, key: string | undefined): Promise<ManagedInstance> {
+    const { parentId, allowedTools, withParentContext } = input.child!;
+    if (withParentContext) throw new Error("A child Work on another Machine than its parent starts with only its task, not a copy of the parent's conversation.");
+    const lead = allowedTools === undefined || allowedTools.includes(DOCK_SPAWN_TOOL);
+    const child: DockChildStart = { parentId, ...(allowedTools === undefined ? {} : { allowedTools }), role: lead ? "lead" : "helper" };
+    return this.startNew(input, key, undefined, () => true, { child, mainParented: true });
+  }
+
   /** The new child's tools stay within its parent's; it may hand work out only below a Work that does none itself. */
   private childStart(parent: ManagedInstance, selection: DockChildSelection): DockChildStart {
     const ceiling = this.childGrants.get(parent)?.allowedTools;
@@ -362,7 +420,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     key: string | undefined,
     parent: ManagedInstance | undefined,
     parentActive: () => boolean,
-    { assistant = false, child }: { assistant?: boolean; child?: DockChildStart } = {},
+    { assistant = false, child, mainParented = false }: { assistant?: boolean; child?: DockChildStart; mainParented?: boolean } = {},
   ): Promise<ManagedInstance> {
     const created = input.createDirectory === true && await createMissingWorkingDirectory(input.cwd);
     // Her own workspace loads no project resources, so opening her does not grant project trust. A directory
@@ -409,6 +467,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     instance.markCatalogCommitted();
     this.instances.set(id, instance);
     if (child !== undefined) this.childGrants.set(instance, child);
+    if (mainParented) this.mainParented.add(instance);
     this.trackInstanceForObservation(instance);
     if (child !== undefined) this.workMessages.childStarted(id);
     if (!parentActive()) {
@@ -417,8 +476,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
       throw new Error("The parent Work stopped before its child could start.");
     }
     // Creation may have taken time; use the parent's current choice before the first task is sent.
-    if (parent) await this.changeModelSpeed(this.treeRoot(parent), async () => {
-      const tier = this.speedPassedDown(parent);
+    if (child !== undefined) await this.changeModelSpeed(this.treeRoot(instance), async () => {
+      const tier = this.speedFollowed(instance);
       if (instance.modelSpeed === undefined && tier !== "standard") {
         await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
       }
@@ -432,26 +491,51 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (update.key !== "modelSpeed") return instance.updateSetting(update, operationId);
     return this.changeModelSpeed(this.treeRoot(instance), async () => {
       const current = this.get(instanceId);
-      const parent = current.parentId === undefined ? undefined : this.instances.get(current.parentId);
-      const setting = await current.updateSetting(update, operationId, parent === undefined ? "standard" : this.speedPassedDown(parent));
-      let failure: unknown;
-      // A child still following passes the change on to its own children still following it, so all of them take one tier.
-      const tier = this.speedPassedDown(current);
-      const following = (above: ManagedInstance) => [...this.instances.values()]
-        .filter((child) => child.parentId === above.id && child.modelSpeed === undefined && child.lifecycle === "active");
-      for (let next = following(current); next.length > 0;) {
-        const level = next;
-        next = [];
-        for (const child of level) {
-          try {
-            await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
-            next.push(...following(child));
-          } catch (error) { if (child.lifecycle === "active") failure ??= error; }
-        }
-      }
-      if (failure) throw failure;
+      const setting = await current.updateSetting(update, operationId, this.speedFollowed(current));
+      // Her child Works on other Machines follow too (card #676); a Machine offline now is told when it reconnects.
+      await this.remoteChildren?.passSpeed(current.id, this.speedPassedDown(current));
+      await this.passSpeedDown(current);
       return setting;
     });
+  }
+
+  /** The speed a Work passes to its child Works, as it passes it now (card #676). */
+  passedDownSpeed(instanceId: string): ModelSpeedTier {
+    return this.speedPassedDown(this.get(instanceId));
+  }
+
+  /**
+   * On a SubHost: the speed the resident assistant on Main passes down is now `tier`. Her child Works here
+   * that follow it take it, and pass it on as a parent here would (card #676).
+   */
+  async followMainParentSpeed(parentId: string, tier: ModelSpeedTier): Promise<void> {
+    if (tier === "standard") this.mainParentSpeeds.delete(parentId);
+    else this.mainParentSpeeds.set(parentId, tier);
+    const children = [...this.instances.values()].filter((child) => child.parentId === parentId && this.mainParented.has(child));
+    await Promise.allSettled(children.map((child) => this.changeModelSpeed(child.id, async () => {
+      if (child.modelSpeed !== undefined || child.lifecycle !== "active") return;
+      await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
+      await this.passSpeedDown(child);
+    })));
+  }
+
+  /** A child still following passes the change on to its own children still following it, so all of them take one tier. */
+  private async passSpeedDown(above: ManagedInstance): Promise<void> {
+    let failure: unknown;
+    const tier = this.speedPassedDown(above);
+    const following = (work: ManagedInstance) => [...this.instances.values()]
+      .filter((child) => child.parentId === work.id && child.modelSpeed === undefined && child.lifecycle === "active");
+    for (let next = following(above); next.length > 0;) {
+      const level = next;
+      next = [];
+      for (const child of level) {
+        try {
+          await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
+          next.push(...following(child));
+        } catch (error) { if (child.lifecycle === "active") failure ??= error; }
+      }
+    }
+    if (failure) throw failure;
   }
 
   /** The top of a Work's tree: speed changes in one tree are ordered, other trees are not held up. */
@@ -464,8 +548,14 @@ export class DockRegistry implements LocalDockToolsHostPort {
   /** The speed a Work's children follow: its own choice for its children, or what it follows itself. */
   private speedPassedDown(instance: ManagedInstance): ModelSpeedTier {
     if (instance.modelSpeed !== undefined) return inheritedModelSpeed(instance.modelSpeed);
+    return this.speedFollowed(instance);
+  }
+
+  /** The speed a Work without a choice of its own follows: its parent's, here or the resident assistant's on Main. */
+  private speedFollowed(instance: ManagedInstance): ModelSpeedTier {
     const parent = this.parentOf(instance);
-    return parent === undefined ? "standard" : this.speedPassedDown(parent);
+    if (parent !== undefined) return this.speedPassedDown(parent);
+    return instance.parentId !== undefined && this.mainParented.has(instance) ? this.mainParentSpeeds.get(instance.parentId) ?? "standard" : "standard";
   }
 
   private parentOf(instance: ManagedInstance): ManagedInstance | undefined {
@@ -897,21 +987,17 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     // The list belongs to this Host's machine, where the source's child Works run.
     if (request.type === "models") return { type: "models", ...await mutations.childModels() };
-    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) }, this.isResidentAssistant(sourceInstanceId));
-    if (request.type === "interrupt" || request.type === "stop") {
-      if (child) {
-        // The parent takes back the work it handed out, so nothing is owed for it any more.
-        const takeBack = this.workMessages.takeBack(child.id);
-        let succeeded = false;
-        try {
-          await mutations[request.type](child.id, request.operationId);
-          succeeded = true;
-        } finally {
-          // Refused, or not known to have happened: the child may still be at work on it.
-          takeBack.answered(succeeded);
-        }
-        return { type: request.type, instance: this.workMessages.forParent(child.snapshot()), settlesThrough: takeBack.settlesThrough };
+    if (request.type === "spawn") {
+      const resident = this.isResidentAssistant(sourceInstanceId);
+      if (request.machine !== undefined) {
+        throw new Error(resident
+          ? "Machine selection requires a connection to Main. No local fallback was used."
+          : "A child Work runs on the Machine of the Work that starts it. Leave machine out, or use dock_create for a Work of its own on another Machine.");
       }
+      return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) }, resident);
+    }
+    if (request.type === "interrupt" || request.type === "stop") {
+      if (child) return this.takeBack(child, request, mutations);
       if (source.parentId !== undefined) throw new Error("You can interrupt or stop only your own child Works. Name one as dock_list shows it.");
       const target = this.controlTarget(source, request.target);
       return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
@@ -921,6 +1007,46 @@ export class DockRegistry implements LocalDockToolsHostPort {
       send: (input) => mutations.send(input),
       resolveTarget: (target) => this.controlTarget(source, target),
     });
+  }
+
+  /** The parent interrupts or stops its own child Work, taking back the work it handed out: nothing is owed for it any more. */
+  private async takeBack(child: ManagedInstance, request: Extract<DockToolsRequest, { type: "interrupt" | "stop" }>, mutations: DockToolsMutationPort): Promise<DockToolsResult> {
+    const takeBack = this.workMessages.takeBack(child.id);
+    let succeeded = false;
+    try {
+      await mutations[request.type](child.id, request.operationId);
+      succeeded = true;
+    } finally {
+      // Refused, or not known to have happened: the child may still be at work on it.
+      takeBack.answered(succeeded);
+    }
+    return { type: request.type, instance: this.workMessages.forParent(child.snapshot()), settlesThrough: takeBack.settlesThrough };
+  }
+
+  /** On a SubHost: what the resident assistant asks of her own child Work here, through Main (card #676). */
+  async actForMainParent(parent: WorkParent, childId: string, request: MainParentRequest): Promise<DockToolsResult> {
+    this.assertCatalogReady();
+    const child = this.instances.get(childId);
+    if (!child || this.departed.has(child) || !this.mainParented.has(child) || child.parentId !== parent.id) {
+      throw new Error("That child Work is no longer running, so it cannot be reached. Check it with dock_list.");
+    }
+    if (request.type === "send") {
+      if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
+      return this.workMessages.toChild(parent, request.message, child);
+    }
+    const mutations = this.dockToolsMutationPort;
+    if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
+    return this.takeBack(child, request, mutations);
+  }
+
+  /**
+   * On a SubHost whose connection to Main is back: a child Work of the resident assistant that crashed
+   * meanwhile owes her the notice that could not reach her then (card #676).
+   */
+  mainReconnected(): void {
+    for (const instance of this.instances.values()) {
+      if (this.mainParented.has(instance) && instance.snapshot().lifecycle === "runtime_error") this.workMessages.childLeaving(instance);
+    }
   }
 
   /** A Work the source may control, by name or ID; one under its own child Work is that child Work's (card #674). */
@@ -1031,7 +1157,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
     // A child still starting stops itself once it sees this parent gone; wait for that too,
     // so no child process outlives its parent's Stop.
     const starting = [...(this.childStarts.get(parent) ?? [])];
-    const task = Promise.allSettled([...children.map((child) => this.stop(child.id, randomUUID())), ...starting]).then(() => {
+    // Main's resident assistant may have child Works on other Machines too (card #676).
+    const elsewhere = this.remoteChildren?.retire(parent.id) ?? Promise.resolve();
+    const task = Promise.allSettled([...children.map((child) => this.stop(child.id, randomUUID())), ...starting, elsewhere]).then(() => {
       if (this.childRetirements.get(parent) === task) this.childRetirements.delete(parent);
     });
     this.childRetirements.set(parent, task);

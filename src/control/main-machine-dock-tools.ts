@@ -1,4 +1,5 @@
 import { requireHumanTarget } from "../human-target.js";
+import type { AssistantChildrenElsewhere } from "./assistant-children-elsewhere.js";
 import { assertChildMayRequest, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { OperationLedger } from "./operation-ledger.js";
 import { createDockSystem, readDockSystem } from "./system-tools.js";
@@ -33,6 +34,8 @@ export class MainMachineDockToolsAuthority {
     deliverLocalNotification: (sourceMainId: string, notification: ObservationNotification) => Promise<void>;
     /** Main Registry's resident identity, not a remote snapshot's assistant marker. */
     isResidentAssistant?: (sourceMainId: string) => boolean;
+    /** The resident assistant's child Works on other Machines (card #676). */
+    childrenElsewhere?: AssistantChildrenElsewhere;
   }) {
     const snapshots = (): InstanceSnapshot[] => options.instances().snapshots();
     const get = (instanceId: string): InstanceSnapshot => {
@@ -75,10 +78,33 @@ export class MainMachineDockToolsAuthority {
       const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery, input.operationId);
       return { target: observationStatus(result.instance), receipt: result.receipt };
     };
-    if (request.type === "spawn") return spawnDockWorker(source, request, {
-      create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
-      send,
-    }, this.options.isResidentAssistant?.(sourceMainId) === true);
+    if (request.type === "spawn") {
+      const resident = this.options.isResidentAssistant?.(sourceMainId) === true;
+      const hostId = request.machine === undefined ? sourceMachineId : await this.spawnMachine(request, sourceMachineId, resident);
+      const elsewhere = hostId === sourceMachineId ? undefined : this.options.childrenElsewhere;
+      if (hostId !== sourceMachineId && !elsewhere) throw new Error("This Main cannot start child Works on other Machines. No Work was created.");
+      return spawnDockWorker(source, request, {
+        create: async (input) => {
+          elsewhere?.starting(hostId, input.operationId, source);
+          let created = false;
+          try {
+            const result = await createDockSystem(this.options.localClient, input, hostId);
+            created = true;
+            return result;
+          } finally { elsewhere?.started(input.operationId, created); }
+        },
+        send,
+      }, resident);
+    }
+    // The resident assistant reaches her own child Work on another Machine through that Machine (card #676).
+    const controller = this.options.controller();
+    if ((request.type === "send" || request.type === "interrupt" || request.type === "stop") && request.target !== undefined
+      && source.parentId === undefined && controller.currentSnapshot(source.id) === undefined) {
+      const target = controlTarget(source, snapshots, request.target);
+      if (target.parentId === source.id && controller.currentSnapshot(target.id) !== undefined) {
+        return controller.actOnRemoteChild({ id: source.id, name: source.displayName }, target.id, request);
+      }
+    }
     if (request.type === "speed") {
       const target = request.target === undefined ? source : controlTarget(source, snapshots, request.target);
       const setting = request.selection === undefined
@@ -108,6 +134,16 @@ export class MainMachineDockToolsAuthority {
       resolveTarget: (target) => controlTarget(source, snapshots, target),
     });
     throw new Error("File delivery, the model list for child Works and messages between a Work and its child Works are answered by the source Host");
+  }
+
+  /** The Machine a child Work starts on: the source's own, or for the resident assistant one she names (card #676). */
+  private async spawnMachine(request: Extract<DockToolsRequest, { type: "spawn" }>, sourceMachineId: string, resident: boolean): Promise<string> {
+    const target = resolveCreateMachine(await this.options.controller().machines(), sourceMachineId, request.machine);
+    if (target.hostId === sourceMachineId) return sourceMachineId;
+    if (!resident) throw new Error("A child Work runs on the Machine of the Work that starts it. Leave machine out, or use dock_create for a Work of its own on another Machine.");
+    if (!target.available) throw new Error(`Machine ${JSON.stringify(target.name)} is offline. Reconnect it and try again.`);
+    if (request.cwd === undefined) throw new Error(`Give cwd: the directory on ${JSON.stringify(target.name)} to work in. Your own directory is on another Machine.`);
+    return target.hostId;
   }
 
   async cancelSource(sourceMainId: string): Promise<void> {

@@ -53,7 +53,12 @@ const upstream = new SubHostMachineConnection({
   hostEpoch: "subhost-epoch",
   snapshots: () => registry.list(),
   acceptProtocolSocket: (socket) => host.acceptProtocolSocket(socket),
-  ...(statusReporter ? { onConnectionChanged: (connected: boolean) => statusReporter.update(connected) } : {}),
+  onConnectionChanged: (connected: boolean) => {
+    if (connected) registry.mainReconnected();
+    return statusReporter?.update(connected);
+  },
+  childActions: (parent, childNativeId, request) => registry.actForMainParent(parent, childNativeId, request),
+  parentSpeed: (parentId, tier) => registry.followMainParentSpeed(parentId, tier),
 });
 const dockTools = new SubHostDockToolsPort({ upstream, local: () => registry });
 const nativeIds = ["native-subhost-instance", "native-tool-created"];
@@ -87,6 +92,7 @@ registry = new DockRegistry(async (input) => realPiDockTools
   catalogStore: new FileCatalogStore(statePath),
   attachmentHostPort: attachmentService,
   dockToolsHostPort: dockTools,
+  mainParent: { deliver: (parentId, message) => upstream.deliverToMainParent(parentId, message) },
   systemService: new SystemService(homeDir ?? dirname(statePath), createPiSystemTemplateProvider(realPiDockTools ? agentDir! : join(dirname(statePath), "pi"))),
 });
 await registry.initializeCatalog();
