@@ -77,7 +77,11 @@ ssh root@127.0.0.1 'docker exec -e STEPS=chat,remember,delegate,question,stop,re
 #    create（替主人在 Laptop 上开 Work）、memories（十分钟没有新话之后看后台整理出了什么）、
 #    child（CHILD=名字的一部分，看她下面某个 Work 收到了什么、做了什么，孙子也找得到）、works、transcript；
 #    team（她派一个 Work，它再开三个子 Work 并行建文件、汇总回来）、teamstop（两个子 Work 各跑 sleep 900 时叫停，
-#    看进程是否都退出）、tree（按层级列出她下面的 Work）。
+#    看进程是否都退出）、tree（按层级列出她下面的 Work，带所在机器）。
+#    她派到 Laptop 上的 Work（card #676，派出去的模型由 REMOTE_MODEL 指定，默认同上）：remote（在 Laptop 上再分两个子 Work）、
+#    remotestop（叫停整棵树）、remotelong（跑 sleep 900，供外面重启她或 Main）、restart（停一次她，Main 重新打开）、
+#    remotenet（命令跑着时写出 /shared/remotenet-running，外面据此断开 Laptop 的网络再连上，看结果是否还能交回）。
+#    Laptop 上的进程和文件在外面用 docker exec alu-trial-sub 查。
 #    MODEL=provider/id 和 THINKING 指定她的模型，默认 openai-sub/gpt-6-luna、low。
 ```
 
