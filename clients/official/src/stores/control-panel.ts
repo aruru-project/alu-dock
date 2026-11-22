@@ -109,7 +109,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
         ? models.value
         : section === 'tools'
           ? tools.value
-          : section === 'resources'
+          : section === 'resources' || section === 'system'
             ? resources.value
             : settings.value
     if (dataExists && !force) return true
@@ -136,7 +136,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
         const result = await currentConnectionCall(app, (context) => listTools(workId, context))
         if (!current()) return false
         tools.value = result
-      } else if (section === 'resources') {
+      } else if (section === 'resources' || section === 'system') {
         const result = await currentConnectionCall(app, (context) => getResources(workId, context))
         if (!current()) return false
         resources.value = result
@@ -177,7 +177,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
       resources.value = null
       tools.value = null
       const section = surfaces.controlSection
-      if (surfaces.commandOpen && (section === 'resources' || section === 'tools')) void loadSection(section, true)
+      if (surfaces.commandOpen && (section === 'resources' || section === 'system' || section === 'tools')) void loadSection(section, true)
     } else if ((event.eventType === 'model.changed' || event.eventType === 'thinking.changed') && models.value && selected.value) {
       models.value.instance = selected.value
     }

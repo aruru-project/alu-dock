@@ -15,6 +15,7 @@ const systems = join(home, '.aludock', 'systems'), socket = join(root, 'dock.soc
 const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: '1',
   XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'), XDG_CACHE_HOME: join(root, 'cache'),
   XDG_STATE_HOME: join(root, 'state'), XDG_RUNTIME_DIR: join(root, 'run'),
+  npm_config_cache: join(root, 'npm'), npm_config_userconfig: '/dev/null',
   APPDATA: join(root, 'appdata'), LOCALAPPDATA: join(root, 'localappdata'), TMPDIR: root, TEMP: root, TMP: root }
 let host, reader
 async function stop(child) {

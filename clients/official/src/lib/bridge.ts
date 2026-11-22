@@ -539,6 +539,10 @@ export async function compactionPrompts(context: SessionContext): Promise<Compac
 export async function compactSession(context: OperationTarget, customInstructions: string | undefined, operationId: string): Promise<SessionCompactionResult> {
   return native('compact_session', { ...context, operationEditor: null, customInstructions: customInstructions || null, operationId })
 }
+export async function setWorkSystem(context: OperationTarget, id: string | null): Promise<SessionReloadResult> {
+  return native('set_work_system', { ...context, id, operationEditor: null, operationId: crypto.randomUUID() })
+}
+
 export async function reloadSession(context: OperationContext, operationId: string): Promise<SessionReloadResult> {
   return native('reload_session', { ...context, operationId })
 }

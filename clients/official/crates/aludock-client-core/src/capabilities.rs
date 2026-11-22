@@ -91,6 +91,12 @@ snapshot_capabilities!(
 snapshot_capabilities!(CONVERSATION_IMAGES, CONVERSATION_IMAGES_V1);
 snapshot_capabilities!(SESSION_HISTORY, TUI_PROJECTION_V1);
 snapshot_capabilities!(SESSION_COMMANDS, SESSION_COMMANDS_V1);
+snapshot_capabilities!(
+    SYSTEM_SET,
+    SESSION_COMMANDS_V1,
+    PROJECTION_COMPLETENESS_V1,
+    "system.set.v1"
+);
 snapshot_capabilities!(SESSION_TREE, SESSION_TREE_V2);
 snapshot_capabilities!(
     INSTANCE_READ,

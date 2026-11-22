@@ -9,7 +9,7 @@ import { receiveClientFile, receiveLegacyClientFile, FileCapabilityMissingError,
 import { FileChannel } from "./file-channel.js";
 import { sendFile, FileReceiver, FileTransferSourceError } from "./file-transfer.js";
 import { FILE_TRANSFER_CAPABILITY, parseFileTransferFrame, parseFileDownloadResult, parsePublishedFileDto, parseDeliverableDto, parseWorkspaceEntryDto, type PublishedFileTransferResult, type DeliverableDownloadResult, ProtocolHelloRejectedError, type FileTransferRequest } from "./protocol.js";
-import { HOST_SYSTEM_DEFAULT_CAPABILITY, type HostSystemRef, parseHostSystemDefaultSetting, parseHostSystemDefaultResult, SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
+import { HOST_SYSTEM_DEFAULT_CAPABILITY, SYSTEM_SET_CAPABILITY, type HostSystemRef, parseHostSystemDefaultSetting, parseHostSystemDefaultResult, SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
 import { ASSISTANT_CONTEXT_DEFAULT_SPAN } from "../core/assistant.js";
 import { ASSISTANT_CAPABILITY, INSTANCE_ASSISTANT_CAPABILITY, parseAssistantContextResult, parseAssistantDocument, parseAssistantEpisode, parseAssistantInfo, parseAssistantMemory, parseAssistantMemoryDetail, parseAssistantMemoryList, parseAssistantPreview, parseAssistantSearchResult, parseAssistantReorganizeResult, parseAssistantSettings, parseAssistantTimelineList, type AssistantContextResult, type AssistantDocument, type AssistantDocumentName, type AssistantEpisode, type AssistantInfo, type AssistantMemory, type AssistantMemoryDetail, type AssistantMemoryList, type AssistantPreview, type AssistantReorganizeResult, type AssistantSearchResult, type AssistantSettings, type AssistantTimelineList } from "./protocol.js";
 import type { AssistantMemoryAddRequest, AssistantMemoryListRequest, AssistantMemoryUpdateRequest, AssistantModelRef, AssistantSettingsEdit, AssistantTimelineListRequest, AssistantTimelineUpdateRequest } from "../core/assistant.js";
@@ -197,7 +197,7 @@ const MAX_PENDING_STREAM_EVENTS=1_000;
 const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
   "instance.create", "instance.ensure", "instance.adopt", "instance.reopen", "instance.stop",
   // A first prompt can prepare/compact its context before the Agent reports input custody.
-  "command.submit", "command.abort", "command.abort_restore_queue", "session.switch", "session.new", "session.compact", "session.reload",
+  "command.submit", "command.abort", "command.abort_restore_queue", "session.switch", "session.new", "session.compact", "session.reload", "system.set",
   "session.navigate", "session.fork", "session.clone",
 ]);
 
@@ -691,6 +691,7 @@ export class DockClient {
   nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
   compactionPrompts(instanceId:string):Promise<CompactionPromptTemplatesResult>{return this.request("session.compaction.prompts",{instanceId},COMPACTION_PROMPTS_CAPABILITY,parseCompactionPromptTemplatesResult);}
   compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult,undefined,this.longMutationTimeoutMs);}
+  setInstanceSystem(instanceId:string,id:string|null,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("system.set",{instanceId,id,operationId},SYSTEM_SET_CAPABILITY,parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
   reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},["session.commands.v1","projection.completeness.v1"],parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
   tree(instanceId:string):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId},"session.tree.v2",parseSessionTreeResult);}
   navigateSession(instanceId:string,targetId:string,options:{summarize?:boolean;customInstructions?:string;replaceInstructions?:boolean;label?:string}={},operationId=this.createRequestId()):Promise<SessionNavigateResult>{return this.request("session.navigate",{operationId,instanceId,targetId,...options},"session.tree.v2",parseSessionNavigateResult);}

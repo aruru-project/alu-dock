@@ -45,7 +45,7 @@ let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, childModelsNative, saveChildModelsNative
-let hostSystemNative, settingsNative, updateSettingNative
+let hostSystemNative, workSystemNative, settingsNative, updateSettingNative
 // Card #295: Main keeps the assistant; the spare Host is an older Main without her.
 let assistantNative = (command, args) => {
   if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
@@ -115,6 +115,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'run_shell_command') return { receipt: { operationId: args.operationId, instanceId: args.instanceId, startedAt: '2026-11-13T10:00:00Z' }, instance: atHost(work) }
   if (command === 'new_session') throw { code: 'busy', message: '这次没有新建 Session，请稍后重试。' }
   if (command === 'host_system_default' || command === 'set_host_system_default') return hostSystemNative(command, args)
+  if (workSystemNative && ['system_catalog', 'system_content', 'set_work_system', 'get_resources'].includes(command)) return workSystemNative(command, args)
   if (command === 'get_resources') return { systemSource: { kind: 'dock-template', name: 'loaded.json' }, resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
   if (command === 'get_settings') return settingsNative ? settingsNative(args) : { settings: [] }
   if (command === 'update_setting') return updateSettingNative(args)
@@ -1405,6 +1406,49 @@ try {
     await click(container, '查看项目状态'); assert.ok(text(container).includes('当前 system') && text(container).includes('Dock 模板 · loaded.json'))
     await click(find(container, el => el.props.role === 'dialog' && el.props['aria-label'] === '项目状态'), '关闭')
     console.log('PASS: select and clear the SubHost system; inspect the running Work’s actual source')
+
+    const original = app.selectedWork, priorDraft = app.currentDraft
+    const editor = find(container, el => el.type === 'textarea' && el.props['onUpdate:modelValue'])
+    editor.props['onUpdate:modelValue']('这段草稿还没发')
+    const project = { id: 'project', name: 'SYSTEM.md', kind: 'project-system', path: '/here/.pi/SYSTEM.md', workerConfig: {} }
+    const global = { ...project, id: 'global', kind: 'global-system', path: '/agent/SYSTEM.md' }
+    let loaded = { kind: 'project-system', explicit: true, otherDirectory: true }, unsupported = true, catalogUnavailable = true, unreadable = true
+    const resources = () => ({ systemSource: loaded, resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false })
+    workSystemNative = (command, args) => {
+      if (command === 'get_resources') return resources()
+      if (command === 'system_catalog' && catalogUnavailable) throw { code: 'capability_missing' }
+      if (command === 'system_catalog') return { candidates: args.cursor ? [global] : [project], ...(args.cursor ? {} : { nextCursor: { revision: 'r', offset: 1 } }) }
+      if (command === 'system_content' && unreadable) throw { code: 'resource_unavailable', message: '正文暂未读到，请重试。' }
+      if (command === 'system_content') return { text: 'Original global system document', revision: 'body' }
+      if (unsupported) throw { code: 'capability_missing', operationId: args.operationId }
+      loaded = args.id === null ? { kind: 'project-system' } : { kind: 'global-system', explicit: true }
+      return { instance: { ...original, runtimeGeneration: original.runtimeGeneration + 1 }, ...resources() }
+    }
+    const control = title => find(container, el => el.props.role === 'dialog' && el.props['aria-label'] === title)
+    const picker = () => control('切换 system')
+    await click(container, '查看项目状态'); await click(control('项目状态'), '其他目录 .pi/SYSTEM.md')
+    assert.ok(text(picker()).includes('这台机器的 Dock 还不支持切换当前 Work 的 system'))
+    catalogUnavailable = false; await click(picker(), '重试')
+    assert.ok(!text(picker()).includes('CURRENT'), 'a binding from another directory matches neither automatic nor this project')
+    const globalRow = () => find(picker(), el => el.type === 'button' && String(el.props.class).includes('choice') && text(el).includes('/agent/SYSTEM.md'))
+    globalRow().props.onClick(); app.applyWorkSnapshot({ ...original, execution: 'running' }); await settle()
+    assert.equal(button(picker(), '确认并重新加载').props.disabled, true)
+    assert.ok(text(picker()).includes('当前正在回复或有排队消息'))
+    await click(picker(), '阅读 全局 SYSTEM.md'); assert.ok(text(picker()).includes('正文暂未读到'))
+    unreadable = false; await click(picker(), '重试'); assert.ok(text(picker()).includes('Original global system document'))
+    await click(picker(), '返回 system 选择'); assert.equal(globalRow().props['aria-pressed'], true)
+    app.applyWorkSnapshot({ ...original, execution: 'idle', compacting: false, pending: { steering: 0, followUp: 0, total: 0 } }); await settle()
+    await click(picker(), '确认并重新加载'); assert.ok(text(picker()).includes('这台机器的 Dock 还不支持切换当前 Work 的 system'))
+    unsupported = false; await click(picker(), '确认并重新加载')
+    const current = find(control('项目状态'), el => el.props.id === 'work-current-system')
+    assert.ok(text(current).includes('全局 SYSTEM.md')); assertSameReference(toRaw(document.activeElement), current)
+    await click(control('项目状态'), '关闭')
+    find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+    await click(control('命令中心'), '切换 system'); await click(picker(), '不指定（由 Pi 决定）'); await click(picker(), '确认并重新加载')
+    assertSameReference(picker(), undefined); assert.equal(app.currentDraft, '这段草稿还没发')
+    assert.equal(calls.filter(c => c.command === 'set_work_system').at(-1).args.operationEditor, null)
+    workSystemNative = undefined; app.applyWorkSnapshot(original); app.setCurrentDraft(priorDraft)
+    console.log('PASS: switch the open Work system from Project Status or palette, read during a run, keep editor drafts and return focus')
   }
   // Card #295: the assistant's page from the sidebar: what she reads, her persona and notes, her conversations.
   {

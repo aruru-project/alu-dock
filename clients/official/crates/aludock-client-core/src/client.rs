@@ -725,6 +725,7 @@ fn response_timeout_for(request_type: &str) -> Duration {
         | "session.new"
         | "session.compact"
         | "session.reload"
+        | "system.set"
         | "session.navigate"
         | "session.fork"
         | "session.clone" => LONG_MUTATION_RESPONSE_TIMEOUT,

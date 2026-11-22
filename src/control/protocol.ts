@@ -252,6 +252,7 @@ export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
+export const SYSTEM_SET_CAPABILITY = "system.set.v1" as const;
 export const SYSTEM_TEMPLATES_CAPABILITY = "system.templates.v1" as const;
 export const HOST_SYSTEM_DEFAULT_CAPABILITY = "system.host-default.v1" as const;
 export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
@@ -293,6 +294,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   INSTANCE_RECORDS_CAPABILITY,
   FILE_TRANSFER_CAPABILITY,
   SYSTEM_TEMPLATES_CAPABILITY,
+  SYSTEM_SET_CAPABILITY,
   HOST_SYSTEM_DEFAULT_CAPABILITY,
   MACHINES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
@@ -475,6 +477,7 @@ export type ControlRequest =
   | Request<"session.name", { operationId: string; instanceId: string; name: string }>
   | Request<"session.compact", { operationId: string; instanceId: string; customInstructions?: string }>
   | Request<"session.compaction.prompts", { instanceId: string }>
+  | Request<"system.set", { operationId: string; instanceId: string; id: string | null }>
   | Request<"session.reload", { operationId: string; instanceId: string }>
   | Request<"session.tree", { instanceId: string }>
   | Request<"session.navigate", { operationId: string; instanceId: string; targetId: string; summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }>
@@ -580,6 +583,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "session.name": { target: "instance", effect: "command", transport: "unary" },
   "session.compact": { target: "instance", effect: "command", transport: "unary" },
   "session.compaction.prompts": { target: "instance", effect: "query", transport: "unary" },
+  "system.set": { target: "instance", effect: "command", transport: "unary" },
   "session.reload": { target: "instance", effect: "command", transport: "unary" },
   "session.tree": { target: "instance", effect: "query", transport: "response_transfer" },
   "session.navigate": { target: "instance", effect: "command", transport: "unary" },
@@ -895,7 +899,7 @@ export interface ResourcesResult {
   diagnosticsTruncated: boolean;
 }
 export type HostSystemRef = { kind: "dock-template"; name: string } | { kind: "global-system" };
-export type LoadedSystemSource = HostSystemRef | { kind: "project-system" } | { kind: "pi-builtin" };
+export type LoadedSystemSource = (HostSystemRef | { kind: "project-system"; otherDirectory?: true } | { kind: "pi-builtin" }) & { explicit?: boolean };
 export type SystemSourceKind = Exclude<LoadedSystemSource["kind"], "pi-builtin">;
 export type SystemDefaultSource = "directory" | "host" | "pi";
 export interface HostSystemDefaultSetting { selection: HostSystemRef | null }
@@ -1002,6 +1006,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
   if (type === "command.content" || type === "command.complete") return COMMAND_DISCOVERY_CAPABILITY;
+  if (type === "system.set") return SYSTEM_SET_CAPABILITY;
   if (type === "system.host-default.get" || type === "system.host-default.set") return HOST_SYSTEM_DEFAULT_CAPABILITY;
   if (type === "system.catalog" || type === "system.content" || type === "system.default.set") return SYSTEM_TEMPLATES_CAPABILITY;
   if (type === "resource.content") return RESOURCE_CONTENT_CAPABILITY;
@@ -1017,6 +1022,7 @@ export function requiredCapabilities(capability: Capability): string[] {
     ...(capability === EVENTS_FOLLOW_CAPABILITY ? [INSTANCE_READ_CAPABILITY] : []),
     ...((capability === WORKER_CONFIG_CAPABILITY || capability === COLLABORATION_CAPABILITY || capability === CREATE_DIRECTORY_CAPABILITY) ? ["instance.catalog" as const] : []),
     ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY, INSTANCE_DISPLAY_NAME_CAPABILITY] : []),
+    ...(capability === SYSTEM_SET_CAPABILITY ? ["session.commands.v1" as const, "projection.completeness.v1" as const] : []),
     ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
   ])];
@@ -1030,7 +1036,7 @@ function capabilityProjectsToolResults(capability: Capability): boolean {
 }
 
 function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
-  return capability === TOOLS_EXPANDED_CAPABILITY
+  return capability === SYSTEM_SET_CAPABILITY || capability === TOOLS_EXPANDED_CAPABILITY
     || capability === GIT_BRANCH_CAPABILITY
     || capability === INSTANCE_KEYS_CAPABILITY
     || capability === INSTANCE_DISPLAY_NAME_CAPABILITY
@@ -1522,6 +1528,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "session.name": exact(params, ["operationId", "instanceId", "name"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name: boundedString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request") } };
     case "session.compaction.prompts": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "session.compact": exact(params, ["operationId", "instanceId", "customInstructions"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), customInstructions: optionalString(params.customInstructions, "params.customInstructions", MAX_PROMPT_CHARS, "invalid_request") } };
+    case "system.set": exact(params, ["operationId", "instanceId", "id"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), id: params.id === null ? null : id(params.id, "params.id", "invalid_request") } };
     case "session.reload": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "session.tree": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "session.navigate": {
@@ -2646,7 +2653,9 @@ function parseHostSystemRef(input: unknown, code: string): HostSystemRef {
 }
 function parseLoadedSystemSource(input: unknown): LoadedSystemSource {
   const value = object(input, "system source");
-  return value.kind === "pi-builtin" || value.kind === "project-system" ? { kind: value.kind } : parseHostSystemRef(value, "invalid_response");
+  const explicit = value.explicit === undefined ? {} : { explicit: boolean(value.explicit, "systemSource.explicit") };
+  if (value.kind === "project-system") return { kind: value.kind, ...explicit, ...(value.otherDirectory === undefined ? {} : { otherDirectory: literalTrue(value.otherDirectory, "systemSource.otherDirectory") }) };
+  return { ...(value.kind === "pi-builtin" ? { kind: value.kind as "pi-builtin" } : parseHostSystemRef(value, "invalid_response")), ...explicit };
 }
 export function parseHostSystemDefaultSetting(input: unknown, code = "invalid_response"): HostSystemDefaultSetting {
   const value = object(input, "Host system default", code);

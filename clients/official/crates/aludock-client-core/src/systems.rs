@@ -47,12 +47,25 @@ pub enum HostSystemRef {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum LoadedSystemSource {
-    ProjectSystem,
-    GlobalSystem,
+    ProjectSystem {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explicit: Option<bool>,
+        #[serde(rename = "otherDirectory", skip_serializing_if = "Option::is_none")]
+        other_directory: Option<bool>,
+    },
+    GlobalSystem {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explicit: Option<bool>,
+    },
     DockTemplate {
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explicit: Option<bool>,
     },
-    PiBuiltin,
+    PiBuiltin {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explicit: Option<bool>,
+    },
     #[serde(other)]
     Unrecognized,
 }

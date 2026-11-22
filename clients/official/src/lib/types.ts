@@ -616,7 +616,7 @@ export interface SettingUpdateResult {
 export interface ResourceInfo { kind: 'extension' | 'skill' | 'prompt' | 'context'; name: string; source?: SafeSource; contentRef?: string }
 export interface ResourceContentResult { text: string; revision: string; nextOffset?: number }
 export interface ResourcesResult {
-  systemSource?: HostSystemRef | {kind: 'project-system' | 'pi-builtin' | 'unrecognized'}
+  systemSource?: (HostSystemRef | {kind: 'project-system'; otherDirectory?: boolean} | {kind: 'pi-builtin' | 'unrecognized'}) & {explicit?: boolean}
   resources: ResourceInfo[]
   diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; message: string }>
   resourceTotal: number

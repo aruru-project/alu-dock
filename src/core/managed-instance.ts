@@ -403,7 +403,8 @@ export class ManagedInstance {
   private shutdownRequestedAt: string | undefined;
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
-  private readonly workerConfigValue: JsonObject | undefined;
+  private workerConfigValue: JsonObject | undefined;
+  private pendingReloadConfig?: { operationId: string; config?: JsonObject };
   private modelSpeedValue: ModelSpeedSelection | undefined;
   get modelSpeed(): ModelSpeedSelection | undefined { return this.modelSpeedValue && { ...this.modelSpeedValue }; }
   readonly parentId: string | undefined;
@@ -1292,12 +1293,21 @@ export class ManagedInstance {
     }
   }
 
-  async reloadSession(operationId: string): Promise<AgentReplacementResult> {
-    const result = await this.replaceRuntime("reloading resources", operationId, "reload", {}, async () => {
-      return this.invokeAgent<AgentReplacementResult>("session.reload", { operationId });
-    });
+  async reloadSession(operationId: string, selectConfig?: (current?: JsonObject) => Promise<JsonObject | undefined>): Promise<AgentReplacementResult & { projection: AgentResourceProjectionBody }> {
+    let result: AgentReplacementResult;
+    try {
+      result = await this.replaceRuntime("reloading resources", operationId, "reload", {}, () =>
+        this.invokeAgent<AgentReplacementResult>("session.reload", { operationId }, selectConfig ? {
+          context: { type: "session_reload", workerConfig: this.pendingReloadConfig?.config },
+        } : undefined), selectConfig && (async () => {
+          const config = await selectConfig(this.workerConfigValue);
+          this.pendingReloadConfig = { operationId, config: config === undefined ? undefined : cloneWorkerConfig(config) };
+        }));
+    } finally {
+      if (this.pendingReloadConfig?.operationId === operationId) this.pendingReloadConfig = undefined;
+    }
+    const projected = await this.getResources();
     if (!result.cancelled) {
-      const projected = await this.getResources();
       await this.enqueueTransition(async () => {
         this.appendEvent("resources.reloaded", { resources: projected.resources, diagnostics: projected.diagnostics });
         if (projected.resourcesTruncated || projected.diagnosticsTruncated) {
@@ -1307,7 +1317,7 @@ export class ManagedInstance {
         }
       });
     }
-    return result;
+    return { ...result, projection: projected };
   }
 
   async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<AgentModelState> {
@@ -3319,6 +3329,8 @@ export class ManagedInstance {
           durable: true,
           operationId,
           mutate: () => {
+            const pending = this.pendingReloadConfig;
+            if (reason === "reload" && pending && pending.operationId === event.operationId) this.workerConfigValue = pending.config;
             // Publish the target cwd and its Host-approved decision in the same catalog commit.
             if (requestedTrust && requestedTrust.canonicalCwd === cwd) {
               this.projectTrustedValue = requestedTrust.projectTrusted;
