@@ -17,6 +17,7 @@ export interface SystemTemplateProvider {
   validate(source: SystemSource, text: string): void;
   hasExplicitSelection(config: JsonObject | undefined): boolean;
   workerConfig(source: SystemSource, provided?: JsonObject): JsonObject;
+  workerConfig(source: null, provided?: JsonObject): JsonObject | undefined;
 }
 
 const HOST_DEFAULT_FILE = "work-system-default.json";
@@ -268,6 +269,13 @@ export class SystemService {
       catch { throw new ResourceContentError(`无法使用 ${candidate.path}。请检查文件内容及读取权限，或选择另一份 system。`); }
     }
     return candidate;
+  }
+
+  /** Change this Work only; creation defaults play no part in a reload. */
+  async resolveSelection(cwd: string, id: string | null, current?: JsonObject): Promise<{ kind?: SystemSourceKind; workerConfig?: JsonObject }> {
+    if (id === null) return { workerConfig: this.provider.workerConfig(null, current) };
+    const selected = await this.selected(await this.directory(cwd), id);
+    return { kind: selected.kind, workerConfig: this.provider.workerConfig(selected, current) };
   }
 
   async contentPath(cwd: string, id: string): Promise<string> {

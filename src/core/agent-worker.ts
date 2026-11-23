@@ -340,6 +340,8 @@ export interface AgentWorkerState {
 /** Host-resolved facts carried only on the private invoke envelope. */
 export type AgentInvokeContext =
   | { type: "session_switch"; canonicalCwd: string; projectTrusted: boolean }
+  /** Presence means replace the config, including replacing it with no config. */
+  | { type: "session_reload"; workerConfig?: import("./json-value.js").JsonObject; attachments?: never }
   | { type: "command"; attachments?: AttachmentDto[]; queueAvailable: boolean }
   | { type: "defer_to_host"; attachments?: AttachmentDto[]; queueAvailable: boolean }
   | { type: "force_queue"; attachments?: AttachmentDto[] }

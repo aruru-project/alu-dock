@@ -11,7 +11,7 @@ import { FILE_TRANSFER_CAPABILITY, MULTIPLEX_CAPABILITY, isByteStreamRequest } f
 import { ClientLink, MAX_LINK_LINE_BYTES, VirtualProtocolSocket } from "./stream-link.js";
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
-import { HOST_SYSTEM_DEFAULT_CAPABILITY, SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
+import { HOST_SYSTEM_DEFAULT_CAPABILITY, SYSTEM_SET_CAPABILITY, SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { CHILD_MODELS_CAPABILITY, MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
 import { ModelVisibilityError, type ModelVisibilityPort } from "./model-visibility.js";
 import type { ChildModelsEditor, ChildModelsSource } from "./child-models.js";
@@ -279,7 +279,7 @@ export class DockHost {
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) {
-      capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY); capabilities.delete(HOST_SYSTEM_DEFAULT_CAPABILITY);
+      capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY); capabilities.delete(HOST_SYSTEM_DEFAULT_CAPABILITY); capabilities.delete(SYSTEM_SET_CAPABILITY);
     }
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
     // A Main that routes to SubHosts keeps its own list too (the CLI always gives it a state directory).

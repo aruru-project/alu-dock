@@ -355,7 +355,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
       commands: '命令中心', 'dock-tools': 'Dock Tools', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
       'rename-session': '会话名称', 'compact-session': '压缩上下文', 'reload-session': 'Reload Session',
       models: '选择 Model', thinking: 'Thinking Level', speed: '模型速度', tools: 'Active Tools', resources: '项目状态', settings: '设置',
-      'quick-buttons': '快捷按钮',
+      'quick-buttons': '快捷按钮', system: '切换 system',
     } as Record<ControlSection, string>)[section]
   }
 
@@ -375,6 +375,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
       return '浏览、切换或分叉当前会话树'
     }
     if (section === 'sessions') return '从当前目录保存的 Session 继续'
+    if (section === 'system') return '选择后将重新加载当前 Session（对话保留）'
     if (section === 'quick-buttons') return '输入框下方的按钮，只保存在这台设备上，所有 Host 共用'
     return ''
   }
@@ -385,7 +386,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function controlDialogClasses(section: ControlSection) {
-    const size = controlSizeOverride.value || (section === 'tree' ? 'tree' : ['sessions', 'models', 'tools', 'resources', 'settings'].includes(section) ? 'wide' : 'default')
+    const size = controlSizeOverride.value || (section === 'tree' ? 'tree' : ['sessions', 'models', 'tools', 'resources', 'system', 'settings'].includes(section) ? 'wide' : 'default')
     return ['ui-dialog-box', size === 'tree' ? 'ui-dialog-size-tree' : size === 'wide' ? 'ui-dialog-size-wide' : '']
   }
 

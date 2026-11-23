@@ -13,6 +13,7 @@ import {
 } from "../core/agent-worker.js";
 import { MAX_PUBLISHED_FILE_REF_CHARS, PublishedFileUnavailableError } from "../core/published-file.js";
 import { parseAssistantRequest } from "../core/assistant.js";
+import { cloneWorkerConfig } from "../core/worker-config.js";
 import { MAX_RESOURCE_CONTENT_REF_CHARS, ResourceContentError } from "../core/resource-content.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
@@ -264,6 +265,7 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       const request = parseControlRequest(value.request);
       if (!isAgentRequest(request.type)) throw new Error("Worker received a non-Agent Protocol V2 request");
       const context = value.context === undefined ? undefined : parseAgentInvokeContext(value.context);
+      if (context?.type === "session_reload" && request.type !== "session.reload") throw new Error("Worker reload context requires session.reload");
       if ((request.type === "session.switch") !== (context?.type === "session_switch")) {
         throw new Error("Worker session switch request requires resolved Host invoke context");
       }
@@ -698,6 +700,10 @@ function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
     }
     if (value.type === "force_queue") return { type: "force_queue", ...(attachments === undefined ? {} : { attachments }) };
     return { type: "host_queue", ...(attachments === undefined ? {} : { attachments }) };
+  }
+  if (value.type === "session_reload") {
+    exactKeys(value, ["type", "workerConfig"], "Worker reload context");
+    return { type: "session_reload", ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig) }) };
   }
   exactKeys(value, ["type", "canonicalCwd", "projectTrusted"], "Worker Agent invoke context");
   if (value.type !== "session_switch" || typeof value.projectTrusted !== "boolean") throw new Error("Worker Agent invoke context is invalid");

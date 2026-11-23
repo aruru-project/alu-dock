@@ -70,7 +70,7 @@ async function load() {
   <section class="resource-document" aria-label="资源正文">
     <header class="resource-document-header">
       <button ref="backButton" type="button" class="resource-document-back" :aria-label="system ? '返回 system 选择' : '返回资源列表'" @click="emit('back')"><ArrowLeft :size="17" /></button>
-      <div class="resource-document-title"><strong>{{ name }}</strong><span>{{ system ? '文件当前正文 · 阅读不会创建 Work' : '文件当前正文 · 阅读不会重新加载资源' }}</span></div>
+      <div class="resource-document-title"><strong>{{ name }}</strong><span>{{ system ? (work ? '文件当前正文 · 阅读不会更改当前 system' : '文件当前正文 · 阅读不会创建 Work') : '文件当前正文 · 阅读不会重新加载资源' }}</span></div>
     </header>
     <div v-if="loading" class="resource-document-status" role="status"><span class="alu-agent-activity-spinner" />正在读取正文…</div>
     <div v-else-if="error" class="resource-document-status resource-document-error" role="alert"><p>{{ error }}</p><button type="button" class="ui-dialog-btn" @click="load"><RotateCw :size="14" />重试</button></div>

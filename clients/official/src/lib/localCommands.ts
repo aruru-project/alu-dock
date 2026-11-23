@@ -1,6 +1,6 @@
 import controlCommandNames from '../../../../src/shared/local-control-command-names.json' with { type: 'json' }
 
-export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'speed' | 'tools' | 'resources' | 'settings' | 'quick-buttons'
+export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'speed' | 'tools' | 'resources' | 'settings' | 'quick-buttons' | 'system'
 export type LocalControlAction = 'stop' | 'restoreQueue' | 'refresh'
 
 export interface LocalControlCommand {
@@ -35,7 +35,7 @@ export const localControlCommands: readonly LocalControlCommand[] = [
 
 /** Her conversation stays one continuous conversation; these Pi-only panels do not apply. */
 export function controlSectionAvailable(section: ControlSection, residentAssistant = false): boolean {
-  return !residentAssistant || !['sessions', 'tree', 'new-session', 'settings'].includes(section)
+  return !residentAssistant || !['sessions', 'tree', 'new-session', 'settings', 'system'].includes(section)
 }
 
 export function controlCommandAvailable(name: string, residentAssistant = false): boolean {

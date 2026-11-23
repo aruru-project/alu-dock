@@ -1,4 +1,4 @@
-import { piSystemPromptResolver } from "./system-template-provider.js";
+import { resolvePiBaseSystem } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
 import { workerToolSelection } from "./worker-tool-policy.js";
 import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
@@ -192,6 +192,8 @@ export interface PiAgentAdapterOptions {
   sessionCatalog?: PiSessionCatalog;
   /** Stage the target's decision for construction; return a rollback for cancellation/failure. */
   setProjectTrust?: (cwd: string, trusted: boolean) => () => void;
+  hasExplicitSystem?: () => boolean;
+  prepareSystemReload?: (config: JsonObject | undefined, services: AgentSessionServices) => Promise<(success: boolean) => void>;
   commitReplacement?: (change: { operationId: string; kind: ReplacementKind; previousSessionFile?: string; sessionFile?: string }) => Promise<void>;
   commitRuntimeError?: (failure: { operationId: string; kind: ReplacementKind; error: unknown; recoverySessionFile?: string }) => Promise<void>;
   isSessionFileDurable?: (path: string) => boolean;
@@ -553,7 +555,7 @@ export class PiAgentAdapter {
       case "session.name": return this.setSessionName(request.params.operationId, request.params.name);
       case "session.compact": return this.compact(request.params.operationId, request.params.customInstructions);
       case "session.compaction.prompts": return getCompactionPromptTemplates();
-      case "session.reload": return this.reload(request.params.operationId);
+      case "session.reload": return this.reload(request.params.operationId, context?.type === "session_reload" ? context : undefined);
       case "session.tree": return this.getTree();
       case "session.navigate": return this.navigateTree(request.params.targetId, {
         ...(request.params.summarize === undefined ? {} : { summarize: request.params.summarize }),
@@ -731,7 +733,8 @@ export class PiAgentAdapter {
     const source = loader.getSystemPromptSource();
     const systemSource: NonNullable<AgentResourceProjectionBody["systemSource"]> = !source ? { kind: "pi-builtin" }
       : basename(source.path) !== "SYSTEM.md" ? { kind: "dock-template", name: basename(source.path) }
-      : source.path === join(binding.services.agentDir, "SYSTEM.md") ? { kind: "global-system" } : { kind: "project-system" };
+      : source.path === join(binding.services.agentDir, "SYSTEM.md") ? { kind: "global-system" } : { kind: "project-system", ...(source.path === join(binding.services.cwd, ".pi", "SYSTEM.md") ? {} : { otherDirectory: true }) };
+    if (this.options.hasExplicitSystem?.()) systemSource.explicit = true;
     return { ...projectResources(resources, diagnostics), systemSource };
   }
 
@@ -1222,16 +1225,19 @@ export class PiAgentAdapter {
     });
   }
 
-  reload(operationId: string): Promise<{ cancelled: false }> {
+  reload(operationId: string, change?: { workerConfig?: JsonObject }): Promise<{ cancelled: false }> {
     return this.serialize(async () => {
       const previousSessionFile = this.sessionFile;
       const binding = this.requireActive();
+      // Refuse a bad target before buffering events or invalidating this live session.
+      const finishChange = change && await this.options.prepareSystemReload!(change.workerConfig, binding.services);
+      let reloaded = false;
       const buffered: AgentEvent[] = [];
       const originalBuffer = binding.buffered;
       binding.buffered = buffered;
       binding.bufferEvents = true;
-      await this.options.extensionUiBroker?.beginGenerationChange("reload");
       try {
+        await this.options.extensionUiBroker?.beginGenerationChange("reload");
         let seamCalls = 0;
         await binding.session.reload({
           beforeSessionStart: async () => {
@@ -1246,6 +1252,7 @@ export class PiAgentAdapter {
         if (seamCalls !== 1) throw new Error(`Reload rebind seam ran ${seamCalls} times`);
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
         binding.bufferEvents = false;
+        reloaded = true;
         this.publishReplacement(operationId, "reload", previousSessionFile, binding.session.sessionFile);
         this.announceRunningBash(binding);
         await this.options.extensionUiBroker?.completeGenerationChange();
@@ -1263,6 +1270,7 @@ export class PiAgentAdapter {
         await this.commitRuntimeError(operationId, "reload", error, previousSessionFile);
         throw error;
       } finally {
+        finishChange?.(reloaded);
         binding.bufferEvents = false;
         binding.buffered = originalBuffer;
       }
@@ -2102,7 +2110,8 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     ? () => createPiExtensionUiContext(options.extensionUiContextPortFactory!())
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
-  const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
+  let currentWorkerConfig = options.workerConfig;
+  let preparedSystem: Awaited<ReturnType<typeof resolvePiBaseSystem>> | undefined;
   let childStarting = options.child !== undefined;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
@@ -2116,7 +2125,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       agentDir,
       settingsManager,
       resourceLoaderOptions: {
-        ...(systemPromptResolver === undefined ? {} : { systemPromptResolver }),
+        systemPromptResolver: () => preparedSystem ?? resolvePiBaseSystem(currentWorkerConfig, canonicalCwd, agentDir, settingsManager.isProjectTrusted()),
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },
@@ -2135,7 +2144,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       },
     });
     // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
-    const { model: requestedModel, ...piCreateOptions } = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
+    const { model: requestedModel, ...piCreateOptions } = (currentWorkerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
     // A child is created once; reloads restore what its session recorded.
     const childStart = childStarting;
     const inheritedConversation = childStart && sessionManager.getBranch().length > 0;
@@ -2180,6 +2189,14 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     extensionUiBroker: options.extensionUiBroker,
     uiContext,
     uiContextFactory: createUiContext,
+    hasExplicitSystem: () => currentWorkerConfig?.systemSelection !== undefined,
+    prepareSystemReload: async (config, services) => {
+      const selected = await resolvePiBaseSystem(config, services.cwd, services.agentDir, services.settingsManager.isProjectTrusted());
+      const previous = currentWorkerConfig;
+      currentWorkerConfig = config;
+      preparedSystem = selected;
+      return (success) => { preparedSystem = undefined; if (!success) currentWorkerConfig = previous; };
+    },
     setProjectTrust: (cwd, trusted) => {
       const previous = trustByCwd.get(cwd);
       trustByCwd.set(cwd, trusted);

@@ -24,6 +24,7 @@ import {
   parseKeyLookupResult,
   parseMachinesResult,
   parseSettingsResult,
+  parseResourcesResult,
   parseStatusResult,
   parseSystemDefaultSetResult,
   parseWorkspaceFileReadFrame,
@@ -48,6 +49,21 @@ test("JSONL decoder preserves split UTF-8 and treats Unicode separators as data"
   assert.deepEqual(decoder.push(encoded.subarray(0, split)), []);
   assert.deepEqual(decoder.push(encoded.subarray(split)), [line]);
   assert.deepEqual(decoder.finish(), []);
+});
+
+test("a Work system change names a candidate or explicitly clears it; loaded sources distinguish other directories", () => {
+  const request = { kind: "request", version: 2, requestId: "r", type: "system.set" };
+  const target = { instanceId: "work", operationId: "change" };
+  for (const id of ["chosen", null]) {
+    const parsed = parseControlRequest({ ...request, params: { ...target, id } });
+    assert.deepEqual(parsed.params, { ...target, id });
+    assert.deepEqual(classifyControlRequest(parsed), { target: "instance", effect: "command", transport: "unary" });
+  }
+  assert.throws(() => parseControlRequest({ ...request, params: target }), { code: "invalid_request" });
+  const body = { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
+  for (const source of [{ kind: "global-system" }, { kind: "project-system", explicit: true, otherDirectory: true }]) {
+    assert.deepEqual(parseResourcesResult({ ...body, systemSource: source }).systemSource, source);
+  }
 });
 
 test("JSONL decoder rejects oversized and unterminated records", () => {

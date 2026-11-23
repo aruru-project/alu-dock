@@ -275,6 +275,7 @@ pub fn run() {
             sessions::compaction_prompts,
             sessions::compact_session,
             sessions::reload_session,
+            sessions::set_work_system,
             sessions::session_tree,
             sessions::navigate_session,
             sessions::fork_session,

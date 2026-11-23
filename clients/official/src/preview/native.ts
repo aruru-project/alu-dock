@@ -7,7 +7,7 @@ import type { SessionContext } from '../lib/bridge'
 import type {
   AssistantContextResult, AssistantDocument, AssistantEpisode, AssistantEpisodeEdit, AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter,
   AssistantSearchResult, AssistantSettings, AssistantTimelineFilter, BootstrapPayload, ClientPreferences, CommandsResult, DesktopShellStatus, HostCatalog,
-  ModelsResult, SavedSessionPage, SessionTree, SettingsResult, ToolsResult, Work, WorkspacePage,
+  ModelsResult, ResourcesResult, SystemCandidate, SavedSessionPage, SessionTree, SettingsResult, ToolsResult, Work, WorkspacePage,
 } from '../lib/types'
 
 function sampleData() {
@@ -239,6 +239,16 @@ const previewScreen = () => new URLSearchParams(window.location.search).get('pre
 const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const workFor = (instanceId: unknown) => sample().previewBootstrap.works.find((work) => work.id === instanceId) ?? sample().previewBootstrap.works[0]!
 
+const sampleSystems = (cwd: string): SystemCandidate[] => [
+  { id: 'project', name: 'SYSTEM.md', kind: 'project-system', path: `${cwd}/.pi/SYSTEM.md`, workerConfig: {} },
+  { id: 'global', name: 'SYSTEM.md', kind: 'global-system', path: '/home/alu/.pi/agent/SYSTEM.md', workerConfig: {} },
+  { id: 'review', name: 'review.json', kind: 'dock-template', path: '/home/alu/.aludock/systems/review.json', workerConfig: {} },
+]
+const sampleSources = new Map<string, ResourcesResult['systemSource']>()
+function sampleResources(work: Work): ResourcesResult {
+  return { systemSource: work.assistant ? undefined : sampleSources.get(work.id) ?? { kind: 'project-system' }, resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
+}
+
 async function answer(command: string, args: Record<string, unknown>): Promise<unknown> {
   const preview = sample()
   switch (command) {
@@ -276,7 +286,17 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       Object.assign(setting, { value: update.value })
       return { setting: structuredClone(setting), instance: workFor(args.instanceId), reloadRequired: false, hostRestartRequired: false }
     }
-    case 'get_resources': await delay(100); return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
+    case 'get_resources': await delay(100); return sampleResources(workFor(args.instanceId))
+    case 'system_catalog': return { cwd: args.cwd, candidates: sampleSystems(String(args.cwd)), total: 3, warnings: [], revision: 'preview', assistantChoice: false }
+    case 'system_content': return { text: args.id === 'review' ? JSON.stringify({ intro: '你负责审查本次代码修改。', toolNotes: '', guidelines: ['先看用户入口，再核对实现。'], documentationHeading: '项目资料', documentationInstructions: [] }, null, 2) : '# 工作约定\n\n先理解项目目标，再修改代码。\n\n- 使用项目约定的工具。\n- 汇报已验证的结果和仍待确认的问题。', revision: 'preview' }
+    case 'set_work_system': {
+      await delay(220)
+      const instance = workFor(args.instanceId)
+      const selected = sampleSystems(instance.cwd).find(c => c.id === args.id)
+      sampleSources.set(instance.id, selected?.kind === 'dock-template' ? { kind: selected.kind, name: selected.name, explicit: true } : selected ? { kind: selected.kind, explicit: true } : { kind: 'project-system' })
+      instance.runtimeGeneration++
+      return { ...sampleResources(instance), instance: structuredClone(instance) }
+    }
     case 'list_sessions': await delay(100); return preview.previewSessions(args as unknown as SessionContext)
     case 'session_tree': await delay(100); return preview.previewTree
     case 'list_deliverables': return [

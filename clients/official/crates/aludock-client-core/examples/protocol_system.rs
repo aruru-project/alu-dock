@@ -186,9 +186,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matched,
         "created Work must expose the chosen template's original, not project SYSTEM"
     );
+    let project = &candidates[0];
+    let switched = client
+        .set_instance_system(&work.id, Some(&project.id), None)
+        .await?;
+    let projected = serde_json::to_value(aludock_client_core::project_session_reload(switched))?;
+    assert_eq!(
+        projected["systemSource"],
+        serde_json::json!({"kind":"project-system", "explicit":true})
+    );
+    let cleared = client.set_instance_system(&work.id, None, None).await?;
+    assert_eq!(
+        serde_json::to_value(cleared.projection.system_source)?,
+        serde_json::json!({"kind":"project-system"})
+    );
     client.stop_instance(&work.id, None).await?;
     println!(
-        "PASS Rust→Host→Pi: target catalog, paged BOM original, explicit save, trust continuation with chosen config, Work actual source, public compaction templates (four complete SHA256), stop (no model)"
+        "PASS Rust→Host→Pi: target catalog, paged BOM original, explicit save, trust continuation with chosen config, Work actual source, switch and clear in place, public compaction templates (four complete SHA256), stop (no model)"
     );
     Ok(())
 }

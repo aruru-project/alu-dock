@@ -15,11 +15,35 @@ export function createPiSystemTemplateProvider(agentDir = getAgentDir()): System
     initialTemplate: () => JSON.stringify(getDefaultSystemPromptBody(), null, 2) + "\n",
     validate: (source, text) => { if (source.kind === "dock-template") parseDefaultSystemPromptBody(JSON.parse(text.replace(/^\uFEFF/, ""))); },
     hasExplicitSelection: (config) => config?.systemSelection !== undefined,
-    workerConfig: (source, provided) => ({ ...provided, systemSelection: { kind: source.kind, path: source.path,
-      ...(source.kind === "dock-template" ? { home: dirname(dirname(dirname(source.path))) } : {}),
-      ...(source.kind === "project-system" ? { cwd: dirname(dirname(source.path)) } : {}),
-    } }),
+    workerConfig: withSystemSelection,
   };
+}
+
+function withSystemSelection(source: SystemSource, provided?: JsonObject): JsonObject;
+function withSystemSelection(source: null, provided?: JsonObject): JsonObject | undefined;
+function withSystemSelection(source: SystemSource | null, provided?: JsonObject): JsonObject | undefined {
+  if (!source) {
+    const { systemSelection: _, ...rest } = provided ?? {};
+    return Object.keys(rest).length ? rest : undefined;
+  }
+  return { ...provided, systemSelection: { kind: source.kind, path: source.path,
+    ...(source.kind === "dock-template" ? { home: dirname(dirname(dirname(source.path))) } : {}),
+    ...(source.kind === "project-system" ? { cwd: dirname(dirname(source.path)) } : {}),
+  } };
+}
+
+/** Same discovery priority as Pi's ResourceLoader. Supplying an actual default body also
+ * replaces a previously loaded Dock template when returning to native discovery. */
+export async function resolvePiBaseSystem(config: JsonObject | undefined, cwd: string, agentDir: string, trusted: boolean): Promise<SystemPromptSelection> {
+  const selected = piSystemPromptResolver(config, agentDir);
+  if (selected) return selected();
+  for (const path of [...(trusted ? [join(cwd, ".pi", "SYSTEM.md")] : []), join(agentDir, "SYSTEM.md")]) {
+    try { return { kind: "custom", text: new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path)), source: { path } }; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new ResourceContentError(`无法读取 ${path}。请检查文件编码和读取权限，或选择另一份 system。`);
+    }
+  }
+  return { kind: "default", body: getDefaultSystemPromptBody() };
 }
 
 /** Keep the concrete original source through session replacement and durable reopen. */

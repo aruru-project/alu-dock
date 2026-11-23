@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ClientError, DiagnosticInfo, DockClient, HistoryRecord, InstanceSnapshot, ProjectTrustDecision,
-    PublishedFileDto, ResourceInfo, Result,
+    ClientError, DockClient, HistoryRecord, InstanceSnapshot, ProjectTrustDecision,
+    PublishedFileDto, ResourcesResult, Result,
     capabilities::{
         CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES, CONVERSATION_REFERENCES,
         CONVERSATION_REFERENCES_V1, SESSION_COMMANDS as SESSION_COMMAND_CAPABILITIES,
@@ -386,12 +386,8 @@ pub struct SessionCompactionResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionReloadResult {
-    pub resources: Vec<ResourceInfo>,
-    pub diagnostics: Vec<DiagnosticInfo>,
-    pub resource_total: u64,
-    pub resources_truncated: bool,
-    pub diagnostic_total: u64,
-    pub diagnostics_truncated: bool,
+    #[serde(flatten)]
+    pub projection: ResourcesResult,
     pub instance: InstanceSnapshot,
 }
 
@@ -888,6 +884,24 @@ impl DockClient {
                 Some(operation_id),
             )
             .await?;
+        validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
+        Ok(result)
+    }
+
+    pub async fn set_instance_system(
+        &self,
+        instance_id: &str,
+        id: Option<&str>,
+        operation_id: Option<&str>,
+    ) -> Result<SessionReloadResult> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        let result: SessionReloadResult = self.request(
+            "system.set",
+            &serde_json::json!({"operationId": operation_id, "instanceId": instance_id, "id": id}),
+            crate::capabilities::SYSTEM_SET,
+            Some(operation_id),
+        ).await?;
         validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
         Ok(result)
     }

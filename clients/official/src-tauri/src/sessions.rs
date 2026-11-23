@@ -466,13 +466,79 @@ pub(crate) async fn reload_session(
     expected_runtime_generation: u64,
     operation_id: String,
 ) -> Result<SafeSessionReload, CommandError> {
+    reload_with_selection(
+        content,
+        runtime,
+        follow,
+        operations,
+        operation_editor,
+        connection_id,
+        selection_generation,
+        instance_id,
+        expected_host_epoch,
+        expected_runtime_generation,
+        operation_id,
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn set_work_system(
+    content: tauri::State<'_, aludock_client_core::SessionContent>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
+    id: Option<String>,
+) -> Result<SafeSessionReload, CommandError> {
+    reload_with_selection(
+        content,
+        runtime,
+        follow,
+        operations,
+        Value::Null,
+        connection_id,
+        selection_generation,
+        instance_id,
+        expected_host_epoch,
+        expected_runtime_generation,
+        operation_id,
+        Some(id),
+    )
+    .await
+}
+
+async fn reload_with_selection(
+    content: tauri::State<'_, aludock_client_core::SessionContent>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
+    selection: Option<Option<String>>,
+) -> Result<SafeSessionReload, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .with_host_epoch(&expected_host_epoch);
     let target_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
     let association = operation_association(
         &operation_id,
-        "reload_session",
+        if selection.is_some() {
+            "set_work_system"
+        } else {
+            "reload_session"
+        },
         &connection_id,
         &instance_id,
         &expected_host_epoch,
@@ -490,10 +556,19 @@ pub(crate) async fn reload_session(
                     expected_runtime_generation,
                 )
                 .map_err(CommandError::from)?;
-            let result = client
-                .reload_session(&instance_id, Some(&operation_id))
-                .await
-                .map_err(CommandError::from)?;
+            let result = match selection {
+                Some(id) => {
+                    client
+                        .set_instance_system(&instance_id, id.as_deref(), Some(&operation_id))
+                        .await
+                }
+                None => {
+                    client
+                        .reload_session(&instance_id, Some(&operation_id))
+                        .await
+                }
+            }
+            .map_err(CommandError::from)?;
             observation.accept_session_result(&target_key, client.clone(), &result);
             Ok(project_session_reload(result))
         })

@@ -21,6 +21,7 @@ import SessionManager from './SessionManager.vue'
 import QuickButtonsEditor from './QuickButtonsEditor.vue'
 import ModelSpeedSetting from './ModelSpeedSetting.vue'
 import ResourceDocument from './ResourceDocument.vue'
+import WorkSystemPicker from './WorkSystemPicker.vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
@@ -119,11 +120,12 @@ const localControlIcons = {
   settings: Settings,
   state: Info,
   resources: LayoutList,
-  'quick-buttons': Pin,
+  'quick-buttons': Pin, system: LayoutList,
 } as const
 /** Managing quick buttons lives only in the palette; it is not a slash command. */
 const manageQuickButtons: LocalControlCommand = { id: 'quick-buttons', name: '', label: '管理快捷按钮', keywords: '快捷按钮 钉住 自定义 quick button pin', description: '新建、修改、排序或删除输入框下方的快捷按钮', section: 'quick-buttons' }
-const staticCommands = computed(() => [...workControlCommands(residentAssistant.value, props.work.displayName).filter(command => command.id !== 'speed' || panel.speedAvailable), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
+const switchSystem: LocalControlCommand = { id: 'system', name: '', label: '切换 system', keywords: 'system prompt 模板 系统提示 SYSTEM.md', description: '更换当前 Work 的基础 system 并重新加载', section: 'system' }
+const staticCommands = computed(() => [...workControlCommands(residentAssistant.value, props.work.displayName).filter(command => command.id !== 'speed' || panel.speedAvailable), manageQuickButtons, ...(residentAssistant.value ? [] : [switchSystem])].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
 
 const commandSearch = ref('')
 const modelSearch = ref('')
@@ -231,7 +233,7 @@ const currentSystem = computed(() => {
   const source = resources.value?.systemSource
   switch (source?.kind) {
     case 'dock-template': return `Dock 模板 · ${source.name}`
-    case 'project-system': return '项目 .pi/SYSTEM.md'
+    case 'project-system': return source.otherDirectory ? '其他目录 .pi/SYSTEM.md' : '项目 .pi/SYSTEM.md'
     case 'global-system': return '全局 SYSTEM.md'
     case 'pi-builtin': return 'Pi 内置默认'
     default: return undefined
@@ -277,14 +279,12 @@ watch(optionCursor, async () => {
   document.getElementById(`cc-opt-${optionCursor.value}`)?.scrollIntoView({ block: 'nearest' })
 })
 
-watch([
-  () => app.activeConnectionId,
-  () => app.connectionContext?.selectionGeneration,
-  () => props.work.id,
-  () => props.work.hostId,
-  () => props.work.ownerHostEpoch,
-  () => props.work.runtimeGeneration,
-], () => {
+const systemFromStatus = ref(false)
+const workTarget = [() => app.activeConnectionId, () => app.connectionContext?.selectionGeneration,
+  () => props.work.id, () => props.work.hostId, () => props.work.ownerHostEpoch] as const
+watch([...workTarget, () => props.work.runtimeGeneration], (current, previous) => {
+  // A successful reload can advance this same Work before its reply returns.
+  if (workTarget.some((_, i) => current[i] !== previous[i])) systemFromStatus.value = false
   commandTargetRevision++
   if (pending.value.startsWith('command:')) pending.value = ''
   panel.reset()
@@ -299,6 +299,7 @@ watch([
   void loadSection(props.section)
 }, { immediate: true })
 watch(() => props.section, (section) => {
+  if (section !== 'system') systemFromStatus.value = false
   selectedResource.value = null
   selectedSettingKey.value = ''
   optionCursor.value = 0
@@ -312,6 +313,21 @@ async function closeResource() {
   selectedResource.value = null
   await nextTick()
   if (contentRef) document.getElementById(`resource-${contentRef}`)?.focus()
+}
+
+const systemTrigger = ref<HTMLButtonElement | null>(null)
+function openStatusSystem() {
+  systemFromStatus.value = true
+  emit('section', 'system')
+}
+async function leaveSystem() {
+  emit('title', '')
+  if (!systemFromStatus.value) { emit('close'); return }
+  systemFromStatus.value = false
+  emit('section', 'resources')
+  await nextTick()
+  // The dialog's section watcher first sets its normal initial focus.
+  window.requestAnimationFrame(() => systemTrigger.value?.focus())
 }
 
 function forwardSessionTitle(title: string, body?: string) {
@@ -663,7 +679,7 @@ function isCurrentModel(model: ModelInfo) {
     <div v-if="pendingChange" class="alu-dialog-status" role="status"><span><span class="alu-agent-activity-spinner" /> {{ pendingChange }}</span></div>
     <div v-if="error" class="alu-dialog-error">{{ error }}</div>
     <div v-if="section !== 'resources' && loadErrors[section]" class="alu-dialog-error">{{ loadErrors[section] }}<button type="button" @click="loadSection(section, true)">重试</button></div>
-    <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
+    <div v-if="!['commands', 'dock-tools', 'resources', 'system'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
 
     <template v-else-if="section === 'commands'">
       <div v-if="commandAbortError" class="alu-dialog-error">{{ commandAbortError }}<button type="button" class="alu-link-button" :disabled="workActions.aborting" @click="cancelCommand">重试中止</button></div>
@@ -793,6 +809,7 @@ function isCurrentModel(model: ModelInfo) {
       <div class="ui-dialog-options"><component :is="residentAssistant ? 'div' : 'button'" v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': !residentAssistant && tool.active, 'is-cursor': !residentAssistant && optionCursor === index }" :disabled="residentAssistant ? undefined : !!pending || !!tools?.truncated" @click="!residentAssistant && toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">{{ residentAssistant ? '可用' : 'ACTIVE' }}</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span><span v-if="tool.source" class="ui-dialog-option-meta">{{ tool.source.kind === 'extension' ? `extension / ${tool.source.package ?? '扩展'}` : '内置' }}</span></span></span></component></div>
     </section>
 
+    <WorkSystemPicker v-else-if="section === 'system' && !residentAssistant" :work="work" :current-system="currentSystem" :from-status="systemFromStatus" @leave="leaveSystem" />
     <ResourceDocument v-else-if="section === 'resources' && selectedResource" :work="work" :resource="selectedResource" @back="closeResource" />
 
     <section v-else-if="section === 'resources'" class="alu-project-status">
@@ -803,7 +820,7 @@ function isCurrentModel(model: ModelInfo) {
       </section>
       <section class="alu-project-status-section">
         <h3>Session</h3>
-        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><div v-if="currentSystem && !residentAssistant" class="alu-project-status-metric current-system"><dt>当前 system</dt><dd>{{ currentSystem }}</dd></div><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ formatContextUsage(work.metrics?.context, 'status') }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
+        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><button v-if="currentSystem && !residentAssistant" ref="systemTrigger" type="button" id="work-current-system" class="alu-project-status-metric current-system is-action" @click="openStatusSystem"><span class="metric-label">当前 system <ChevronRight :size="12" aria-hidden="true" /></span><span class="metric-value">{{ currentSystem }}</span></button><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ formatContextUsage(work.metrics?.context, 'status') }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
         <div v-if="work.lastError" class="alu-project-status-error">{{ work.lastError }}</div>
       </section>
       <section class="alu-project-status-section">
@@ -922,11 +939,14 @@ function isCurrentModel(model: ModelInfo) {
 }
 .alu-project-status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 0; }
 .alu-project-status-metric { min-width: 0; padding: 8px 9px; border-radius: 7px; background: var(--alu-bg); }
-.alu-project-status-metric dt { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.alu-project-status-metric dt, .alu-project-status-metric .metric-label { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.alu-project-status-metric.is-action { border: 1px solid var(--alu-border); text-align: left; cursor: pointer; }
+.alu-project-status-metric.is-action .metric-label { display: flex; justify-content: space-between; align-items: center; }
+.alu-project-status-metric.is-action:hover, .alu-project-status-metric.is-action:focus-visible { border-color: var(--alu-highlight); background: var(--alu-hover); }
 .alu-project-status-metric:not(.current-system) dt { text-transform: uppercase; }
-.alu-project-status-metric dd { margin: 3px 0 0; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
+.alu-project-status-metric dd, .alu-project-status-metric .metric-value { display: block; margin: 3px 0 0; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
 .alu-project-status-metric:not(.current-system) dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.current-system dd { overflow-wrap: anywhere; }
+.current-system dd, .current-system .metric-value { overflow-wrap: anywhere; }
 .alu-project-status-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .alu-project-status-chip { padding: 3px 7px; border: 1px solid var(--alu-border); border-radius: 6px; color: var(--alu-text-dim); background: var(--alu-bg); font-size: var(--alu-micro-size); }
 .alu-handoff-retry { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
