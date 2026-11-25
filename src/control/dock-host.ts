@@ -916,7 +916,10 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "instance.adopt": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.adopt({operationId:request.params.operationId,sessionFile:request.params.sessionFile,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const instance = await this.registry.adopt(request.params);
+          return { instance: instance.snapshot() };
+        });
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;

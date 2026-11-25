@@ -755,12 +755,12 @@ export class MainMachineController implements RemoteInstanceDirectory {
       ...(route.snapshot.key === undefined ? {} : { mainKey: route.snapshot.key }),
     } : undefined;
     const nativeRequest = requestForNativeHost(request, identity);
-    if (nativeRequest.type === "instance.create" && nativeRequest.params.child !== undefined) {
+    if ((nativeRequest.type === "instance.create" || nativeRequest.type === "instance.adopt") && nativeRequest.params.child !== undefined) {
       const child = nativeRequest.params.child;
       const parent = [...this.parentIdsForMachine(machine.id)].find(([, mainId]) => mainId === child.parentId);
       if (parent) nativeRequest.params.child = { ...child, parentId: parent[0] };
       // The resident assistant's own child Work keeps her Main ID as its parent there (card #676).
-      else if (!this.options.remoteChildren?.expected(machine.id, nativeRequest.params.operationId, child.parentId)) {
+      else if (nativeRequest.type === "instance.adopt" || !this.options.remoteChildren?.expected(machine.id, nativeRequest.params.operationId, child.parentId)) {
         throw new Error(this.options.localSnapshots().some((snapshot) => snapshot.id === child.parentId)
           ? "A child Work runs on its parent's Machine. Only the resident assistant's child Works, started with dock_spawn, may run on another Machine."
           : "The parent is no longer available on this machine.");

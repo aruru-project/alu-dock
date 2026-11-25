@@ -35,7 +35,7 @@ import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } 
 import type { CreateInstanceMutation } from "./instance-manager.js";
 import { controlledByOwnChild, InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
-import { ProtocolValidationError } from "./protocol.js";
+import { ProtocolValidationError, type ControlRequest } from "./protocol.js";
 import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { inheritedModelSpeed, type ModelSpeedSelection, type ModelSpeedTier } from "../core/model-speed.js";
 import type { SettingDto, SettingUpdate } from "../core/config-projection.js";
@@ -63,6 +63,8 @@ export interface InstanceFactoryInput {
   name?: string;
   projectTrusted: boolean;
   sessionFile?: string;
+  /** The file is a fresh copy of the parent's session, not the child's own history. */
+  parentConversation?: true;
   initialRuntimeGeneration?: number;
   createdAt?: string;
   reopenedFrom?: "host_lost" | "runtime_error";
@@ -85,13 +87,7 @@ export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstance
   key: string;
 }
 
-export interface AdoptRegistryInstanceInput {
-  operationId: string;
-  sessionFile: string;
-  name?: string;
-  trustChallengeId?: string;
-  projectTrustDecision?: ProjectTrustChoice;
-}
+export type AdoptRegistryInstanceInput = Omit<Extract<ControlRequest, { type: "instance.adopt" }>["params"], "hostId">;
 
 export interface ReopenRegistryInstanceInput {
   operationId: string;
@@ -368,16 +364,20 @@ export class DockRegistry implements LocalDockToolsHostPort {
     // Main names a parent this Host does not run only for its resident assistant (card #676).
     if (input.child !== undefined && this.mainParent !== undefined
       && !this.catalog.current().instances.some((record) => record.id === input.child!.parentId)) return this.startForMainParent(input, key);
+    return this.startOnThisMachine(input, key);
+  }
+
+  private async startOnThisMachine(input: CreateRegistryInstanceInput, key?: string, adoptedFile?: string): Promise<ManagedInstance> {
     const parent = input.child === undefined ? undefined : this.get(input.child.parentId);
     const parentActive = () => parent === undefined || (this.instances.get(parent.id) === parent
       && this.mayStartChildren(parent) && parent.lifecycle === "active");
     if (!parentActive()) throw new Error("A child Work needs an active Work on this machine that may start child Works as its parent.");
-    if (parent === undefined) return this.startNew(input, key, undefined, parentActive);
+    if (parent === undefined) return this.startNew(input, key, undefined, parentActive, { adoptedFile });
     const child = this.childStart(parent, input.child!);
     // A parent that starts stopping from here on waits for this child, which then stops itself.
     const starting = this.childStarts.get(parent) ?? new Set<Promise<unknown>>();
     this.childStarts.set(parent, starting);
-    const creation = this.startNew(input, key, parent, parentActive, { child });
+    const creation = this.startNew(input, key, parent, parentActive, { child, adoptedFile });
     starting.add(creation);
     try {
       return await creation;
@@ -424,35 +424,36 @@ export class DockRegistry implements LocalDockToolsHostPort {
     key: string | undefined,
     parent: ManagedInstance | undefined,
     parentActive: () => boolean,
-    { assistant = false, child, mainParented = false }: { assistant?: boolean; child?: DockChildStart; mainParented?: boolean } = {},
+    { assistant = false, child, mainParented = false, adoptedFile }: { assistant?: boolean; child?: DockChildStart; mainParented?: boolean; adoptedFile?: string } = {},
   ): Promise<ManagedInstance> {
     const created = input.createDirectory === true && await createMissingWorkingDirectory(input.cwd);
     // Her own workspace loads no project resources, so opening her does not grant project trust. A directory
     // created for this Work holds nothing of its own to trust, so the Work starts trusted there (card #674).
     const resolution = assistant
       ? { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: false }
-      : created ? { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: true } : await this.resolveCreationTrust(input, parent);
+      : created ? { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: true } : await this.resolveCreationTrust(input, parent, adoptedFile);
     const cwd = resolution.canonicalCwd;
-    const resolvedConfig = !assistant && this.systemService
+    const resolvedConfig = !adoptedFile && !assistant && this.systemService
       ? (await this.systemService.resolveCreation(cwd, input.workerConfig)).workerConfig
       : input.workerConfig;
     const workerConfig = resolvedConfig === undefined
       ? undefined
       : cloneWorkerConfig(resolvedConfig, "Worker configuration");
     // The parent's Worker owns its conversation and writes the copy for the child's directory.
-    const sessionFile = input.child?.withParentContext ? await parent!.branchConversationForChild(cwd) : undefined;
+    const sessionFile = input.child?.withParentContext ? await parent!.branchConversationForChild(cwd) : adoptedFile;
 
     const id = this.createId();
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(child === undefined ? {} : { child }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(child === undefined ? {} : { child }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(input.child?.withParentContext ? { parentConversation: true } : {}), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
       || instance.hostEpoch !== this.hostEpoch
       || instance.key !== key
       || instance.parentId !== child?.parentId
+      || (adoptedFile !== undefined && instance.snapshot().executor.sessionFile !== adoptedFile)
     ) {
       await instance.disposeUnpublished().catch(() => {});
       throw new Error("Instance factory returned an identity outside the registry Host domain");
@@ -462,7 +463,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       const record = instance.catalogRecord();
       if (child !== undefined) record.childGrant = { role: child.role, allowedTools: child.allowedTools, ...(mainParented ? { mainParent: true } : {}) };
       await this.catalog.create(record, {
-        kind: key === undefined ? "instance.create" : "instance.ensure",
+        kind: adoptedFile ? "instance.adopt" : key === undefined ? "instance.create" : "instance.ensure",
         effect: "rollback_contained",
         operationId: input.operationId,
         instanceId: id,
@@ -581,15 +582,15 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   /** A child in its parent's directory runs under the parent's current decision, including trust_once, without asking again. */
-  private async resolveCreationTrust(input: CreateRegistryInstanceInput, parent: ManagedInstance | undefined): Promise<ProjectTrustResolution> {
+  private async resolveCreationTrust(input: CreateRegistryInstanceInput, parent: ManagedInstance | undefined, adoptedFile?: string): Promise<ProjectTrustResolution> {
     const inherited = parent?.projectTrust();
     if (inherited && input.trustChallengeId === undefined && input.projectTrustDecision === undefined
       && await canonicalDirectory(input.cwd) === inherited.canonicalCwd) return inherited;
     return this.resolveProjectTrust({
-      operationType: "instance.create",
+      operationType: adoptedFile ? "instance.adopt" : "instance.create",
       operationId: input.operationId,
       cwd: input.cwd,
-      name: input.name,
+      name: adoptedFile ?? input.name,
       trustChallengeId: input.trustChallengeId,
       projectTrustDecision: input.projectTrustDecision,
     });
@@ -606,63 +607,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const sessionFile = resolve(input.sessionFile);
     const releaseClaim = this.claimSessionFile(`adopt:${input.operationId}`, input.operationId, sessionFile);
     try {
-      return await this.performAdopt(input, sessionFile);
+      // An interrupted Work still owns its history, including while it is waiting for its parent.
+      if (this.catalog.current().instances.some(record => record.lifecycle !== "stopped"
+        && (record.sessionFile === sessionFile || record.recoverySessionFile === sessionFile))) {
+        throw new Error("This session already belongs to a Work. Open that Work or choose Resume in the Hub.");
+      }
+      const target = await this.reopenTargetResolver.resolve(sessionFile);
+      // The conversation provides no grants. A new child can only report unless tools are newly selected.
+      const { operationId, child, name, trustChallengeId, projectTrustDecision } = input;
+      return await this.startOnThisMachine({
+        operationId, cwd: target.cwd, trustChallengeId, projectTrustDecision,
+        ...(child ? { child: { parentId: child.parentId, allowedTools: child.allowedTools ?? [] } } : { name }),
+      }, undefined, sessionFile);
     } finally {
       releaseClaim();
     }
-  }
-
-  private async performAdopt(input: AdoptRegistryInstanceInput, sessionFile: string): Promise<ManagedInstance> {
-    const target = await this.reopenTargetResolver!.resolve(sessionFile);
-    const trust = await this.resolveProjectTrust({
-      operationType: "instance.adopt",
-      operationId: input.operationId,
-      cwd: target.cwd,
-      name: sessionFile,
-      trustChallengeId: input.trustChallengeId,
-      projectTrustDecision: input.projectTrustDecision,
-    });
-    const id = this.createId();
-    if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
-      throw new Error(`Generated duplicate instance identity: ${id}`);
-    }
-    const instance = await this.factory({
-      id,
-      creationOperationId: input.operationId,
-      hostEpoch: this.hostEpoch,
-      cwd: trust.canonicalCwd,
-      name: input.name,
-      projectTrusted: trust.projectTrusted,
-      sessionFile,
-      dockToolsHostPort: this.dockToolsHostPort,
-      attachmentHostPort: this.attachmentHostPort,
-      dockToolsEnabled: true,
-    });
-    if (
-      instance.id !== id
-      || instance.creationOperationId !== input.operationId
-      || instance.hostEpoch !== this.hostEpoch
-      || instance.snapshot().executor.sessionFile !== sessionFile
-    ) {
-      await instance.disposeUnpublished().catch(() => {});
-      throw new Error("Adopt factory returned an identity or session outside the registry Host domain");
-    }
-    instance.bindCatalogPort(this.catalog.forInstance(id));
-    try {
-      await this.catalog.create(instance.catalogRecord(), {
-        kind: "instance.adopt",
-        effect: "rollback_contained",
-        operationId: input.operationId,
-        instanceId: id,
-      });
-    } catch (error) {
-      await instance.disposeUnpublished().catch(() => {});
-      throw error;
-    }
-    instance.markCatalogCommitted();
-    this.instances.set(id, instance);
-    this.trackInstanceForObservation(instance);
-    return instance;
   }
 
   claimSessionFile(ownerId: string, operationId: string, rawSessionFile: string): () => void {

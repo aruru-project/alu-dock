@@ -99,6 +99,7 @@ def main() -> int:
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
         system_confirmed = False
+        trust_answered = False
         # #342: a Hub title can arrive before the tail of its first frame. Wait
         # for both, or that tail can be mistaken for the subsequent resize frame
         # and a mouse click is sent against the old 80x24 hit regions.
@@ -108,6 +109,9 @@ def main() -> int:
         while not startup_ready() and time.monotonic() < deadline:
             if read_available(fd, output, 0.1) < 0:
                 break
+            if action == "open-saved-child" and not trust_answered and b"Project trust choice" in output:
+                os.write(fd, b"3\r")  # Open the child without loading project resources.
+                trust_answered = True
             if action not in hub_actions and not system_confirmed and b"Choose a system" in output and b"pi-default.json" in output:
                 os.write(fd, b"\r")  # Direct new/miss requires an explicit system confirmation.
                 system_confirmed = True

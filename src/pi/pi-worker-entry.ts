@@ -56,12 +56,13 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     extensionUiContextPortFactory: () => ui.createGenerationPort(),
     setProcessCwd: (cwd) => process.chdir(cwd),
     ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
+    ...(init.parentConversation ? { parentConversation: true } : {}),
     dockToolsBridge,
     modelSpeed,
     ...(host.attachments === undefined ? {} : { dockAttachmentPort: { access: host.attachments } }),
     ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
   });
-  if (init.initialName !== undefined && (!reopened || init.child)) runtime.currentSession().setSessionName(init.initialName);
+  if (init.initialName !== undefined) runtime.currentSession().setSessionName(init.initialName);
   return {
     dispatch: (request, context, preflight) => {
       const dispatch = (): Promise<unknown> => runtime.dispatch(request, context, preflight);
@@ -111,7 +112,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
-  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "initialName"]);
+  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "initialName"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`Worker init contains unknown field ${key}`);
   const text = (input: unknown, limit: number, label: string, optional = false): string | undefined => {
     if (input === undefined && optional) return undefined;
@@ -123,6 +124,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     if (!Array.isArray(input) || input.length > 2_000) throw new Error(`${label} is invalid`);
     return input.map((item) => text(item, 256, label) as string);
   };
+  if (value.parentConversation !== undefined && value.parentConversation !== true) throw new Error("Worker parent conversation flag is invalid");
   if (typeof value.projectTrusted !== "boolean") throw new Error("Worker init project trust is invalid");
   if (value.child !== undefined && value.child !== "helper" && value.child !== "lead") throw new Error("Worker init child role is invalid");
   return {
@@ -135,6 +137,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(value.child === undefined ? {} : { child: value.child }),
     ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
     projectTrusted: value.projectTrusted,
+    ...(value.parentConversation ? { parentConversation: true } : {}),
     ...(text(value.sessionFile, 16_384, "Worker session file", true) === undefined ? {} : { sessionFile: value.sessionFile as string }),
     ...(text(value.initialName, 256, "Worker initial name", true) === undefined ? {} : { initialName: value.initialName as string }),
   };

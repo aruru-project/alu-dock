@@ -13,14 +13,26 @@ export async function resolvePiStartingModel(
   input: unknown,
   modelRuntime: Pick<ModelRuntime, "getModel" | "checkAuth">,
   sessionManager: Pick<SessionManager, "getBranch">,
-  /** A child starting from its parent's conversation still takes the model chosen for it. */
-  creatingChild = false,
+  childSession?: "parent_copy" | "saved_child",
 ): Promise<ReturnType<ModelRuntime["getModel"]>> {
+  if (childSession === "saved_child") {
+    // A model_change names the chosen model, even if a different physical model answered
+    // for it. Older conversations may have only the model on their assistant messages.
+    const branch = sessionManager.getBranch();
+    const choice = branch.findLast(entry => entry.type === "model_change");
+    const answer = choice ? undefined : branch.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+    if (choice) return requireModel(modelRuntime, choice.provider, choice.modelId);
+    if (answer?.type === "message" && answer.message.role === "assistant") return requireModel(modelRuntime, answer.message.provider, answer.message.model);
+  }
   if (input === undefined) return undefined;
   if (input === null || typeof input !== "object" || Array.isArray(input)) throw unreadable();
   const { provider, id } = input as { provider?: unknown; id?: unknown };
   if (typeof provider !== "string" || typeof id !== "string" || provider.length === 0 || id.length === 0) throw unreadable();
-  if (!creatingChild && sessionHasRecordedModel(sessionManager)) return undefined;
+  if (childSession !== "parent_copy" && sessionHasRecordedModel(sessionManager)) return undefined;
+  return requireModel(modelRuntime, provider, id);
+}
+
+async function requireModel(modelRuntime: Pick<ModelRuntime, "getModel" | "checkAuth">, provider: string, id: string) {
   const model = modelRuntime.getModel(provider, id);
   // The same failure as `model.set`, so clients explain it the same way.
   if (!model || !(await modelRuntime.checkAuth(provider))) throw new AgentModelNotFoundError(provider, id);

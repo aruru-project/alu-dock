@@ -23,13 +23,14 @@ export interface CreatePiInstanceOptions extends Omit<WorkerInstanceOptions, "pa
   tools?: string[];
   excludeTools?: string[];
   sessionFile?: string;
+  parentConversation?: true;
   /** Test-only process seam; production always uses the default worker entry. */
   workerEntry?: string;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
-  const { child, cwd: requestedCwd, agentDir: requestedAgentDir, sessionDir, tools, excludeTools, sessionFile, workerEntry, ...shared } = options;
+  const { child, cwd: requestedCwd, agentDir: requestedAgentDir, sessionDir, tools, excludeTools, sessionFile, parentConversation, workerEntry, ...shared } = options;
   const cwd = resolve(requestedCwd);
   const init: PiWorkerInitOptions = {
     cwd,
@@ -42,9 +43,9 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     ...(child?.allowedTools === undefined ? {} : { allowedTools: child.allowedTools }),
     projectTrusted: options.projectTrusted,
     ...(sessionFile === undefined ? {} : { sessionFile: resolve(sessionFile) }),
-    // A reopened session keeps its own name. A child's session file is a copy of its
-    // parent's conversation, which carries the parent's name, so the child names it.
-    ...(options.name === undefined || (sessionFile !== undefined && child === undefined) ? {} : { initialName: options.name }),
+    ...(parentConversation ? { parentConversation } : {}),
+    // Only a fresh session or a copy of the parent's conversation takes a new name.
+    ...(options.name === undefined || (sessionFile !== undefined && !parentConversation) ? {} : { initialName: options.name }),
   };
   return createWorkerInstance({
     ...shared,

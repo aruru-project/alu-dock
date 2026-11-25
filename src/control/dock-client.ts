@@ -39,6 +39,7 @@ import {
   MACHINES_CAPABILITY,
   WORKER_CONFIG_CAPABILITY,
   createOptionCapabilities,
+  COLLABORATION_CAPABILITY,
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
   GIT_BRANCH_CAPABILITY,
@@ -404,7 +405,11 @@ export class DockClient {
   }
   ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
   async getByKey(key:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
-  adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
+  adopt(sessionFile: string, name?: string, operationId = this.createRequestId(), trust?: {challengeId: string; decision: ProjectTrustChoice},
+    hostId?: string, child?: Omit<DockChildSelection, "withParentContext">): Promise<AdoptResult> {
+    return this.request("instance.adopt", {operationId, sessionFile, name, hostId, child, trustChallengeId: trust?.challengeId, projectTrustDecision: trust?.decision},
+      child ? ["session.adopt.v1", COLLABORATION_CAPABILITY] : "session.adopt.v1", parseCreateResult);
+  }
   async list(selector: "actionable" | "all" = "all"): Promise<InstanceSnapshot[]> {
     const instances: InstanceSnapshot[] = [];
     let cursor: InstanceListCursor | undefined;

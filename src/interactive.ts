@@ -11,7 +11,8 @@ import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-acces
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot } from "./control/machine-state.js";
 import { currentMachineRole, MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
-import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
+import type { DockChildSelection } from "./core/dock-tools.js";
+import type { InstanceSnapshot } from "./core/managed-instance.js";
 import { humanInstanceStatus } from "./core/instance-display-name.js";
 import { requireHumanTarget } from "./human-target.js";
 import { runDockHub, runSubHostHub, type DockHubAction } from "./tui/dock-hub.js";
@@ -25,6 +26,7 @@ export interface OpenDockOptions {
   name?: string;
   target?: string;
   forceNew?: boolean;
+  savedChild?: { sessionFile: string; parent: string; allowedTools: string[] };
 }
 
 /** Human entry point. Only an explicit Hub action or direct Work command may construct a runtime. */
@@ -75,6 +77,13 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
       new SubHostMachineState(machineStateRoot(catalogPath)),
     );
     instance = await executeHubAction(client, action);
+  } else if (options.savedChild) {
+    try {
+      instance = await openSavedChild(client, options.savedChild);
+    } catch (error) {
+      if (!(error instanceof ControlClientError) || error.code !== "model_not_found") throw error;
+      throw new Error(`${terminalSafe(error.message)}. Restore the saved model or sign in to its provider, then open this file again. Your session is unchanged.`);
+    }
   } else {
     instance = await resolveWorkInstance(client, {
       mode: options.mode,
@@ -119,7 +128,9 @@ async function executeHubAction(
   if (action.kind === "attach") return assertAttachable(action.instance);
   if (action.kind === "new") return createWithNotice(client, action.cwd, undefined, action.systemChoice);
   if (action.kind === "reopen") return reopenWithNotice(client, action.instance);
-  return adoptWithNotice(client, action.session);
+  const session = action.session;
+  process.stdout.write(`Opening saved Pi work for ${terminalSafe(session.name?.trim() || session.cwd)}…\n`);
+  return adoptSession(client, session.sessionFile, session.name);
 }
 
 async function resolveWorkInstance(
@@ -231,39 +242,58 @@ async function createWithNotice(
   return undefined;
 }
 
-async function adoptWithNotice(
-  client: DockClient,
-  session: SessionDto,
+async function openSavedChild(client: DockClient, selection: NonNullable<OpenDockOptions["savedChild"]>): Promise<InstanceSnapshot> {
+  const works = await client.list("all");
+  const parent = requireHumanTarget(works, selection.parent);
+  const linked = works.filter(work => work.hostId === parent.hostId && work.lifecycle !== "stopped"
+    && work.executor.sessionFile === selection.sessionFile);
+  if (linked.length) {
+    const work = linked[0]!;
+    if (linked.length > 1 || work.parentId !== parent.id) {
+      throw new Error("This file already belongs to other Work. Open it from the Hub; it has not been moved.");
+    }
+    if (!isContinuable(work)) throw new Error(lifecycleActionError(work));
+    process.stdout.write(`Opening the existing child Work ${displayName(work)}. Its tools stay unchanged.\n`);
+    return work.lifecycle === "active" ? work : reopenWithNotice(client, work, selection.sessionFile);
+  }
+  if (parent.lifecycle !== "active") throw new Error(`Resume ${displayName(parent)} before opening its saved child Work.`);
+  process.stdout.write(`Opening the saved conversation as a new child of ${displayName(parent)}…\n`);
+  const work = await adoptSession(client, selection.sessionFile, undefined, parent.hostId, {
+    parentId: parent.id, allowedTools: selection.allowedTools,
+  });
+  process.stdout.write(`Opened ${displayName(work)} as new child Work. No task was sent.\n`);
+  return work;
+}
+
+async function adoptSession(
+  client: DockClient, sessionFile: string, name?: string, hostId?: string, child?: Omit<DockChildSelection, "withParentContext">,
 ): Promise<InstanceSnapshot> {
-  process.stdout.write(`Opening saved Pi work for ${terminalSafe(session.name?.trim() || session.cwd)}…\n`);
   const operationId = randomUUID();
   try {
-    return (await client.adopt(session.sessionFile, session.name, operationId)).instance;
+    return (await client.adopt(sessionFile, name, operationId, undefined, hostId, child)).instance;
   } catch (error) {
     const challenge = projectTrustChallenge(error, operationId);
     if (!challenge) throw error;
     const decision = await askProjectTrust(challenge.cwd);
-    return (await client.adopt(session.sessionFile, session.name, operationId, {
-      challengeId: challenge.challengeId,
-      decision,
-    })).instance;
+    return (await client.adopt(sessionFile, name, operationId, { challengeId: challenge.challengeId, decision }, hostId, child)).instance;
   }
 }
 
 async function reopenWithNotice(
   client: DockClient,
   record: InstanceSnapshot,
+  sessionFile?: string,
 ): Promise<InstanceSnapshot> {
   if (!record.reopenable) throw new Error(`${displayName(record)} has no saved session to reopen. Run \`aludock\` and start new work instead.`);
   process.stdout.write(`Reopening ${displayName(record)} from its saved session…\n`);
   const operationId = randomUUID();
   try {
-    return (await client.reopen(record.id, operationId)).instance;
+    return (await client.reopen(record.id, operationId, sessionFile)).instance;
   } catch (error) {
     const challenge = projectTrustChallenge(error, operationId);
     if (!challenge) throw error;
     const decision = await askProjectTrust(challenge.cwd);
-    return (await client.reopen(record.id, operationId, undefined, {
+    return (await client.reopen(record.id, operationId, sessionFile, {
       challengeId: challenge.challengeId,
       decision,
     })).instance;

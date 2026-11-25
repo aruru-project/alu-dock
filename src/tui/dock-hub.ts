@@ -165,7 +165,10 @@ export async function runDockHub(
           }
         }
         if (signalRequested) return { kind: "exit" };
-        const sessionAction = await chooseSessionAction(terminal, instances, sessions, contextCwd, sessionTotal, inventoryTruncated, inventoryWarning);
+        // This inventory is Main's. A SubHost may have an unrelated file at exactly the same path.
+        const mainId = machines.find(machine => machine.kind === "main")?.hostId;
+        const local = instances.filter(instance => instance.hostId === undefined || instance.hostId === mainId);
+        const sessionAction = await chooseSessionAction(terminal, local, sessions, contextCwd, sessionTotal, inventoryTruncated, inventoryWarning);
         if (signalRequested) return { kind: "exit" };
         if (sessionAction) return sessionAction;
       }
@@ -513,8 +516,8 @@ async function chooseSessionAction(
       actionEntries.push({ value: `resume:${instance.id}`, label: `Resume ${displayName(instance)}`, description: "continue from the saved conversation" });
     }
   }
-  const hasLiveReference = linked.some((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping");
-  if (!hasLiveReference) {
+  const hasCurrentWork = linked.some((instance) => instance.lifecycle !== "stopped");
+  if (!hasCurrentWork) {
     actionEntries.push({ value: "adopt", label: "Open as new work", description: "start new Dock work from this saved Pi session" });
   }
   actionEntries.push({ value: BACK, label: "Back to Pi Sessions", description: "Return to saved sessions" });

@@ -18,6 +18,7 @@ export interface PiWorkerInitOptions {
   allowedTools?: string[];
   projectTrusted: boolean;
   sessionFile?: string;
+  parentConversation?: true;
   initialName?: string;
 }
 
