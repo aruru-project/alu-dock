@@ -284,7 +284,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       isResidentAssistant: (instanceId) => this.isResidentAssistant(instanceId),
     });
     this.workMessages = new WorkMessages({
-      live: () => [...this.instances.values()].filter((instance) => !this.departed.has(instance)),
+      children: (parentId) => this.catalog.current().instances.filter((record) => record.parentId === parentId).map((record) => this.safeSnapshot(record)),
       parent: (child) => this.workParent(child),
       now: () => new Date().toISOString(),
     });
@@ -966,7 +966,10 @@ export class DockRegistry implements LocalDockToolsHostPort {
     assertChildMayRequest(source, request, this.mayStartChildren(this.get(sourceInstanceId)));
     if (request.type === "unreported_stop") return this.workMessages.unreportedStop(source, request);
     const child = request.type === "send" || request.type === "interrupt" || request.type === "stop" ? this.ownChild(source, request.target) : undefined;
-    if (request.type === "send" && (source.parentId !== undefined || child !== undefined)) return this.workMessages.send(source, request, child);
+    if (request.type === "send" && (source.parentId !== undefined || child !== undefined)) {
+      if (request.done !== undefined && request.target !== undefined) throw new Error("done marks a result for your parent; leave it out when messaging your child Work.");
+      return this.workMessages.send(source, request, child === undefined ? undefined : await this.childForMessage(child, request.operationId));
+    }
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
       return this.observationService.observe(sourceInstanceId, request);
     }
@@ -977,7 +980,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const mutations = this.dockToolsMutationPort;
     if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
     if (request.type === "speed") {
-      const target = request.target === undefined ? source : this.ownChild(source, request.target)?.snapshot() ?? this.controlTarget(source, request.target);
+      const target = request.target === undefined ? source : this.ownChild(source, request.target) ?? this.controlTarget(source, request.target);
       if (!mutations.speed) throw new Error("这个 Host 尚不支持模型速度设置，请更新 Host。");
       return { type: "speed", setting: await mutations.speed(target.id, request.operationId, request.selection) };
     }
@@ -1010,29 +1013,32 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   /** The parent interrupts or stops its own child Work, taking back the work it handed out: nothing is owed for it any more. */
-  private async takeBack(child: ManagedInstance, request: Extract<DockToolsRequest, { type: "interrupt" | "stop" }>, mutations: DockToolsMutationPort): Promise<DockToolsResult> {
+  private async takeBack(child: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "interrupt" | "stop" }>, mutations: DockToolsMutationPort): Promise<DockToolsResult> {
     const takeBack = this.workMessages.takeBack(child.id);
+    const identity = this.workMessages.forParent(child);
     let succeeded = false;
     try {
-      await mutations[request.type](child.id, request.operationId);
+      const updated = await mutations[request.type](child.id, request.operationId);
       succeeded = true;
+      return { type: request.type, instance: { ...updated, id: identity.id, parentId: identity.parentId }, settlesThrough: takeBack.settlesThrough };
     } finally {
       // Refused, or not known to have happened: the child may still be at work on it.
       takeBack.answered(succeeded);
     }
-    return { type: request.type, instance: this.workMessages.forParent(child.snapshot()), settlesThrough: takeBack.settlesThrough };
   }
 
   /** On a SubHost: what the resident assistant asks of her own child Work here, through Main (card #676). */
   async actForMainParent(parent: WorkParent, childId: string, request: MainParentRequest): Promise<DockToolsResult> {
     this.assertCatalogReady();
-    const child = this.instances.get(childId);
-    if (!child || this.departed.has(child) || !this.mainParented.has(child) || child.parentId !== parent.id) {
+    const record = this.catalog.current().instances.find((entry) => entry.id === childId);
+    const live = this.instances.get(childId);
+    if (!record || record.parentId !== parent.id || !(live ? this.mainParented.has(live) && !this.departed.has(live) : record.childGrant?.mainParent)) {
       throw new Error("That child Work is no longer running, so it cannot be reached. Check it with dock_list.");
     }
+    const child = this.safeSnapshot(record);
     if (request.type === "send") {
       if (request.done !== undefined) throw new Error("done marks a child Work's result for its parent; leave it out when you message a child Work.");
-      return this.workMessages.toChild(parent, request.message, child);
+      return this.workMessages.toChild(parent, request.message, await this.childForMessage(child, request.operationId));
     }
     const mutations = this.dockToolsMutationPort;
     if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
@@ -1056,7 +1062,16 @@ export class DockRegistry implements LocalDockToolsHostPort {
     return this.observationService.resolveTarget(source.id, target);
   }
 
-  private ownChild(source: InstanceSnapshot, target: string | undefined): ManagedInstance | undefined {
+  /** Reopen only for a new message, never to enumerate or stop an interrupted child. */
+  private async childForMessage(child: InstanceSnapshot, operationId: string): Promise<ManagedInstance> {
+    if (child.lifecycle !== "host_lost") return this.get(child.id);
+    if (!child.reopenable) throw new Error("This child Work was interrupted and could not be continued. Check its saved session in dock_list with scope=all.");
+    const reopening = this.reopenInFlight.get(child.id);
+    if (reopening) { await reopening; return this.get(child.id); }
+    return (await this.reopen({ instanceId: child.id, operationId })).instance;
+  }
+
+  private ownChild(source: InstanceSnapshot, target: string | undefined): InstanceSnapshot | undefined {
     if (target === undefined) return undefined;
     const child = this.workMessages.ownChild(source, target);
     if (child === "ambiguous") throw new Error(`More than one of your child Works matches ${target}; use its id from dock_list.`);

@@ -99,7 +99,7 @@ test("what a child Work owes its parent is settled by the numbers of the message
   const lead = new ManagedInstance({ id: "lead", name: "Lead", cwd: process.cwd(), session: sessions.lead, parentId: parent.id });
   const works = new Map([[parent.id, parent], [lead.id, lead]]);
   const messages = new WorkMessages({
-    live: () => works.values(),
+    children: (id) => [...works.values()].filter((work) => work.parentId === id).map((work) => work.snapshot()),
     parent: (work) => { const found = work.parentId === undefined ? undefined : works.get(work.parentId); return found?.snapshot().lifecycle === "active" ? found : undefined; },
     now: () => "2026-11-21T00:00:00.000Z",
   });

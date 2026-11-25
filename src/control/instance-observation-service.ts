@@ -172,7 +172,8 @@ export class InstanceObservationService {
     const all = this.visibleTargets(sourceInstanceId, "read");
     const selected = includeHistory
       ? all
-      : all.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
+      : all.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping"
+        || (item.parentId === sourceInstanceId && item.lifecycle === "host_lost" && item.reopenable));
     const instances = selected.slice(0, MAX_OBSERVATION_LIST_ITEMS).map(observationStatus);
     return {
       type: "list",
@@ -542,6 +543,10 @@ export function observationStatus(snapshot: InstanceSnapshot): ObservedInstanceS
     executionChangedAt: snapshot.executionChangedAt,
     ...(snapshot.runStartedAt === undefined ? {} : { runStartedAt: snapshot.runStartedAt }),
     runtimeGeneration: snapshot.runtimeGeneration,
+    ...(snapshot.lifecycle === "host_lost" || snapshot.lifecycle === "runtime_error" ? {
+      reopenable: snapshot.reopenable,
+      ...(snapshot.executor.sessionFile === undefined ? {} : { sessionFile: snapshot.executor.sessionFile }),
+    } : {}),
     ...(snapshot.lastError === undefined ? {} : { lastError: truncateText(snapshot.lastError, MAX_OBSERVED_ERROR_CHARS).text }),
     ...(snapshot.executor.model === undefined ? {} : { model: { provider: snapshot.executor.model.provider, id: snapshot.executor.model.id } }),
     ...(snapshot.executor.thinkingLevel === undefined ? {} : { thinkingLevel: snapshot.executor.thinkingLevel }),

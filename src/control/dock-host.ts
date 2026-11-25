@@ -331,7 +331,8 @@ export class DockHost {
   recoverInstancesOnce(): Promise<void> {
     if (this.startupRecovery) return this.startupRecovery;
     if (this.state !== "running") return Promise.resolve();
-    const candidates = this.registry.list().filter((instance) => instance.reopenable && !instance.assistant);
+    // An interrupted child keeps its place, but consumes no resources until its parent needs it.
+    const candidates = this.registry.list().filter((instance) => instance.parentId === undefined && instance.reopenable && !instance.assistant);
     this.startupRecovery = Promise.all(candidates.map((instance) => {
       let task!: Promise<void>;
       task = this.reopenInstance({ instanceId: instance.id, operationId: randomUUID() })

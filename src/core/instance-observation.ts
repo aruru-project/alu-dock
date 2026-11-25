@@ -28,6 +28,9 @@ export interface ObservedInstanceStatus {
   runStartedAt?: string;
   runtimeGeneration: number;
   lastError?: string;
+  /** A failed Work's saved conversation, on the machine that owns it. */
+  sessionFile?: string;
+  reopenable?: boolean;
   /** The model the Work is using now; for stopped work, the one it last used. */
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;

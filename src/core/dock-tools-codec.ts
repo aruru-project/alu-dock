@@ -357,6 +357,8 @@ function validateObservedStatus(raw: unknown): void {
     boundedString(model.provider, MAX_MODEL_PROVIDER_CHARS, "Observed model provider"); boundedString(model.id, MAX_MODEL_ID_CHARS, "Observed model ID");
   }
   if (value.thinkingLevel !== undefined) oneOf(value.thinkingLevel, THINKING_LEVELS, "Observed thinking level");
+  optionalString(value.sessionFile, MAX_DOCK_TOOL_CWD_CHARS);
+  if (value.reopenable !== undefined && typeof value.reopenable !== "boolean") throw new Error("Observed recovery status is invalid");
   optionalString(value.reply, MAX_OBSERVATION_REPLY_CHARS);
 }
 

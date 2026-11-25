@@ -14,8 +14,8 @@ export interface WorkMessageRecipient {
 export interface WorkParent { id: string; name: string }
 
 interface WorkMessagesPort {
-  /** Every Work this Host runs, including a crashed child Work that waits to be stopped. */
-  live(): Iterable<ManagedInstance>;
+  /** A parent's direct children, including interrupted Works with no running process. */
+  children(parentId: string): InstanceSnapshot[];
   /** A child Work's parent while it can take messages: one running here, or the resident assistant on Main. */
   parent(child: InstanceSnapshot): WorkMessageRecipient | undefined;
   now(): string;
@@ -74,12 +74,12 @@ export class WorkMessages {
   childStarted(childId: string): void { this.ledgers.set(childId, newLedger(-1)); }
 
   /** The source's own child Work that `target` names, by ID, Main's ID, key, name or ID prefix. */
-  ownChild(source: InstanceSnapshot, target: string): ManagedInstance | "ambiguous" | undefined {
-    const children = [...this.port.live()].filter((instance) => instance.parentId === source.id);
-    const mainId = (child: ManagedInstance) => this.mainIdentities.get(child.id)?.child;
+  ownChild(source: InstanceSnapshot, target: string): InstanceSnapshot | "ambiguous" | undefined {
+    const children = this.port.children(source.id);
+    const mainId = (child: InstanceSnapshot) => this.mainIdentities.get(child.id)?.child;
     const exact = children.find((child) => child.id === target || mainId(child) === target) ?? children.find((child) => child.key === target);
     if (exact) return exact;
-    const matches = children.filter((child) => child.snapshot().name === target || child.id.startsWith(target) || mainId(child)?.startsWith(target) === true);
+    const matches = children.filter((child) => child.name === target || child.id.startsWith(target) || mainId(child)?.startsWith(target) === true);
     return matches.length > 1 ? "ambiguous" : matches[0];
   }
 

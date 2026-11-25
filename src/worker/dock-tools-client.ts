@@ -289,7 +289,9 @@ function statusLine(status: ObservedInstanceStatus, observedAt: string, underPar
   const label = inline(modelLabel(status.model), MAX_MODEL_PROVIDER_CHARS + 1 + MAX_MODEL_ID_CHARS);
   const model = status.model === undefined ? ` · ${label}` : ` · model=${label}`;
   const thinking = status.thinkingLevel === undefined ? "" : ` · thinking=${status.thinkingLevel}`;
-  return `${identity(status)}${status.parentId && !underParent ? ` · parent=${inline(status.parentId)}` : ""} · ${status.lifecycle}/${state}${duration}${model}${thinking} · cwd=${inline(status.cwd, 180)}${error}`;
+  const lifecycle = status.lifecycle === "host_lost" && status.reopenable ? "interrupted · can continue" : `${status.lifecycle}/${state}`;
+  const session = status.sessionFile === undefined ? "" : ` · session=${JSON.stringify(status.sessionFile)}`;
+  return `${identity(status)}${status.parentId && !underParent ? ` · parent=${inline(status.parentId)}` : ""} · ${lifecycle}${duration}${model}${thinking} · cwd=${inline(status.cwd, 180)}${session}${error}`;
 }
 
 function identity(status: ObservedInstanceStatus): string {
