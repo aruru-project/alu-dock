@@ -58,6 +58,8 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({
     defaultProvider: "openai",
     defaultModel: "gpt-4o-mini",
+    showCacheMissNotices: true,
+    notices: { cacheWarming: false, compactionCosts: true, reasoningDrops: false },
     compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
   }));
   await writeFile(join(agentDir, "models.json"), JSON.stringify({
@@ -113,6 +115,16 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.deepEqual({ value: cacheWarmingBefore?.value, source: cacheWarmingBefore?.source }, { value: "off", source: "effective" });
     const cacheWarming = await instance.updateSetting({ key: "cacheWarming", value: "idle" }, "real-cache-warming");
     assert.deepEqual({ value: cacheWarming.value, source: cacheWarming.source }, { value: "idle", source: "global" });
+    // v1.6.1 split Pi's old switch into four. Dock exposes only the cache-miss switch.
+    const cacheMissSetting = async () => {
+      const notice = (await instance.getSettings()).find((setting) => setting.key === "showCacheMissNotices");
+      return { value: notice?.value, source: notice?.source };
+    };
+    assert.deepEqual(await cacheMissSetting(), { value: true, source: "global" });
+    await instance.updateSetting({ key: "showCacheMissNotices", value: false }, "cache-miss-off");
+    assert.deepEqual(await cacheMissSetting(), { value: false, source: "global" });
+    const saved = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8"));
+    assert.deepEqual(saved.notices, { cacheMisses: false, cacheWarming: false, compactionCosts: true, reasoningDrops: false });
     const initialTools = await instance.listTools();
     assert.ok(initialTools.tools.some((tool) => tool.name === "dock_attachment_list"));
     assert.ok(initialTools.tools.some((tool) => tool.name === "dock_attachment_resolve"));
@@ -130,7 +142,9 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.deepEqual(compactionEvents.map((event) => event.data.operationId), ["real-compact", "real-compact"]);
     assert.ok((await instance.getHistoryPage(undefined, 200)).entries.some((entry) => entry.content.some((block) => block.type === "text" && block.text === "deterministic extension summary")));
 
+    await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({ cacheWarming: "streaming", showCacheMissNotices: true }));
     assert.equal((await instance.reloadSession("real-reload")).cancelled, false);
+    assert.deepEqual(await cacheMissSetting(), { value: true, source: "project" });
     assert.equal(instance.snapshot().extensionStatus?.["stage3-session"], "reload");
     assert.equal((await instance.newSession("real-new")).cancelled, false);
     assert.equal(instance.snapshot().extensionStatus?.["stage3-session"], "new");

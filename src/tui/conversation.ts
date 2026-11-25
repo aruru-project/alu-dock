@@ -46,7 +46,7 @@ interface ConversationEntry {
   toolRenderFloor?: { width: number; expanded: boolean; rows: number };
   summaryKind?: "compaction" | "branch";
   renderRevision: number;
-  renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
+  renderCache?: { width: number; revision: number; expanded: boolean; lines: readonly string[] };
 }
 
 interface ConversationRenderCache {
@@ -570,12 +570,12 @@ export class DockConversation implements Component {
         : true;
   }
 
-  private renderEntry(entry: ConversationEntry, width: number): string[] {
+  private renderEntry(entry: ConversationEntry, width: number): readonly string[] {
     const expanded = this.entryExpanded(entry);
     const cached = entry.renderCache;
     if (cached?.width === width && cached.revision === entry.renderRevision && cached.expanded === expanded) return cached.lines;
 
-    let lines: string[];
+    let lines: readonly string[];
     if (entry.toolCallId) {
       const content: string[] = [renderToolHeader(entry, width)];
       if (expanded) {
@@ -936,7 +936,7 @@ export class DockStatusLine implements Component {
   }
 }
 
-function renderUserSurface(text: string, width: number, outputPadding: number): string[] {
+function renderUserSurface(text: string, width: number, outputPadding: number): readonly string[] {
   const boundedWidth = Math.max(1, width);
   if (boundedWidth <= outputPadding * 2) return wrapPlainText(text, boundedWidth).map(paint.userSurface);
   const box = new Box(outputPadding, 1, paint.userSurface);

@@ -145,7 +145,7 @@ export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinitio
   autoRetry: booleanDefinition(["retry", "enabled"]),
   enableSkillCommands: booleanDefinition(["enableSkillCommands"], true),
   hideThinking: booleanDefinition(["hideThinkingBlock"]),
-  showCacheMissNotices: booleanDefinition(["showCacheMissNotices"]),
+  showCacheMissNotices: booleanDefinition(["notices", "cacheMisses"]),
   showHardwareCursor: booleanDefinition(["showHardwareCursor"]),
   clearOnShrink: booleanDefinition(["terminal", "clearOnShrink"]),
   showTerminalProgress: booleanDefinition(["terminal", "showTerminalProgress"]),

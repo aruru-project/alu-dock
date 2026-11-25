@@ -53,7 +53,7 @@ export function applyPiSetting(session: AgentSession, manager: SettingsManager, 
     case "autoRetry": manager.setRetryEnabled(update.value); break;
     case "enableSkillCommands": manager.setEnableSkillCommands(update.value); break;
     case "hideThinking": manager.setHideThinkingBlock(update.value); break;
-    case "showCacheMissNotices": manager.setShowCacheMissNotices(update.value); break;
+    case "showCacheMissNotices": manager.setNotice("cacheMisses", update.value); break;
     case "showHardwareCursor": manager.setShowHardwareCursor(update.value); break;
     case "clearOnShrink": manager.setClearOnShrink(update.value); break;
     case "showTerminalProgress": manager.setShowTerminalProgress(update.value); break;
@@ -89,7 +89,7 @@ function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMa
     case "autoRetry": return manager.getRetryEnabled();
     case "enableSkillCommands": return manager.getEnableSkillCommands();
     case "hideThinking": return manager.getHideThinkingBlock();
-    case "showCacheMissNotices": return manager.getShowCacheMissNotices();
+    case "showCacheMissNotices": return manager.getNotices().cacheMisses;
     case "showHardwareCursor": return manager.getShowHardwareCursor();
     case "clearOnShrink": return manager.getClearOnShrink();
     case "showTerminalProgress": return manager.getShowTerminalProgress();

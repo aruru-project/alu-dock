@@ -19,7 +19,7 @@ export class DocumentReader implements Component, Focusable {
   private error = false;
   private top = 0;
   private pageSize = 1;
-  private cached?: { width: number; raw: boolean; lines: string[] };
+  private cached?: { width: number; raw: boolean; lines: readonly string[] };
   constructor(
     private readonly title: string,
     private raw: boolean,
