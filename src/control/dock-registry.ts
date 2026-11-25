@@ -324,6 +324,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.catalog.initialize(reconciled.projection);
     for (const record of reconciled.projection.instances) {
       if (record.mainIdentity) this.workMessages.rememberMainIdentity(record.id, record.mainIdentity);
+      // A parent may take back an interrupted child's outstanding work without ever reopening it.
+      if (record.parentId && record.workProgress) this.workMessages.childStarted(record.id, record.workProgress);
     }
     this.startupNormalizedCountValue = reconciled.normalizedCount;
     this.lastReconciledAtValue = this.startedAt;
