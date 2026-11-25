@@ -2069,9 +2069,9 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     const local = this.options.local();
     if (request.type === "deliver" || request.type === "models" || local.answersLocally(sourceInstanceId, request)) return local.invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
-    return this.options.upstream.invokeDockTool(sourceInstanceId, request).then((result) => {
+    return this.options.upstream.invokeDockTool(sourceInstanceId, request).then(async (result) => {
       // Main names the new child Work by its own ID; remember it so the parent can use that ID here.
-      if (request.type === "spawn") local.noteSpawnedChild(sourceInstanceId, request.operationId, result);
+      if (request.type === "spawn") await local.noteSpawnedChild(sourceInstanceId, request.operationId, result);
       return withCurrentMachine(result, this.options.upstream.machineId());
     });
   }

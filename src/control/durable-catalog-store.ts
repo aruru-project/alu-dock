@@ -171,13 +171,15 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     "id", "creationOperationId", "parentId", "assistant", "key", "name", "cwd", "projectTrusted", "lifecycle", "execution", "lastRun",
     "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "modelSpeed", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
-    "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
+    "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption", "mainIdentity",
     "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
   ], field);
   const modelValue = value.model === undefined ? undefined : object(value.model, `${field}.model`);
   if (modelValue) exact(modelValue, ["provider", "id"], `${field}.model`);
   const replacementValue = value.replacement === undefined ? undefined : object(value.replacement, `${field}.replacement`);
   if (replacementValue) exact(replacementValue, ["operationId", "kind", "previousSessionFile", "requestedSessionFile", "requestedProjectTrust", "requestedEntryId", "startedAt"], `${field}.replacement`);
+  const mainIdentity = value.mainIdentity === undefined ? undefined : object(value.mainIdentity, `${field}.mainIdentity`);
+  if (mainIdentity) exact(mainIdentity, ["child", "parent"], `${field}.mainIdentity`);
   const requestedTrust = replacementValue?.requestedProjectTrust === undefined ? undefined : object(replacementValue.requestedProjectTrust, `${field}.replacement.requestedProjectTrust`);
   if (requestedTrust) exact(requestedTrust, ["canonicalCwd", "projectTrusted"], `${field}.replacement.requestedProjectTrust`);
   const lastKnownValue = value.lastKnown === undefined ? undefined : object(value.lastKnown, `${field}.lastKnown`);
@@ -206,6 +208,10 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     ...(value.parentId === undefined ? {} : { parentId: text(value.parentId, `${field}.parentId`, 128) }),
     ...(value.assistant === undefined ? {} : { assistant: literalTrue(value.assistant, `${field}.assistant`) }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, `${field}.workerConfig`) }),
+    ...(mainIdentity === undefined ? {} : { mainIdentity: {
+      child: text(mainIdentity.child, `${field}.mainIdentity.child`, 128),
+      ...(mainIdentity.parent === undefined ? {} : { parent: text(mainIdentity.parent, `${field}.mainIdentity.parent`, 128) }),
+    } }),
     ...(value.modelSpeed === undefined ? {} : { modelSpeed: parseModelSpeedSelection(value.modelSpeed) ?? undefined }),
     executionChangedAt: value.executionChangedAt === undefined
       ? timestamp(value.createdAt, `${field}.createdAt`)

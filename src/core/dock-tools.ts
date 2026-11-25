@@ -186,7 +186,7 @@ export interface DockToolsHostPort {
 export interface LocalDockToolsHostPort extends DockToolsHostPort {
   answersLocally(sourceInstanceId: string, request: DockToolsRequest): boolean;
   /** A SubHost learns the ID Main gave a child Work created here through Main, so its parent can name it by that ID. */
-  noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): void;
+  noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): Promise<void>;
 }
 
 export interface DockToolsMutationPort {

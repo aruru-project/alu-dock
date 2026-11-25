@@ -41,6 +41,8 @@ export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
 export interface CatalogInstanceRecord {
   /** Set on a child Work: the top-level Work it belongs to. */
   parentId?: string;
+  /** SubHost only: the IDs in the parent's conversation when Main created its child. */
+  mainIdentity?: { child: string; parent?: string };
   /** Opened as the personal assistant (card #295); a reopen keeps it. */
   assistant?: true;
   id: string;
@@ -194,6 +196,11 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.dockToolsEnabled !== undefined && typeof record.dockToolsEnabled !== "boolean") throw new Error("Catalog Dock tools switch must be boolean");
   if (record.parentId !== undefined) requiredBoundedText(record.parentId, 128, "Catalog parent ID");
   if (record.assistant !== undefined && record.assistant !== true) throw new Error("Catalog assistant mark must be true when present");
+  if (record.mainIdentity !== undefined) {
+    if (record.parentId === undefined) throw new Error("Only a child Work has a parent-facing identity");
+    requiredBoundedText(record.mainIdentity.child, 128, "Child ID on Main");
+    if (record.mainIdentity.parent !== undefined) requiredBoundedText(record.mainIdentity.parent, 128, "Parent ID on Main");
+  }
   if (record.assistant === true && record.parentId !== undefined) throw new Error("A child Work cannot be the assistant");
   if (record.workerConfig !== undefined) cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration");
   if (record.modelSpeed !== undefined) parseModelSpeedSelection(record.modelSpeed);

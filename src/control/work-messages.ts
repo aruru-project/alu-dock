@@ -24,8 +24,6 @@ interface WorkMessagesPort {
 /** The IDs Main gave a child Work created on this SubHost and its parent; the parent names them by these. */
 interface MainIdentity { child: string; parent?: string }
 
-const MAX_MAIN_IDENTITIES = 1_024;
-
 type SendRequest = Extract<DockToolsRequest, { type: "send" }>;
 type WorkMessageResult = Extract<DockToolsResult, { type: "work_message" }>;
 
@@ -200,9 +198,7 @@ export class WorkMessages {
 
   /** What Main calls a child Work created here through Main, and its parent. */
   rememberMainIdentity(childId: string, identity: MainIdentity): void {
-    this.mainIdentities.delete(childId);
-    this.mainIdentities.set(childId, identity);
-    while (this.mainIdentities.size > MAX_MAIN_IDENTITIES) this.mainIdentities.delete(this.mainIdentities.keys().next().value!);
+    this.mainIdentities.set(childId, identity); // forgotten with the catalog record, never while still reachable
   }
 
   /** A child Work's status as its parent knows it, under the IDs Main gave them. */

@@ -325,6 +325,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
       effect: "pre_effect",
     });
     this.catalog.initialize(reconciled.projection);
+    for (const record of reconciled.projection.instances) {
+      if (record.mainIdentity) this.workMessages.rememberMainIdentity(record.id, record.mainIdentity);
+    }
     this.startupNormalizedCountValue = reconciled.normalizedCount;
     this.lastReconciledAtValue = this.startedAt;
     this.catalogReady = true;
@@ -953,11 +956,14 @@ export class DockRegistry implements LocalDockToolsHostPort {
     return request.target !== undefined && this.workMessages.ownChild(source, request.target) !== undefined;
   }
 
-  noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): void {
+  async noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): Promise<void> {
     if (result.type !== "spawn") return;
     const creation = childCreationOperation(spawnOperationId);
     const child = [...this.instances.values()].find((instance) => instance.parentId === sourceInstanceId && instance.creationOperationId === creation);
-    if (child) this.workMessages.rememberMainIdentity(child.id, { child: result.instance.id, ...(result.instance.parentId === undefined ? {} : { parent: result.instance.parentId }) });
+    if (!child) return;
+    const mainIdentity = { child: result.instance.id, ...(result.instance.parentId === undefined ? {} : { parent: result.instance.parentId }) };
+    await child.saveChildState({ mainIdentity }, "post_effect");
+    this.workMessages.rememberMainIdentity(child.id, mainIdentity);
   }
 
   async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
