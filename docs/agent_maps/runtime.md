@@ -283,7 +283,7 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 `dock_models` 的事实由 Worker 读：Host 只返回 Main 的 `child-models.json` 里用户列出的模型（只有 `provider`/`id`，不带用途说明；SubHost 上的 Work 由本机 Host 回答，名单向 Main 取），Worker 用当前 Pi 的模型和可用模型补上 thinking level（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
 
-`dock_spawn(withContext:true)` 让子 Work 从父 Work 当前对话的副本开始。请求里只有这个开关，没有会话路径：Host 用私有 `branch_for_child` control 让父 Work 自己的 Worker 用 Pi `createBranchedSession` 把当前分支写成子 Work 目录下的新会话文件（Pi 在文件头记下来源会话），再以这个文件创建子 Work。分叉点在仍有工具调用未返回的那条回复之前，子 Work 不会看到“创建自己”的调用以无结果结束。子 Work 仍用父 Work 为它选的模型。Pi 只为新会话记录模型和 thinking level，所以 adapter 在子 Work 启动后补记一次，reload 时恢复的是子 Work 自己的设置。
+`dock_spawn(withContext:true)` 让子 Work 从父 Work 当前对话的副本开始。Host 用私有 `branch_for_child` control 让父 Work 自己的 Worker 用 Pi `createBranchedSession` 把当前分支写成子 Work 目录下的新会话文件（Pi 在文件头记下来源会话），再以这个文件创建子 Work。分叉点在仍有工具调用未返回的那条回复之前，子 Work 不会看到“创建自己”的调用以无结果结束。子 Work 仍用父 Work 为它选的模型。Pi 只为新会话记录模型和 thinking level，所以 adapter 在新副本中补记本次派活选的模型和 thinking。另一个入口 `dock_spawn({sessionFile, name, task})` 由子 Worker 用 Pi 的 `forkFrom` 复制指定文件，有独立的会话 ID，不改原文件；没指定的模型或 thinking 沿用文件中的值。重开自己的会话不是新建，不重新应用派活参数。
 
 ## Extension UI
 
