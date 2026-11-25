@@ -3143,6 +3143,12 @@ export class ManagedInstance {
     return this.enqueueTransition(async () => {
       try {
         await this.handleCatalogAgentEvent(received);
+        // Pi writes a new session during its first turn, after admission. A long tool call
+        // may then be killed before the next lifecycle change. Record the file as soon as
+        // the Worker confirms it exists, not only when that turn ends.
+        if (this.state.lifecycle === "active" && !this.replacementIntent && !this.durableSessionFileValue && this.runtimeDurableSessionFile()) {
+          await this.commitCatalogTransition(this.agentEventCatalogContext(event, "session.saved"), () => {});
+        }
         if (event.type === "conversation_checkpoint") {
           this.installConversationCheckpoint(event);
         } else if (refreshesHistory(event)) {
