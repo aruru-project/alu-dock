@@ -40,6 +40,16 @@ export class ChildMessages {
   private readonly ledgers = new Map<string, ChildLedger>();
   private waiter: { take(message: WorkMessage): void } | undefined;
 
+  progress(id: string): Pick<ChildLedger, "handed" | "settled"> | undefined {
+    const child = this.ledgers.get(id);
+    return child && { handed: child.handed, settled: child.settled };
+  }
+
+  restore(children: readonly ChildLedger[]): void {
+    for (const child of children) this.ledgers.set(child.id, { ...child });
+    this.forgetSettled();
+  }
+
   /** The child Works that still owe this Work a result. */
   get waiting(): OwedChild[] {
     return [...this.ledgers.values()].filter(owes).map(({ id, name }) => ({ id, name }));

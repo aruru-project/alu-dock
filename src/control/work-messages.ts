@@ -1,3 +1,4 @@
+import { INITIAL_WORK_PROGRESS, type WorkProgress } from "../core/work-progress.js";
 import { shortenLastWords, type DockToolsRequest, type DockToolsResult, type WorkMessage, type WorkMessageSender } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
 import type { ObservedInstanceStatus } from "../core/instance-observation.js";
@@ -18,6 +19,7 @@ interface WorkMessagesPort {
   children(parentId: string): InstanceSnapshot[];
   /** A child Work's parent while it can take messages: one running here, or the resident assistant on Main. */
   parent(child: InstanceSnapshot): WorkMessageRecipient | undefined;
+  save?(childId: string, progress: WorkProgress, effect: "pre_effect" | "post_effect"): Promise<void>;
   now(): string;
 }
 
@@ -33,15 +35,7 @@ type WorkMessageResult = Extract<DockToolsResult, { type: "work_message" }>;
  * that crosses a final result for earlier work stays owed, in whatever order they arrive. Each fact is kept
  * apart, so none undoes another.
  */
-interface Ledger {
-  /** The next message's number. Numbers are never reused: a message that failed to arrive leaves a gap. */
-  next: number;
-  /** The latest message that reached it. */
-  handed: number;
-  /** The latest message its delivered final results answered. */
-  answered: number;
-  /** The latest message the parent took back by an interrupt or stop that went through, or was told the child left with. */
-  closed: number;
+interface Ledger extends WorkProgress {
   /** The parent's interrupts and stops of it still under way. */
   takingBack: number;
   /**
@@ -69,7 +63,9 @@ export class WorkMessages {
   constructor(private readonly port: WorkMessagesPort) {}
 
   /** A child Work starts owing its parent the result of the task it was created for. */
-  childStarted(childId: string): void { this.ledgers.set(childId, newLedger(-1)); }
+  childStarted(childId: string, progress: WorkProgress = INITIAL_WORK_PROGRESS): void {
+    this.ledgers.set(childId, { ...progress, takingBack: 0, held: [] });
+  }
 
   /** The source's own child Work that `target` names, by ID, Main's ID, key, name or ID prefix. */
   ownChild(source: InstanceSnapshot, target: string): InstanceSnapshot | "ambiguous" | undefined {
@@ -89,11 +85,14 @@ export class WorkMessages {
       if (!parent) throw new Error("The Work that created you is no longer running, so nothing can reach it.");
       const ledger = this.ledgers.get(source.id);
       // What this result answers: the parent messages the child had read when it sent it.
-      const settlesThrough = request.readThrough ?? ledger?.handed ?? 0;
+      const settlesThrough = Math.min(request.readThrough ?? ledger?.handed ?? 0, ledger ? ledger.next - 1 : Number.MAX_SAFE_INTEGER);
       const done = request.done === true;
       await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done, settlesThrough } : {}) }, () => {
         // Before anything queued after it is decided, such as Dock's notice that this child left.
-        if (done && ledger) ledger.answered = Math.max(ledger.answered, settlesThrough);
+        if (done && ledger) {
+          ledger.answered = Math.max(ledger.answered, settlesThrough);
+          return this.save(source.id, ledger);
+        }
       });
       return { type: "work_message", to: "parent", acceptedAt: this.port.now(), ...(done ? { done } : {}) };
     }
@@ -107,9 +106,14 @@ export class WorkMessages {
     if (child.snapshot().lifecycle !== "active") throw new Error("That child Work is no longer running, so it cannot receive messages. Check it with dock_list.");
     const ledger = this.ledger(child.id);
     const number = ledger.next++;
-    await this.deliver(child, { type: "message", from: { relation: "parent", id: parent.id, name: parent.name }, text, number });
-    // It owes a reply to this message as well, even if it already finished its earlier work.
-    ledger.handed = Math.max(ledger.handed, number);
+    await this.deliver(child, async () => {
+      // Never send a number another Host run could reuse.
+      await this.save(child.id, ledger, "pre_effect");
+      return { type: "message", from: { relation: "parent", id: parent.id, name: parent.name }, text, number };
+    }, () => {
+      ledger.handed = Math.max(ledger.handed, number);
+      return this.save(child.id, ledger);
+    });
     return { type: "work_message", to: "child", target: this.forParent(child.snapshot()), acceptedAt: this.port.now(), number };
   }
 
@@ -128,15 +132,18 @@ export class WorkMessages {
    * too. Nothing changes until `answered` says whether the request went through; stop reports that come
    * meanwhile are decided then.
    */
-  takeBack(childId: string): { settlesThrough: number; answered(succeeded: boolean): void } {
+  takeBack(childId: string): { settlesThrough: number; answered(succeeded: boolean): Promise<void> } {
     const ledger = this.ledger(childId);
     const through = ledger.next - 1;
     ledger.takingBack += 1;
     return {
       settlesThrough: through,
-      answered: (succeeded) => {
+      answered: async (succeeded) => {
         ledger.takingBack -= 1;
-        if (succeeded) ledger.closed = Math.max(ledger.closed, through);
+        if (succeeded) {
+          ledger.closed = Math.max(ledger.closed, through);
+          await this.save(childId, ledger);
+        }
         if (ledger.takingBack > 0) return;
         for (const report of ledger.held.splice(0)) report();
       },
@@ -173,7 +180,7 @@ export class WorkMessages {
         ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
         settlesThrough: through,
       };
-    }, () => { ledger.closed = Math.max(ledger.closed, through); }).catch(() => { /* The parent's Worker is gone as well. */ });
+    }, () => { ledger.closed = Math.max(ledger.closed, through); return this.save(child.id, ledger); }).catch(() => { /* The parent's Worker is gone as well. */ });
   }
 
   private async reportUnreported(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>, ledger: Ledger | undefined): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
@@ -221,6 +228,10 @@ export class WorkMessages {
     return ledger;
   }
 
+  private save(id: string, { next, handed, answered, closed }: Ledger, effect: "pre_effect" | "post_effect" = "post_effect"): Promise<void> | undefined {
+    return this.port.save?.(id, { next, handed, answered, closed }, effect);
+  }
+
   private childSender(child: InstanceSnapshot): WorkMessageSender {
     return { relation: "child", id: this.mainIdentities.get(child.id)?.child ?? child.id, name: child.displayName };
   }
@@ -229,13 +240,13 @@ export class WorkMessages {
    * After what is already on its way to the same recipient. `message` may be decided only when its turn comes,
    * and `delivered` runs as soon as it arrived, before the next one is decided.
    */
-  private deliver(recipient: WorkMessageRecipient, message: WorkMessage | (() => WorkMessage | undefined), delivered?: () => void): Promise<void> {
+  private deliver(recipient: WorkMessageRecipient, message: WorkMessage | (() => WorkMessage | undefined | Promise<WorkMessage>), delivered?: () => void | Promise<void>): Promise<void> {
     const previous = this.deliveries.get(recipient.id) ?? Promise.resolve();
     const delivery = previous.then(async () => {
-      const decided = typeof message === "function" ? message() : message;
+      const decided = typeof message === "function" ? await message() : message;
       if (decided === undefined) return;
       await recipient.deliverWorkMessage(decided);
-      delivered?.();
+      await delivered?.();
     });
     const tail = delivery.then(() => undefined, () => undefined);
     this.deliveries.set(recipient.id, tail);
@@ -246,5 +257,5 @@ export class WorkMessages {
 
 /** A child Work's ledger: its task, number 0, reached it; `answered` says whether that is settled. */
 function newLedger(answered: number): Ledger {
-  return { next: 1, handed: 0, answered, closed: -1, takingBack: 0, held: [] };
+  return { ...INITIAL_WORK_PROGRESS, answered, takingBack: 0, held: [] };
 }

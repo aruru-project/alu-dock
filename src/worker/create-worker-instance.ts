@@ -29,6 +29,7 @@ export interface WorkerInstanceOptions {
   eventCapacity?: number;
   initialRuntimeGeneration?: number;
   createdAt?: string;
+  workRecovery?: import("../core/work-progress.js").WorkRecovery;
   reopenedFrom?: "host_lost" | "runtime_error";
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
   /** Test-only deterministic environment seam; production captures the workspace login shell. */

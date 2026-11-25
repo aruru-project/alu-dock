@@ -6,6 +6,36 @@ import test from "node:test";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
+// #681: a child's receipt can precede its busy parent's next step. Kill the parent in that gap.
+test("a reopened parent sees the result it acknowledged while busy and does not repeat what dock_wait already took", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["parent", "child"], { prefix: "alu-unread-result-" });
+  const { parent, child } = team.providers;
+  const client = await team.startHost();
+  const work = await trustOnce((trust) => client.create(team.cwd, "Parent", "parent", trust));
+  await client.prompt(work.id, "Get the reviewer's result.");
+  (await parent.request(0)).tools({ id: "spawn", name: "dock_spawn", arguments: { name: "Reviewer", task: "Review the work.", model: { provider: "child", id: "fixture" } } });
+  const working = await child.request(0);
+  (await parent.request(1)).tools({ id: "wait", name: "dock_wait", arguments: {} });
+  working.tools({ id: "progress", name: "dock_send", arguments: { message: "REVIEW_PROGRESS", done: false } });
+  const ready = await child.request(1);
+  assert.match(JSON.stringify((await parent.request(2)).body.messages?.at(-1)), /REVIEW_PROGRESS/u); // Busy again; its dock_wait result is in the conversation.
+  ready.tools({ id: "done", name: "dock_send", arguments: { message: "ACKNOWLEDGED_FINAL", done: true } });
+  const reviewer = (await client.list()).find((candidate) => candidate.parentId === work.id)!;
+  await waitFor(async () => (await client.status(reviewer.id)).execution === "idle", "Reviewer did not receive its final receipt");
+
+  let parentPid = team.workerPids[0]!;
+  for (const operation of ["read-unanswered", "read-again"]) {
+    process.kill(parentPid, "SIGKILL");
+    await waitFor(async () => (await client.status(work.id)).lifecycle === "runtime_error", "Host did not observe the parent leave");
+    await client.reopen(work.id, operation);
+    parentPid = team.workerPids.at(-1)!;
+    const history = (await client.history(work.id)).entries.filter((entry) => entry.customType === "dock-work-message");
+    assert.equal(history.length, 1, "What dock_wait took does not become a second message");
+    assert.match(JSON.stringify(history[0]!.content), /ACKNOWLEDGED_FINAL/u);
+  }
+  assert.equal(parent.requests.length, 3, "Reading the recovered result starts no model turn");
+});
+
 // 2026-11-13: the owner's other top-level Work sent a finding, but it waited until this
 // Work's whole turn ended. Default send must reach the next step; explicit followUp still waits.
 test("dock_send reaches a busy top-level Work at its next step unless the sender explicitly asks for followUp", { timeout: 60_000 }, async (context) => {

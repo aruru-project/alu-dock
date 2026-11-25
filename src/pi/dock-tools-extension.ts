@@ -1,3 +1,5 @@
+import type { WorkRecovery, WorkProgress } from "../core/work-progress.js";
+import type { WorkMessageReceipts } from "./work-message-receipts.js";
 import { randomUUID } from "node:crypto";
 import type { BoundaryResult, ExtensionAPI, ExtensionContext, ExtensionFactory, ToolExecutionEndEvent } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
@@ -91,6 +93,12 @@ class OwedResult {
   private failure: string | undefined;
 
   constructor(private readonly lead: boolean) {}
+
+  restore(progress: WorkProgress, parentRead: number): void {
+    this.taskSeen = true;
+    this.read = Math.min(parentRead, progress.next - 1);
+    this.owed = Math.max(progress.answered, progress.closed) < Math.max(progress.handed, this.read);
+  }
 
   /** Sent with a final result: a newer parent message is still owed after it (card #674). */
   get parentMessagesRead(): number { return this.read; }
@@ -210,13 +218,25 @@ export class DockToolsBridge {
   /** Kept by a child Work only. */
   private readonly owed: OwedResult | undefined;
   readonly children = new ChildMessages();
+  /** Only the outermost call has a tool result in the session. */
+  private readonly outerCalls = new Map<string, string>();
   readonly toolNames: readonly string[];
 
   /** `role` is set for a child Work; a top-level Work has none. */
-  constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort, readonly role?: ChildRole) {
+  constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort, readonly role?: ChildRole, private readonly receipts?: WorkMessageReceipts) {
     this.enabledValue = initiallyEnabled;
     this.toolNames = role === "lead" ? LEAD_DOCK_TOOL_NAMES : role === "helper" ? CHILD_DOCK_TOOL_NAMES : DOCK_TOOL_NAMES;
     this.owed = role === undefined ? undefined : new OwedResult(role === "lead");
+  }
+
+  /** Bring acknowledged messages into the reopened conversation without starting a turn. */
+  restore(recovery: WorkRecovery): void {
+    this.children.restore(recovery.children);
+    const read = this.receipts?.restore((message) => {
+      this.children.receive(message);
+      return this.children.owes(message.from.id);
+    });
+    if (recovery.own) this.owed?.restore(recovery.own, read ?? 0);
   }
 
   /** The number of the parent's latest message this child Work has read, sent with its final result. */
@@ -247,6 +267,7 @@ export class DockToolsBridge {
 
   /** A message from this Work's parent or child Work, or Dock's notice about a child Work. */
   receive(message: WorkMessage): void {
+    this.receipts?.receive(message);
     // A dock_wait in progress took it as its result: it reaches the model there.
     if (this.children.receive(message)) {
       this.owed?.childMessage();
@@ -255,6 +276,16 @@ export class DockToolsBridge {
     this.stoppedByUser = false;
     this.inbox.push({ kind: "work", message });
     this.deliverWorkMessages();
+  }
+
+  toolStarted(id: string, parent?: string): void {
+    if (parent !== undefined) this.outerCalls.set(id, this.outerCalls.get(parent) ?? parent);
+  }
+
+  async wait(callId: string, ...args: Parameters<ChildMessages["wait"]>): Promise<Awaited<ReturnType<ChildMessages["wait"]>>> {
+    const result = await this.children.wait(...args);
+    this.receipts?.inWait(result.messages, this.outerCalls.get(callId) ?? callId);
+    return result;
   }
 
   /** Child Work messages that arrived during the current step, for a dock_wait that starts now. */
@@ -316,7 +347,8 @@ export class DockToolsBridge {
     this.owed?.replied(textOf(message.content), message.stopReason === "error" ? message.errorMessage ?? "" : undefined);
   }
 
-  toolEnded(event: Pick<ToolExecutionEndEvent, "toolName" | "isError" | "parentToolCallId" | "result">): void {
+  toolEnded(event: Pick<ToolExecutionEndEvent, "toolName" | "isError" | "parentToolCallId" | "result"> & { toolCallId?: string }): void {
+    if (event.toolCallId) this.outerCalls.delete(event.toolCallId);
     // #666 looks at the turn's last call the model made itself, not at calls made inside a tool.
     if (event.parentToolCallId !== undefined) return;
     const details = (event.result as { details?: { to?: unknown; done?: unknown } } | undefined)?.details;
@@ -344,7 +376,8 @@ export class DockToolsBridge {
     if (this.deliveryFenceDepth > 0) return;
     while (this.inbox.length > 0) {
       const item = this.inbox[0]!;
-      api.sendMessage<unknown>(item.kind === "work" ? workMessageEntry(item.message, this.children.owes(item.message.from.id)) : watchNoticeEntry(item.notification), { triggerTurn: false });
+      const entry = item.kind === "work" ? workMessageEntry(item.message, this.children.owes(item.message.from.id), this.receipts?.id(item.message)) : watchNoticeEntry(item.notification);
+      api.sendMessage<unknown>(entry, { triggerTurn: false });
       this.inbox.shift();
       this.awaitingReply = true;
       if (item.kind !== "work") continue;
@@ -467,11 +500,11 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     const tools = bridge.role === "lead" ? LEAD_DOCK_TOOLS : bridge.role === "helper" ? [] : TOP_LEVEL_DOCK_TOOLS;
     for (const tool of tools) pi.registerTool({
       name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
-      execute: async (_toolCallId: string, params: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: PiModelContext & { hasPendingMessages(): boolean }) => piToolResult(await tool.execute(params, {
+      execute: async (toolCallId: string, params: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: PiModelContext & { hasPendingMessages(): boolean }) => piToolResult(await tool.execute(params, {
         invoke: (request) => bridge.invoke(request),
         thinkingLevel: () => pi.getThinkingLevel(),
         modelFacts: () => modelFacts(ctx),
-        wait: (request, waitSignal) => bridge.children.wait(request, waitSignal, () => ctx.hasPendingMessages() || bridge.parentMessageWaiting, bridge.takeArrivedChildMessages()),
+        wait: (request, waitSignal) => bridge.wait(toolCallId, request, waitSignal, () => ctx.hasPendingMessages() || bridge.parentMessageWaiting, bridge.takeArrivedChildMessages()),
       }, signal)),
     } as never);
   };
@@ -526,6 +559,7 @@ function registerWorkMessages(pi: ExtensionAPI, bridge: DockToolsBridge): void {
   pi.on("before_agent_start", (event) => { bridge.runStarting(event.messageType); });
   pi.on("message_start", (event) => bridge.messageStarted(event.message as ObservedMessage));
   pi.on("message_end", (event) => { bridge.messageEnded(event.message as ObservedMessage); });
+  pi.on("tool_execution_start", (event) => bridge.toolStarted(event.toolCallId, event.parentToolCallId));
   pi.on("tool_execution_end", (event) => bridge.toolEnded(event));
   // The marker that starts a turn for an idle Work is not something the model reads.
   pi.on("context", (event) => event.messages.some(isWorkWake)

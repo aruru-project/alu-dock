@@ -1,3 +1,4 @@
+import { parseWorkProgress, type WorkProgress } from "./work-progress.js";
 import type { InstanceExecution, InstanceLifecycle, LastRunResult } from "./managed-instance.js";
 import type { ChildRole } from "./dock-tools.js";
 import { parseAllowedTools } from "./worker-tool-policy.js";
@@ -47,6 +48,8 @@ export interface CatalogInstanceRecord {
   mainIdentity?: { child: string; parent?: string };
   /** The role and tool ceiling actually granted at creation; absent on older child records. */
   childGrant?: { role: ChildRole; allowedTools?: string[]; mainParent?: true };
+  /** Parent-message numbers only; the Worker owns the words in its session. */
+  workProgress?: WorkProgress;
   /** Opened as the personal assistant (card #295); a reopen keeps it. */
   assistant?: true;
   id: string;
@@ -203,6 +206,10 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
     if (record.parentId === undefined || !["lead", "helper"].includes(record.childGrant.role)) throw new Error("Catalog child grant needs a parent and role");
     if (record.childGrant.mainParent !== undefined && record.childGrant.mainParent !== true) throw new Error("Catalog Main parent mark must be true when present");
     if (record.childGrant.allowedTools !== undefined) parseAllowedTools(record.childGrant.allowedTools);
+  }
+  if (record.workProgress !== undefined) {
+    if (!record.parentId) throw new Error("Only a child Work has parent-message progress");
+    parseWorkProgress(record.workProgress);
   }
   if (record.assistant !== undefined && record.assistant !== true) throw new Error("Catalog assistant mark must be true when present");
   if (record.mainIdentity !== undefined) {

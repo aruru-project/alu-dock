@@ -854,7 +854,7 @@ test("SubHost file delivery remains local while Main is offline", async () => {
     invokeDockTool: async (_source: string, request: { type: string }) => { delivered = request.type === "deliver"; return { type: "deliver" as const, deliverable: { deliveryRef: "delivery", name: "file.txt", sizeBytes: 1 } }; },
     attachObservationSink: () => () => {},
     answersLocally: () => false,
-    noteSpawnedChild: () => {},
+    noteSpawnedChild: async () => {},
   } as LocalDockToolsHostPort;
   const upstream = { invokeDockTool: async () => { throw new Error("Main offline"); } } as unknown as SubHostMachineConnection;
   const port = new SubHostDockToolsPort({ upstream, local: () => local });

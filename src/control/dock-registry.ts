@@ -1,3 +1,4 @@
+import type { WorkRecovery } from "../core/work-progress.js";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_ASSISTANT_DISPLAY_NAME } from "../core/assistant.js";
 import type { SystemService } from "./system-service.js";
@@ -52,6 +53,7 @@ import type {
 } from "./project-trust.js";
 
 export interface InstanceFactoryInput {
+  workRecovery?: WorkRecovery;
   /** Includes the original role and tool ceiling when continuing an interrupted child. */
   child?: DockChildStart;
   modelSpeed?: ModelSpeedSelection;
@@ -283,6 +285,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.workMessages = new WorkMessages({
       children: (parentId) => this.catalog.current().instances.filter((record) => record.parentId === parentId).map((record) => this.safeSnapshot(record)),
       parent: (child) => this.workParent(child),
+      save: async (id, progress, effect) => this.instances.get(id)?.saveChildState({ workProgress: progress }, effect),
       now: () => new Date().toISOString(),
     });
   }
@@ -735,6 +738,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const nextGeneration = record.runtimeGeneration + 1;
     const child = record.parentId !== undefined && record.childGrant !== undefined
       ? { parentId: record.parentId, role: record.childGrant.role, allowedTools: record.childGrant.allowedTools } : undefined;
+    const children = this.catalog.current().instances.flatMap((child) => {
+      if (child.parentId !== record.id || !child.workProgress) return [];
+      const { handed, answered, closed } = child.workProgress;
+      return [{ id: child.mainIdentity?.child ?? child.id, name: child.name ?? child.id, handed, settled: Math.max(answered, closed) }];
+    });
     const candidate = await this.factory({
       id: record.id,
       creationOperationId: record.creationOperationId,
@@ -746,6 +754,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       sessionFile,
       initialRuntimeGeneration: nextGeneration,
       ...(child === undefined ? {} : { child }),
+      workRecovery: { ...(record.interruption?.reason === "host_crash" ? { afterHostCrash: true as const } : {}), own: record.workProgress, children },
       createdAt: record.createdAt,
       ...(previousLifecycle === undefined || sessionFile === undefined ? {} : { reopenedFrom: previousLifecycle }),
       dockToolsHostPort: this.dockToolsHostPort,
@@ -785,6 +794,10 @@ export class DockRegistry implements LocalDockToolsHostPort {
       await candidate.disposeUnpublished().catch(() => {});
       throw new Error("Reopen factory returned an identity outside the catalog transaction");
     }
+    candidate.restoreChildState({
+      ...(record.workProgress === undefined ? {} : { workProgress: record.workProgress }),
+      ...(record.mainIdentity === undefined ? {} : { mainIdentity: record.mainIdentity }),
+    });
     const previous = this.instances.get(record.id);
     if (child) this.childGrants.set(candidate, child);
     if (record.childGrant?.mainParent) this.mainParented.add(candidate);
@@ -807,6 +820,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       await candidate.disposeUnpublished().catch(() => {});
       throw error;
     }
+
     this.trackInstanceForObservation(candidate);
     for (const listener of this.runtimeReopenListeners) {
       try { listener(record.id); } catch { /* A stale client cannot roll back a committed reopen. */ }
@@ -1028,7 +1042,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       return { type: request.type, instance: { ...updated, id: identity.id, parentId: identity.parentId }, settlesThrough: takeBack.settlesThrough };
     } finally {
       // Refused, or not known to have happened: the child may still be at work on it.
-      takeBack.answered(succeeded);
+      await takeBack.answered(succeeded);
     }
   }
 

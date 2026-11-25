@@ -1,5 +1,6 @@
 import type { DockToolsRequest, DockToolsResult, WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification, ObservedInstanceStatus } from "../core/instance-observation.js";
+import type { WorkRecovery } from "../core/work-progress.js";
 import { ChildMessages } from "../worker/child-messages.js";
 import type { WorkerHost } from "../worker/worker-shell.js";
 import { firstLine, type WorkNote } from "./status.js";
@@ -7,7 +8,7 @@ import { firstLine, type WorkNote } from "./status.js";
 /** Kept with her conversation: which Works she handed something to or follows, so a restart does not lose track. */
 export const WORKS_STATE_TYPE = "assistant-works";
 
-interface KnownWork extends WorkNote { name: string }
+interface KnownWork extends WorkNote { name: string; onNamedMachine?: boolean; handed?: number; settled?: number }
 interface SavedWorks { works: Record<string, KnownWork>; followed: string[] }
 
 /**
@@ -20,20 +21,25 @@ export class WorkDesk {
   private readonly works = new Map<string, KnownWork>();
   private readonly followed = new Set<string>();
   private readonly watchTargets = new Map<string, string>();
-  /** Child Works that owed her a result when this Worker last stopped; a restart ended them. */
+  /** Children actually retired with the previous run. A Host crash alone no longer ends them. */
   private lost: string[] = [];
 
   constructor(private readonly host: WorkerHost, private readonly save: (state: SavedWorks) => void) {}
 
-  restore(saved: unknown): void {
-    if (!saved || typeof saved !== "object") return;
-    const { works, followed } = saved as Partial<SavedWorks>;
+  restore(saved: unknown, recovery?: WorkRecovery): void {
+    const { works, followed } = (saved ?? {}) as Partial<SavedWorks>;
+    const restored = new Map(recovery?.children.map((child) => [child.id, child]));
+    this.children.restore([...restored.values()]);
     for (const [id, work] of Object.entries(works ?? {})) {
       if (!work || typeof work.name !== "string") continue;
-      // A child Work never outlives its parent's Worker: what it owed is lost with it.
-      if (work.owes) this.lost.push(work.name);
-      else this.works.set(id, { name: work.name, ...(typeof work.lastSaid === "string" ? { lastSaid: work.lastSaid } : {}) });
+      // A remote child's numbers live on its Machine, not in Main's catalog. On a Host crash
+      // her own receipts suffice; as always, her status shows only children the Host lists.
+      const remote = recovery?.afterHostCrash && work.onNamedMachine && Number.isSafeInteger(work.handed) && Number.isSafeInteger(work.settled);
+      if (remote && !restored.has(id)) this.children.restore([{ id, name: work.name, handed: work.handed!, settled: work.settled! }]);
+      if (work.owes && !restored.has(id) && !remote) this.lost.push(work.name);
+      else this.works.set(id, { ...work, owes: this.children.owes(id) });
     }
+    for (const child of restored.values()) if (!this.works.has(child.id)) this.works.set(child.id, { name: child.name, owes: this.children.owes(child.id) });
     for (const id of Array.isArray(followed) ? followed : []) if (typeof id === "string") this.followed.add(id);
   }
 
@@ -64,8 +70,10 @@ export class WorkDesk {
   async invoke(request: DockToolsRequest): Promise<DockToolsResult> {
     const result = await this.host.invokeDockTool(request);
     this.children.noteWork(result);
-    if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) this.know(result.instance);
-    else if (result.type === "create") { this.know(result.instance); this.followed.add(result.instance.id); }
+    if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) {
+      this.know(result.instance);
+      if (request.type === "spawn" && request.machine !== undefined) this.works.get(result.instance.id)!.onNamedMachine = true;
+    } else if (result.type === "create") { this.know(result.instance); this.followed.add(result.instance.id); }
     else if (result.type === "watch") {
       const target = result.status === "watching" ? result.receipt.target : result.completion.target;
       this.know(target);
@@ -116,6 +124,7 @@ export class WorkDesk {
     const owed = new Set(this.children.waiting.map((child) => child.id));
     for (const [id, work] of this.works) {
       if (owed.has(id)) work.owes = true; else delete work.owes;
+      if (work.onNamedMachine) Object.assign(work, this.children.progress(id));
     }
     this.persist();
   }

@@ -6,6 +6,7 @@ import type { WorkerLaunch } from "../worker/worker-process.js";
 import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
 
 export interface PiWorkerInitOptions {
+  workRecovery?: import("../core/work-progress.js").WorkRecovery;
   cwd: string;
   agentDir: string;
   sessionDir?: string;

@@ -31,6 +31,8 @@ export const WATCH_NOTICE_TYPE = "dock-tools-watch";
 
 /** What clients use to style a Work message; its first line already says it to the model and the reader. */
 export interface WorkMessageDetails {
+  /** Session receipt when this Worker keeps its inbox with the conversation. */
+  receiptId?: string;
   from: "parent" | "child";
   done?: true;
   stopped?: true;
@@ -74,9 +76,10 @@ export function watchNoticeEntry(notification: ObservationNotification): { custo
 }
 
 /** The custom message Pi records for a Work message. */
-export function workMessageEntry(message: WorkMessage, stillOwed = false): { customType: string; content: string; display: true; details: WorkMessageDetails } {
+export function workMessageEntry(message: WorkMessage, stillOwed = false, receiptId?: string): { customType: string; content: string; display: true; details: WorkMessageDetails } {
   const details: WorkMessageDetails = {
     from: message.from.relation,
+    ...(receiptId === undefined ? {} : { receiptId }),
     ...(message.type === "message" && message.done ? { done: true as const } : {}),
     ...(message.type === "child_stopped" ? { stopped: true as const } : {}),
   };

@@ -83,6 +83,7 @@ import type {
   AgentSessionTarget,
   ThinkingLevel,
 } from "./agent-worker.js";
+import { INITIAL_WORK_PROGRESS } from "./work-progress.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
 import { PublishedFileUnavailableError, type PublishedFileReadPage } from "./published-file.js";
 import { readPublishedFilePage } from "../control/published-file-reader.js";
@@ -403,6 +404,7 @@ export class ManagedInstance {
   private shutdownRequestedAt: string | undefined;
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
+  private childState: Pick<CatalogInstanceRecord, "workProgress" | "mainIdentity"> = { workProgress: INITIAL_WORK_PROGRESS };
   private workerConfigValue: JsonObject | undefined;
   private pendingReloadConfig?: { operationId: string; config?: JsonObject };
   private modelSpeedValue: ModelSpeedSelection | undefined;
@@ -606,7 +608,7 @@ export class ManagedInstance {
     const record: CatalogInstanceRecord = {
       id: snapshot.id,
       creationOperationId: snapshot.creationOperationId,
-      ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
+      ...(this.parentId === undefined ? {} : { parentId: this.parentId, ...structuredClone(this.childState) }),
       ...(this.assistant ? { assistant: true as const } : {}),
       ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
       ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
@@ -644,6 +646,19 @@ export class ManagedInstance {
     };
     validateInstanceStateInvariant(record);
     return record;
+  }
+
+  /** Continue the same child, before publishing its reopened record. */
+  restoreChildState(fields: Pick<CatalogInstanceRecord, "workProgress" | "mainIdentity">): void { this.childState = { ...this.childState, ...structuredClone(fields) }; }
+
+  /** Serialized with all changes to this record; an ordinary runtime checkpoint cannot undo delivery. */
+  saveChildState(fields: Pick<CatalogInstanceRecord, "workProgress" | "mainIdentity">, effect: "pre_effect" | "post_effect"): Promise<void> {
+    return this.enqueueTransition(async () => {
+      if (this.state.lifecycle === "stopped") return; // Stop has already retired the record.
+      const next = { ...this.childState, ...structuredClone(fields) };
+      await this.catalogPort?.commit({ ...this.catalogRecord(), ...next }, { kind: "child.progress", effect, instanceId: this.id });
+      this.childState = next;
+    });
   }
 
   bindCatalogPort(port: InstanceCatalogMutationPort): void {

@@ -26,6 +26,7 @@ export async function createAssistantInstance(options: CreateAssistantInstanceOp
   const init: AssistantWorkerInit = {
     cwd,
     agentDir: resolve(agentDir ?? getAgentDir()),
+    ...(options.workRecovery === undefined ? {} : { workRecovery: options.workRecovery }),
     ...(sessionDir === undefined ? {} : { sessionDir: resolve(sessionDir) }),
     ...(sessionFile === undefined ? {} : { sessionFile: resolve(sessionFile) }),
     // Main names its one resident assistant, including a migrated older conversation.

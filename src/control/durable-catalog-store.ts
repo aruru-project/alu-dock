@@ -1,3 +1,4 @@
+import { parseWorkProgress } from "../core/work-progress.js";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -172,7 +173,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     "id", "creationOperationId", "parentId", "childGrant", "assistant", "key", "name", "cwd", "projectTrusted", "lifecycle", "execution", "lastRun",
     "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "modelSpeed", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
-    "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption", "mainIdentity",
+    "workProgress", "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption", "mainIdentity",
     "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
   ], field);
   const childGrant = value.childGrant === undefined ? undefined : object(value.childGrant, `${field}.childGrant`);
@@ -214,6 +215,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
       ...(childGrant.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(childGrant.allowedTools) }),
       ...(childGrant.mainParent === undefined ? {} : { mainParent: literalTrue(childGrant.mainParent, `${field}.childGrant.mainParent`) }),
     } }),
+    ...(value.workProgress === undefined ? {} : { workProgress: parseWorkProgress(value.workProgress) }),
     ...(value.assistant === undefined ? {} : { assistant: literalTrue(value.assistant, `${field}.assistant`) }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, `${field}.workerConfig`) }),
     ...(mainIdentity === undefined ? {} : { mainIdentity: {

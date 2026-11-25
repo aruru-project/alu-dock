@@ -7,8 +7,10 @@ import type { UiCapability } from "../worker/worker-protocol.js";
 import { runAgentWorker, type WorkerAgent, type WorkerHost } from "../worker/worker-shell.js";
 import type { PiWorkerInitOptions } from "./pi-worker-launch.js";
 import type { AgentWorkerState } from "../core/agent-worker.js";
+import { parseWorkRecovery } from "../core/work-progress.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
 import { parseAllowedTools } from "../core/worker-tool-policy.js";
+import { WorkMessageReceipts } from "./work-message-receipts.js";
 import { DockToolsBridge } from "./dock-tools-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -32,17 +34,19 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
   const modelOwner = host.models ? mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) : undefined;
   const modelSpeed = new ModelSpeedRuntime(modelOwner ? () => modelOwner.readConfiguration() : undefined);
   const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
-  const dockToolsBridge: DockToolsBridge = new DockToolsBridge(host.dockToolsEnabled(), {
-    configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),
-    invoke: host.invokeDockTool,
-  }, init.child);
-
   const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
   const reopened = sessionPath
     ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
     : undefined;
   if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
-  const runtime = await createPiAgentAdapter({
+  let runtime: PiAgentAdapter;
+  const receipts = new WorkMessageReceipts(host.identity.instanceId, () => runtime ? runtime.currentSession().sessionManager : reopened!.manager);
+  const dockToolsBridge: DockToolsBridge = new DockToolsBridge(host.dockToolsEnabled(), {
+    configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),
+    invoke: host.invokeDockTool,
+  }, init.child, receipts);
+  if (reopened && init.workRecovery) dockToolsBridge.restore(init.workRecovery);
+  runtime = await createPiAgentAdapter({
     cwd: init.cwd,
     agentDir: init.agentDir,
     ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
@@ -112,7 +116,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
-  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "initialName"]);
+  const allowed = new Set(["workRecovery", "cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "initialName"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`Worker init contains unknown field ${key}`);
   const text = (input: unknown, limit: number, label: string, optional = false): string | undefined => {
     if (input === undefined && optional) return undefined;
@@ -128,6 +132,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
   if (typeof value.projectTrusted !== "boolean") throw new Error("Worker init project trust is invalid");
   if (value.child !== undefined && value.child !== "helper" && value.child !== "lead") throw new Error("Worker init child role is invalid");
   return {
+    ...(value.workRecovery === undefined ? {} : { workRecovery: parseWorkRecovery(value.workRecovery) }),
     cwd: text(value.cwd, 16_384, "Worker cwd") as string,
     agentDir: text(value.agentDir, 16_384, "Worker agent directory") as string,
     ...(text(value.sessionDir, 16_384, "Worker session directory", true) === undefined ? {} : { sessionDir: value.sessionDir as string }),

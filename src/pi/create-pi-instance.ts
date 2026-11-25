@@ -35,6 +35,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const init: PiWorkerInitOptions = {
     cwd,
     agentDir: resolve(requestedAgentDir ?? getAgentDir()),
+    ...(options.workRecovery === undefined ? {} : { workRecovery: options.workRecovery }),
     ...(sessionDir === undefined ? {} : { sessionDir: resolve(sessionDir) }),
     ...(tools === undefined ? {} : { tools }),
     ...(excludeTools === undefined ? {} : { excludeTools }),

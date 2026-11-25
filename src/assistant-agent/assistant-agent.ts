@@ -69,6 +69,8 @@ import { resolvePiStartingModel } from "../pi/pi-starting-model.js";
 import { TransientFileRegistry } from "../pi/transient-file-registry.js";
 import { dockAttachmentTools } from "../worker/dock-attachment-tools.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
+import { WorkMessageReceipts } from "../pi/work-message-receipts.js";
+import type { WorkRecovery } from "../core/work-progress.js";
 import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
 import { HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
@@ -83,6 +85,7 @@ import { WORKS_STATE_TYPE, WorkDesk } from "./works.js";
 
 /** What the Host gives her Worker to start with. */
 export interface AssistantWorkerInit {
+  workRecovery?: WorkRecovery;
   cwd: string;
   /** Pi's agent directory: where her conversations are kept and, without Main's model service, the models are read. */
   agentDir: string;
@@ -164,7 +167,7 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
     : SessionManager.open(resolve(init.sessionFile), sessionDir, cwd);
   if (init.initialName !== undefined && session.getSessionName() !== init.initialName) session.appendSessionInfo(init.initialName);
   const attachmentContextKey = await loadAttachmentContextKey(agentDir);
-  const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins, modelSpeed);
+  const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins, modelSpeed, init.workRecovery);
   await her.chooseStartingModel(init.workerConfig?.model, init.sessionFile === undefined);
   await her.loadExtensions();
   her.refreshSkills();
@@ -225,6 +228,7 @@ class AssistantAgent implements WorkerAgent {
     cost: 0,
   };
   private lastUsageTokens: number | undefined;
+  private readonly workReceipts: WorkMessageReceipts;
   private onDisk = false;
   private disposed: Promise<AgentCleanupResult> | undefined;
   private readonly unsubscribeSpeedSupport: () => void;
@@ -239,6 +243,7 @@ class AssistantAgent implements WorkerAgent {
     private readonly attachmentContextKey: Uint8Array,
     builtins: AssistantBuiltinExtensions,
     private readonly modelSpeed: ModelSpeedRuntime,
+    workRecovery?: WorkRecovery,
   ) {
     this.unsubscribeSpeedSupport = modelSpeed.onSupportChanged(data => this.publish({ type: "settings.changed", data }));
     this.skills = new AgentSkills(cwd);
@@ -263,12 +268,17 @@ class AssistantAgent implements WorkerAgent {
     const notify = (message: string): void => this.tell(message, "warning");
     this.recorder = new SessionRecorder(port, session, attachmentContextKey, notify);
     this.opening = new AssistantOpening(port, notify);
+    this.workReceipts = new WorkMessageReceipts(host.identity.instanceId, () => this.session);
     this.desk = new WorkDesk(host, (state) => this.saveState(WORKS_STATE_TYPE, state));
     this.reminders = new Reminders(
       (reminders) => this.saveState(REMINDERS_STATE_TYPE, { reminders }),
       (reminder, lateMs) => this.reminderDue(reminder, lateMs),
     );
-    this.restoreState();
+    this.restoreState(workRecovery);
+    if (workRecovery) this.workReceipts.restore((message) => {
+      this.desk.heard(message);
+      return this.desk.owes(message.from.id);
+    });
     this.workTools = this.dockTools();
     this.tools = [
       createReadTool(cwd), createLsTool(cwd), createFindTool(cwd), createGrepTool(cwd),
@@ -635,12 +645,13 @@ class AssistantAgent implements WorkerAgent {
 
   /** A message from a child Work, or Dock's notice that one stopped without its result. */
   private workSaid(message: WorkMessage): void {
+    this.workReceipts.receive(message);
     this.desk.heard(message);
     const name = `「${firstLine(message.from.name, 60)}」`;
     const wokenBy = message.type === "child_stopped" ? `子 Work${name}没交结果就停下了`
       : message.from.relation === "parent" ? `父 Work${name}的消息`
         : `子 Work${name}${message.done ? "交来的结果" : "的消息"}`;
-    this.arrive("work", workMessageEntry(message, this.desk.owes(message.from.id)), wokenBy, message.from.relation === "child" ? message.from.id : undefined);
+    this.arrive("work", workMessageEntry(message, this.desk.owes(message.from.id), this.workReceipts.id(message)), wokenBy, message.from.relation === "child" ? message.from.id : undefined);
   }
 
   private watchFired(notification: ObservationNotification): void {
@@ -759,11 +770,11 @@ class AssistantAgent implements WorkerAgent {
     this.session.appendCustomEntry(type, state);
   }
 
-  private restoreState(): void {
+  private restoreState(workRecovery?: WorkRecovery): void {
     const latest = new Map<string, unknown>();
     for (const entry of this.session.getBranch()) if (entry.type === "custom") latest.set(entry.customType, entry.data);
     for (const [type, state] of latest) this.savedState.set(type, JSON.stringify(state));
-    this.desk.restore(latest.get(WORKS_STATE_TYPE));
+    this.desk.restore(latest.get(WORKS_STATE_TYPE), workRecovery);
     this.reminders.restore((latest.get(REMINDERS_STATE_TYPE) as { reminders?: unknown } | undefined)?.reminders);
   }
 
