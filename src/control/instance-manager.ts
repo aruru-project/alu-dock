@@ -1,3 +1,4 @@
+import { childTaskOperation } from "../core/dock-tools.js";
 import type { AttachmentService } from "./attachment-service.js";
 import type { ImagePathDto } from "../core/instance-dto.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
@@ -180,6 +181,7 @@ export class InstanceManager {
       if (input.attachments !== undefined && attachments === undefined) {
         throw new ProtocolValidationError("capability_missing", "Attachment storage is unavailable");
       }
+      if (instance.parentId && input.operationId === childTaskOperation(instance.creationOperationId)) await this.registry.issueFirstTask(instance.id);
       const receipt = await instance.submit(input.message, input.delivery, input.operationId, input.images, attachments);
       return { receipt, instance: instance.snapshot() };
     });

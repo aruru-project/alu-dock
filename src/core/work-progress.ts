@@ -1,4 +1,4 @@
-/** The numbers of a child Work's parent messages. Task 0 is owed from creation. */
+/** The numbers of a child Work's parent messages. The initial task, when sent, is number 0. */
 export interface WorkProgress {
   /** Never reused, even if a delivery fails. */
   next: number;
@@ -8,7 +8,7 @@ export interface WorkProgress {
   /** The latest taken back or accounted for by a notice that the child left. */
   closed: number;
 }
-export const INITIAL_WORK_PROGRESS: Readonly<WorkProgress> = { next: 1, handed: 0, answered: -1, closed: -1 };
+export const INITIAL_WORK_PROGRESS: Readonly<WorkProgress> = { next: 0, handed: -1, answered: -1, closed: -1 };
 
 /** On reopen the Worker learns what it and its own children still owe, not what to execute. */
 export interface WorkRecovery {
@@ -22,7 +22,7 @@ export function parseWorkProgress(raw: unknown): WorkProgress {
     throw new Error("Invalid child Work progress");
   }
   const { next, handed, answered, closed } = raw as WorkProgress;
-  if (![next, handed, answered, closed].every(Number.isSafeInteger) || next < 1 || handed < 0 || answered < -1 || closed < -1
+  if (![next, handed, answered, closed].every(Number.isSafeInteger) || next < 0 || handed < -1 || answered < -1 || closed < -1
     || Math.max(handed, answered, closed) >= next) throw new Error("Invalid child Work message numbers");
   return { next, handed, answered, closed };
 }
@@ -37,9 +37,10 @@ export function parseWorkRecovery(raw: unknown): WorkRecovery {
   return { children: parsed, ...(afterHostCrash === true ? { afterHostCrash } : {}), ...(own === undefined ? {} : { own: parseWorkProgress(own) }) };
 }
 
-/** Only numbered final results and actual departures advance the Host's corresponding facts. */
+/** The reopened Work's numbered receipts: its own deliveries, or results/departures of its children. */
 export interface RecoveredChildReceipt {
   id: string;
+  handed?: number;
   answered?: number;
   closed?: number;
 }

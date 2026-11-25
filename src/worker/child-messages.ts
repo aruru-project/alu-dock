@@ -16,7 +16,8 @@ export interface ChildWaitResult {
   messages: WorkMessage[];
   /** Child Works that still owe a result. */
   waiting: OwedChild[];
-  ended: "received" | "nothing_pending" | "message" | "timeout" | "cancelled";
+  unconfirmed?: OwedChild[];
+  ended: "received" | "unconfirmed" | "nothing_pending" | "message" | "timeout" | "cancelled";
   timeoutSeconds?: number;
 }
 
@@ -30,6 +31,8 @@ interface ChildLedger extends OwedChild {
   handed: number;
   /** The latest work its final results or Dock's stop notices settled, or this Work took back. */
   settled: number;
+  /** A Host crash left a number issued but not yet confirmed by its child's inbox. */
+  unconfirmed?: number;
 }
 
 /**
@@ -52,7 +55,19 @@ export class ChildMessages {
   }
 
   restoreFromHost(children: WorkRecovery["children"]): void {
-    this.restore(children.map(({ id, name, handed, answered, closed }) => ({ id, name, handed, settled: Math.max(answered, closed) })));
+    this.restore(children.map(({ id, name, handed, answered, closed, next }) => ({ id, name, handed, settled: Math.max(answered, closed), unconfirmed: next - 1 })));
+  }
+
+  checked(id: string, handed = -1): void {
+    const child = this.ledgers.get(id);
+    if (!child) return;
+    delete child.unconfirmed;
+    child.handed = Math.max(child.handed, handed);
+    this.forgetSettled();
+  }
+
+  get unconfirmed(): OwedChild[] {
+    return [...this.ledgers.values()].filter(unconfirmed).map(({ id, name }) => ({ id, name }));
   }
 
   /** Restore just a numbered receipt, never a wait delivery or a retired child. */
@@ -119,7 +134,7 @@ export class ChildMessages {
    * before its call's receipt is kept until the receipt pairs with it, or it would owe that work again.
    */
   private forgetSettled(): void {
-    const settled = [...this.ledgers.values()].filter((ledger) => ledger.settled === ledger.handed);
+    const settled = [...this.ledgers.values()].filter((ledger) => ledger.settled === ledger.handed && !unconfirmed(ledger));
     for (const ledger of settled.slice(0, Math.max(0, settled.length - MAX_SETTLED_CHILDREN))) this.ledgers.delete(ledger.id);
   }
 
@@ -155,12 +170,16 @@ export class ChildMessages {
       else if (request.all === true ? chosen.every((child) => !this.owes(child.id)) : request.target === undefined || chosenIds.has(message.from.id)) finish("received");
     };
     for (const message of arrived) take(message);
-    const result = (): ChildWaitResult => ({
-      messages, waiting: this.waiting, ended: ended!,
-      ...(ended === "timeout" ? { timeoutSeconds } : {}),
-    });
+    const result = (): ChildWaitResult => {
+      const unconfirmed = this.unconfirmed;
+      return { messages, waiting: this.waiting, ended: ended!, ...(unconfirmed.length ? { unconfirmed } : {}),
+        ...(ended === "timeout" ? { timeoutSeconds } : {}) };
+    };
     if (ended) return result();
-    if (chosen.length === 0) return { messages, waiting: this.waiting, ended: messages.length > 0 ? "received" : "nothing_pending" };
+    if (chosen.length === 0) {
+      ended = this.unconfirmed.some((child) => request.target === undefined || named(child)) ? "unconfirmed" : "nothing_pending";
+      return result();
+    }
     const waiter = { take };
     this.waiter = waiter;
     const timer = setTimeout(() => finish("timeout"), timeoutSeconds * 1_000);
@@ -181,4 +200,5 @@ export class ChildMessages {
   }
 }
 
+function unconfirmed(ledger: ChildLedger): boolean { return (ledger.unconfirmed ?? -1) > Math.max(ledger.handed, ledger.settled); }
 function owes(ledger: ChildLedger): boolean { return ledger.settled < ledger.handed; }

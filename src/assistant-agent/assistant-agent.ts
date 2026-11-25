@@ -530,6 +530,7 @@ class AssistantAgent implements WorkerAgent {
       case "resolve_session_target": throw this.notHers(NO_OTHER_SESSION);
       // What she and her owner said stays with her; a Work she hands something to gets it in the task.
       case "branch_for_child": throw new Error("The assistant's conversation is not copied to other Works. Put what the Work needs into its task.");
+      case "child_receipts_checked": this.desk.childReceiptsChecked(control.id, control.handed); return null;
       case "work_message": this.workSaid(control.message); return null;
       case "observation_delivery": this.watchFired(control.notification); return null;
       case "dispose": return this.dispose();

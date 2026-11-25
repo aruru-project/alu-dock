@@ -15,6 +15,7 @@ export interface PiWorkerInitOptions {
   workerConfig?: JsonObject;
   /** A child Work reports only to its parent; a lead also manages child Works of its own (card #674). */
   child?: ChildRole;
+  taskOperationId?: string;
   /** A child's exact tool ceiling, chosen by its parent. */
   allowedTools?: string[];
   projectTrusted: boolean;

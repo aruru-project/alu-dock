@@ -397,7 +397,7 @@ test("a child Work that sends its final result alongside another call is not rep
       configure: async () => ({ enabled: true }),
       invoke: async (request) => { invoked.push(request); return { type: "unreported_stop", notified: true }; },
     }, "helper");
-    bridge.runStarting("user");
+    bridge.receivedTask();
     return { bridge, invoked };
   };
   const sent = { toolName: "dock_send", isError: false, result: { details: { type: "work_message", to: "parent", done: true } } };
@@ -460,7 +460,7 @@ test("a lead child Work reports a stop to its parent only while it owes a result
       },
       /** Its task comes, and it hands a review to a child Work of its own. */
       startsReview: async () => {
-        bridge.runStarting("user");
+        bridge.receivedTask();
         await bridge.invoke({ type: "spawn", operationId: "spawn", name: "Review", task: "Review." });
       },
     };
@@ -471,7 +471,7 @@ test("a lead child Work reports a stop to its parent only while it owes a result
   const waiting = lead();
   await waiting.startsReview();
   waiting.ends("Waiting for the review.");
-  waiting.bridge.runStarting("user");
+  waiting.bridge.runStarting();
   waiting.ends("OWNER_CHAT", { aborted: true });
   assert.deepEqual(waiting.reports, [], "the owner's own turn is not the parent's business");
 
@@ -487,7 +487,7 @@ test("a lead child Work reports a stop to its parent only while it owes a result
     await waits.startsReview();
     await waits.toParent(false);
     waits.ends("Progress sent.");
-    waits.bridge.runStarting("user");
+    waits.bridge.runStarting();
     if (arrivedFirst) waits.bridge.receive(reviewSays("REVIEW_DONE"));
     const waited = waits.waits({ all: true, timeoutSeconds: 5 });
     if (!arrivedFirst) waits.bridge.receive(reviewSays("REVIEW_DONE"));
@@ -502,13 +502,13 @@ test("a lead child Work reports a stop to its parent only while it owes a result
   await nested.startsReview();
   await nested.toParent(false);
   nested.ends("Progress sent.");
-  nested.bridge.runStarting("user");
+  nested.bridge.runStarting();
   await nested.toParent(true, "code-call");
   nested.bridge.toolEnded({ toolName: "code", isError: false, result: {} });
   nested.ends("Sent the result.");
   nested.setIdle(true);
   nested.bridge.receive(reviewSays("REVIEW_LATE"));
-  nested.bridge.runStarting("custom");
+  nested.bridge.runStarting();
   nested.ends("Noted.");
   assert.deepEqual(nested.reports, []);
 
@@ -533,7 +533,7 @@ test("a lead child Work reports a stop to its parent only while it owes a result
 
   // A final result's receipt that comes back late, after a newer parent message went in, does not settle it.
   const late = lead();
-  late.bridge.runStarting("user");
+  late.bridge.runStarting();
   late.setIdle(true);
   late.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q1", number: 1 });
   const answering = late.toParent(true, "code-call");
@@ -542,13 +542,13 @@ test("a lead child Work reports a stop to its parent only while it owes a result
   await late.startsReview();
   late.ends("Waiting for the review.");
   late.bridge.receive(reviewSays("REVIEW_DONE"));
-  late.bridge.runStarting("custom");
+  late.bridge.runStarting();
   late.ends("Review passed.");
   assert.deepEqual(late.reports.map((report) => [report.reason, report.readThrough]), [["ended", 2]], "Q2 was still owed, as the report says");
 
   // Its final result says which of its parent's messages it had read; a newer one is still owed (Host side).
   const crossing = lead();
-  crossing.bridge.runStarting("user");
+  crossing.bridge.runStarting();
   crossing.setIdle(true);
   crossing.bridge.receive({ type: "message", from: { relation: "parent", id: "alu", name: "alu" }, text: "Q2", number: 2 });
   await crossing.toParent(true);

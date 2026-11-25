@@ -710,6 +710,10 @@ export class ManagedInstance {
     return this.session.control({ type: "observation_delivery", notification }).then(() => undefined);
   }
 
+  async childReceiptsChecked(id: string, handed: number): Promise<void> {
+    await this.session.control({ type: "child_receipts_checked", id, ...(handed < 0 ? {} : { handed }) });
+  }
+
   /** Resolves once the Worker holds the message; it writes it into the conversation at the Agent's next step. */
   deliverWorkMessage(message: WorkMessage): Promise<void> {
     return this.session.control({ type: "work_message", message }).then(() => undefined);

@@ -134,7 +134,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
     ...(value.delivery === undefined ? {} : { delivery: oneOf(value.delivery, ["followUp", "steer"] as const, "Message delivery") }),
     ...(value.done === undefined ? {} : { done: value.done }),
-    ...(value.readThrough === undefined ? {} : { readThrough: nonNegativeInteger(value.readThrough, "Parent messages read") }),
+    ...(value.readThrough === undefined ? {} : { readThrough: settledNumber(value.readThrough, "Parent messages read") }),
   };
 }
 
@@ -150,7 +150,7 @@ export function parseWorkMessage(raw: unknown): WorkMessage {
       type: "message", from, text: boundedString(value.text, MAX_DOCK_TOOL_MESSAGE_CHARS, "Work message text"),
       ...(value.done === true ? { done: true as const } : {}),
       ...(value.number === undefined ? {} : { number: positiveInteger(value.number, "Work message number") }),
-      ...(value.settlesThrough === undefined ? {} : { settlesThrough: nonNegativeInteger(value.settlesThrough, "Messages settled") }),
+      ...(value.settlesThrough === undefined ? {} : { settlesThrough: settledNumber(value.settlesThrough, "Messages settled") }),
     };
   }
   exactKeys(value, ["type", "from", "reason", "error", "lastWords", "settlesThrough"], "Work message");
@@ -228,7 +228,7 @@ export function parseDockToolsResult(raw: unknown): void {
   if (value.type === "interrupt" || value.type === "stop") {
     exactKeys(value, ["type", "instance", "settlesThrough"], "Worker control result");
     validateObservedStatus(value.instance);
-    if (value.settlesThrough !== undefined) nonNegativeInteger(value.settlesThrough, "Messages taken back");
+    if (value.settlesThrough !== undefined) settledNumber(value.settlesThrough, "Messages taken back");
     return;
   }
   if (value.type === "system_catalog") {
@@ -399,6 +399,8 @@ function optionalString(raw: unknown, limit: number): string | undefined {
   return boundedString(raw, limit, "Optional value", true);
 }
 function positiveInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 1) throw new Error(`${label} must be a positive integer`); return raw as number; }
+/** Before a first assignment an owner-prompted child can report, but that report answers no work. */
+function settledNumber(raw: unknown, label: string): number { return raw === -1 ? -1 : nonNegativeInteger(raw, label); }
 function nonNegativeInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 0) throw new Error(`${label} must be a non-negative integer`); return raw as number; }
 function stringArray(raw: unknown, maxItems: number, maxChars: number, label: string): string[] {
   if (!Array.isArray(raw) || raw.length > maxItems) throw new Error(`${label} must be a bounded array`);

@@ -6,6 +6,7 @@ import { WorkerExtensionUiEndpoint, WorkerUiLifecycleCancelledError } from "./wo
 import type { UiCapability } from "../worker/worker-protocol.js";
 import { runAgentWorker, type WorkerAgent, type WorkerHost } from "../worker/worker-shell.js";
 import type { PiWorkerInitOptions } from "./pi-worker-launch.js";
+import type { ConversationFrame } from "../core/instance-dto.js";
 import type { AgentWorkerState } from "../core/agent-worker.js";
 import { parseWorkRecovery } from "../core/work-progress.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
@@ -76,11 +77,18 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     },
     control: async (control) => {
       if (control.type === "observation_delivery") { dockToolsBridge.deliver(control.notification); return null; }
+      if (control.type === "child_receipts_checked") { dockToolsBridge.children.checked(control.id, control.handed); return null; }
       if (control.type === "work_message") { dockToolsBridge.receive(control.message); return null; }
       return runtime.control(control);
     },
     hostCall: (capability, args) => dispatchHostUi(ui, capability, args),
-    subscribe: (listener) => runtime.subscribe(listener),
+    subscribe: (listener) => runtime.subscribe((event) => {
+      if (event.type === "dock_conversation_frame" && init.taskOperationId) {
+        const frame = event.frame as ConversationFrame;
+        if (frame.type === "message.submitted" && frame.data.operationId === init.taskOperationId) dockToolsBridge.receivedTask();
+      }
+      listener(event);
+    }),
     state: () => captureState(runtime),
     dispose: () => runtime.dispose(),
     diagnostics: runtime.diagnostics,
@@ -117,7 +125,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
-  const allowed = new Set(["workRecovery", "cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "forkFrom", "initialName"]);
+  const allowed = new Set(["workRecovery", "cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "taskOperationId", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "forkFrom", "initialName"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`Worker init contains unknown field ${key}`);
   const text = (input: unknown, limit: number, label: string, optional = false): string | undefined => {
     if (input === undefined && optional) return undefined;
@@ -141,6 +149,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(list(value.excludeTools, "Worker excluded tools") === undefined ? {} : { excludeTools: list(value.excludeTools, "Worker excluded tools") }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, "Worker configuration") }),
     ...(value.child === undefined ? {} : { child: value.child }),
+    ...(value.taskOperationId === undefined ? {} : { taskOperationId: text(value.taskOperationId, 256, "Initial task operation") }),
     ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
     projectTrusted: value.projectTrusted,
     ...(value.parentConversation ? { parentConversation: true } : {}),

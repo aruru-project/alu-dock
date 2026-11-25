@@ -318,6 +318,8 @@ export type AgentWorkerControl =
   | { type: "observation_delivery"; notification: ObservationNotification }
   /** A message from this Work's parent or child Work, or Dock's notice about a child Work. */
   | { type: "work_message"; message: WorkMessage }
+  /** The reopened child's saved inbox resolves uncertain deliveries; no conversation message or turn. */
+  | { type: "child_receipts_checked"; id: string; handed?: number }
   /** Copy the conversation so far into a new session for a child working in `cwd`; returns its file. */
   | { type: "branch_for_child"; cwd: string }
   | { type: "dispose" };

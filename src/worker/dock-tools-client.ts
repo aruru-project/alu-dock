@@ -218,13 +218,15 @@ export function renderChildWait(result: ChildWaitResult): string {
   const received = result.messages.length === 0 ? "" : result.messages.length === 1 ? "A message from a child Work arrived." : `${result.messages.length} messages from child Works arrived.`;
   const head = {
     received,
-    nothing_pending: "No child Work owes you a result: every child Work you handed work to has sent its final result or stopped.",
+    unconfirmed: "The Host stopped before delivery was confirmed.",
+    nothing_pending: result.unconfirmed?.length ? "No confirmed result is pending for this wait." : "No child Work owes you a result: every child Work you handed work to has sent its final result or stopped.",
     message: `Stopped waiting because a message reached you; it follows this result.${received ? ` ${received}` : ""}`,
     timeout: `Stopped waiting after ${result.timeoutSeconds} seconds.${received ? ` ${received}` : ""}`,
     cancelled: `Stopped waiting.${received ? ` ${received}` : ""}`,
   }[result.ended];
   const still = result.waiting.length === 0 ? "" : `\nStill working: ${result.waiting.map((child) => `"${inline(child.name)}" id=${inline(child.id)}`).join(", ")}`;
-  return [head + still, ...result.messages.map((message) => renderWorkMessage(message, result.waiting.some((child) => child.id === message.from.id)))].join("\n\n");
+  const unknown = result.unconfirmed?.map((child) => `"${inline(child.name)}" id=${inline(child.id)}`).join(", ");
+  return [head + still + (unknown ? `\nDelivery unconfirmed for: ${unknown}. You can use dock_send to ask what reached it; the earlier message may already be in its conversation.` : ""), ...result.messages.map((message) => renderWorkMessage(message, result.waiting.some((child) => child.id === message.from.id)))].join("\n\n");
 }
 
 /** Your own model first, then the models the user picked, with what each supports. */

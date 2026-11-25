@@ -62,9 +62,28 @@ export class WorkMessages {
 
   constructor(private readonly port: WorkMessagesPort) {}
 
-  /** A child Work starts owing its parent the result of the task it was created for. */
+  /** Creation alone hands the child no task. */
   childStarted(childId: string, progress: WorkProgress = INITIAL_WORK_PROGRESS): void {
     this.ledgers.set(childId, { ...progress, takingBack: 0, held: [] });
+  }
+
+  async issueFirstTask(id: string): Promise<void> {
+    const ledger = this.ledger(id);
+    if (ledger.next !== 0) return;
+    ledger.next = 1;
+    await this.save(id, ledger, "pre_effect");
+  }
+
+  restoreHanded(id: string, handed: number): void {
+    const ledger = this.ledger(id);
+    ledger.handed = Math.max(ledger.handed, handed);
+  }
+
+  async receivedFirstTask(id: string): Promise<void> {
+    const ledger = this.ledger(id);
+    if (ledger.handed >= 0) return;
+    ledger.handed = 0;
+    await this.save(id, ledger);
   }
 
   /** The source's own child Work that `target` names, by ID, Main's ID, key, name or ID prefix. */
@@ -89,7 +108,7 @@ export class WorkMessages {
       const done = request.done === true;
       await this.deliver(parent, { type: "message", from: this.childSender(source), text: request.message, ...(done ? { done, settlesThrough } : {}) }, () => {
         // Before anything queued after it is decided, such as Dock's notice that this child left.
-        if (done && ledger) {
+        if (done && ledger && settlesThrough > ledger.answered) {
           ledger.answered = Math.max(ledger.answered, settlesThrough);
           return this.save(source.id, ledger);
         }
@@ -105,7 +124,8 @@ export class WorkMessages {
   async toChild(parent: WorkParent, text: string, child: ManagedInstance): Promise<WorkMessageResult> {
     if (child.snapshot().lifecycle !== "active") throw new Error("That child Work is no longer running, so it cannot receive messages. Check it with dock_list.");
     const ledger = this.ledger(child.id);
-    const number = ledger.next++;
+    const number = Math.max(1, ledger.next); // 0 belongs only to the initial spawn prompt.
+    ledger.next = number + 1;
     await this.deliver(child, async () => {
       // Never send a number another Host run could reuse.
       await this.save(child.id, ledger, "pre_effect");
@@ -224,7 +244,7 @@ export class WorkMessages {
 
   private ledger(childId: string): Ledger {
     let ledger = this.ledgers.get(childId);
-    if (!ledger) this.ledgers.set(childId, ledger = newLedger(0));
+    if (!ledger) this.ledgers.set(childId, ledger = { ...INITIAL_WORK_PROGRESS, takingBack: 0, held: [] });
     return ledger;
   }
 
@@ -253,9 +273,4 @@ export class WorkMessages {
     void tail.finally(() => { if (this.deliveries.get(recipient.id) === tail) this.deliveries.delete(recipient.id); });
     return delivery;
   }
-}
-
-/** A child Work's ledger: its task, number 0, reached it; `answered` says whether that is settled. */
-function newLedger(answered: number): Ledger {
-  return { ...INITIAL_WORK_PROGRESS, answered, takingBack: 0, held: [] };
 }

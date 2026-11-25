@@ -208,7 +208,7 @@ export async function runAgentWorker<Init>(options: AgentWorkerOptions<Init>): P
     diagnostics: running.diagnostics.map((item) => boundedError(item)),
     ...(running.modelFallbackMessage === undefined ? {} : { modelFallbackMessage: running.modelFallbackMessage }),
     ...(running.persistedName === undefined ? {} : { persistedName: running.persistedName }),
-    ...(running.recoveredChildReceipts?.length ? { recoveredChildReceipts: running.recoveredChildReceipts } : {}),
+    ...(running.recoveredChildReceipts ? { recoveredChildReceipts: running.recoveredChildReceipts } : {}),
     pid: process.pid,
   });
 

@@ -721,7 +721,7 @@ function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
 
 function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
   const value = record(raw, "Worker Agent control");
-  const type = oneOf(value.type, ["activate", "resolve_session_target", "resolve_file_source", "wait_for_idle", "observation_delivery", "work_message", "branch_for_child", "dispose"], "Worker Agent control type");
+  const type = oneOf(value.type, ["activate", "resolve_session_target", "resolve_file_source", "wait_for_idle", "observation_delivery", "work_message", "child_receipts_checked", "branch_for_child", "dispose"], "Worker Agent control type");
   if (type === "resolve_file_source") {
     exactKeys(value, ["type", "kind", "ref"], "Worker source resolution");
     const kind = oneOf(value.kind, ["published", "resource"], "Worker file source kind");
@@ -730,6 +730,10 @@ function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
   if (type === "resolve_session_target") { exactKeys(value, ["type", "sessionFile"], "Worker Agent control"); return { type, sessionFile: boundedString(value.sessionFile, 16_384, "Session file") }; }
   if (type === "observation_delivery") { exactKeys(value, ["type", "notification"], "Worker Agent control"); return { type, notification: parseObservationNotification(value.notification) }; }
   if (type === "work_message") { exactKeys(value, ["type", "message"], "Worker Agent control"); return { type, message: parseWorkMessage(value.message) }; }
+  if (type === "child_receipts_checked") {
+    exactKeys(value, ["type", "id", "handed"], "Checked child receipts");
+    return { type, id: boundedString(value.id, 128, "Child ID"), handed: optionalNonNegativeInteger(value.handed, "Received number") };
+  }
   if (type === "branch_for_child") { exactKeys(value, ["type", "cwd"], "Worker Agent control"); return { type, cwd: privateSourcePath(value.cwd) }; }
   exactKeys(value, ["type"], "Worker Agent control"); return { type };
 }
@@ -881,8 +885,8 @@ function parseRecoveredChildReceipts(raw: unknown): RecoveredChildReceipt[] {
   if (!Array.isArray(raw)) throw new Error("Invalid recovered child receipts");
   return raw.map((item) => {
     const value = record(item, "Recovered child receipt");
-    exactKeys(value, ["id", "answered", "closed"], "Recovered child receipt");
-    return { id: boundedString(value.id, 128, "Child ID"), answered: optionalNonNegativeInteger(value.answered, "Answered number"), closed: optionalNonNegativeInteger(value.closed, "Closed number") };
+    exactKeys(value, ["id", "handed", "answered", "closed"], "Recovered child receipt");
+    return { id: boundedString(value.id, 128, "Child ID"), handed: optionalNonNegativeInteger(value.handed, "Received number"), answered: optionalNonNegativeInteger(value.answered, "Answered number"), closed: optionalNonNegativeInteger(value.closed, "Closed number") };
   });
 }
 

@@ -76,6 +76,63 @@ test("a reopened parent waits only for newer work, and stopping a child whose re
   assert.equal(remaining.workProgress?.answered, 0, "Another Host restart must retain the result taken by dock_wait");
 });
 
+// #681: merely creating a child used to wake its parent with a missing-result notice when stopped.
+test("an owner can talk to a newly created child and stop it without reporting an assignment to its parent", { timeout: 45_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-unassigned-" });
+  const { record: parent } = saved(team, "parent");
+  await new FileCatalogStore(join(team.root, "catalog.json")).commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "previous", instances: [parent] }, { kind: "fixture", effect: "pre_effect" });
+  const client = await team.startHost();
+  await client.reopen(parent.id, "open-parent");
+  const child = await client.create(team.cwd, "unassigned", "create-only", undefined, undefined, undefined, { parentId: parent.id });
+  const { coordinator } = team.providers;
+  await client.prompt(child.id, "A question from the owner, not an assignment.");
+  (await coordinator.request(0)).text("Answer for the owner.");
+  await waitFor(async () => (await client.status(child.id)).execution === "idle", "Child did not settle");
+  await client.stop(child.id, "stop-unassigned");
+  await client.prompt(parent.id, "A question for the parent.");
+  const reply = await coordinator.request(1);
+  assert.match(JSON.stringify(reply.body.messages?.at(-1)?.content), /A question for the parent/);
+  assert.doesNotMatch(JSON.stringify(reply.body.messages), /异常停止/);
+  reply.text("Answer for the owner.");
+});
+
+// #681: the child saved the new message just before the Host could record delivery. A reserved
+// number alone looks identical on the parent, even for a message that never reached its child.
+test("opening interrupted children distinguishes a received assignment from a number reserved before delivery", { timeout: 45_000 }, async context => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-child-inbox-" });
+  const { record: parent } = saved(team, "parent");
+  const instances = [parent];
+  for (const id of ["reviewer", "not-sent"]) {
+    const { record, session } = saved(team, id);
+    instances.push({ ...record, parentId: parent.id, childGrant: { role: "helper" },
+      workProgress: { next: 2, handed: 0, answered: 0, closed: -1 } });
+    if (id === "reviewer") session.appendCustomEntry("dock-work-received", { workId: id, message: {
+      type: "message", from: { relation: "parent", id: parent.id, name: "parent" }, text: "Review the new change.", number: 1,
+    } });
+  }
+  await new FileCatalogStore(join(team.root, "catalog.json")).commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "previous", instances }, { kind: "fixture", effect: "pre_effect" });
+  const client = await team.startHost();
+  await client.reopen(parent.id, "open-parent");
+  await client.prompt(parent.id, "Check the reviews.");
+  const { coordinator } = team.providers;
+  (await coordinator.request(0)).tools({ id: "before", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
+  const before = await coordinator.request(1);
+  assert.match(String(before.body.messages?.at(-1)?.content), /delivery unconfirmed/i);
+  assert.equal((await client.status("reviewer")).lifecycle, "host_lost");
+  await client.reopen("reviewer", "inspect-reviewer");
+  await client.reopen("not-sent", "inspect-not-sent");
+  assert.ok(JSON.stringify((await client.history("reviewer")).entries).includes("Review the new change."));
+  before.tools({ id: "after", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
+  const after = await coordinator.request(2);
+  assert.equal(String(after.body.messages?.at(-1)?.content).split("Still working: ")[1], '"reviewer" id=reviewer');
+  after.text("Waiting for the new review.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "Parent did not settle");
+  await client.stop("reviewer", "stop-interrupted-review");
+  const notice = await coordinator.request(3);
+  assert.match(JSON.stringify(notice.body.messages?.at(-1)?.content), /reviewer/);
+  notice.text("Saw the stop.");
+});
+
 test("after Main restarts the assistant's status keeps the latest note and credits the result she received", { timeout: 45_000 }, async context => {
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-receipts-", assistant: true });
   const { record: parent, session } = saved(team, "assistant"), { record: child } = saved(team, "reviewer");

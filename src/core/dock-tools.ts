@@ -45,6 +45,9 @@ export function parseChildModelEntries(input: unknown): ModelRef[] {
   });
 }
 
+/** Identifies spawn's first prompt on the child's Machine, including when Main routes both steps. */
+export function childTaskOperation(creationOperationId: string): string { return `task:${creationOperationId}`; }
+
 /** Who sent a Work message, as its recipient knows them. */
 export interface WorkMessageSender {
   relation: "parent" | "child";

@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { ManagedInstance } from "../core/managed-instance.js";
-import type { DockChildStart } from "../core/dock-tools.js";
+import { childTaskOperation, type DockChildStart } from "../core/dock-tools.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
 import { createWorkerInstance, type WorkerInstanceOptions } from "../worker/create-worker-instance.js";
@@ -41,7 +41,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     ...(tools === undefined ? {} : { tools }),
     ...(excludeTools === undefined ? {} : { excludeTools }),
     ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
-    ...(child === undefined ? {} : { child: child.role }),
+    ...(child === undefined ? {} : { child: child.role, ...(options.creationOperationId ? { taskOperationId: childTaskOperation(options.creationOperationId) } : {}) }),
     ...(child?.allowedTools === undefined ? {} : { allowedTools: child.allowedTools }),
     projectTrusted: options.projectTrusted,
     ...(sessionFile === undefined ? {} : { sessionFile: resolve(sessionFile) }),

@@ -1,4 +1,4 @@
-import { ASSISTANT_CHILD_THINKING_LEVEL, dockMessageText } from "../core/dock-tools.js";
+import { ASSISTANT_CHILD_THINKING_LEVEL, childTaskOperation, dockMessageText } from "../core/dock-tools.js";
 import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
 import { MISSING_WORKING_DIRECTORY } from "../core/local-path.js";
@@ -91,7 +91,7 @@ export async function spawnDockWorker(
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
   let sent: Awaited<ReturnType<typeof port.send>>;
   try {
-    sent = await port.send({ operationId: systemToolOperation(request.operationId, "task"), instanceId: created.instance.id, message: dockMessageText(source.displayName, request.task), delivery: "followUp" });
+    sent = await port.send({ operationId: childTaskOperation(childCreationOperation(request.operationId)), instanceId: created.instance.id, message: dockMessageText(source.displayName, request.task), delivery: "followUp" });
   } catch (error) {
     // The child exists; an interrupted response cannot prove the task was never accepted.
     return { type: "spawn", instance: created.instance, taskStatus: "failed", error: `Worker created, but task acceptance was not confirmed. Inspect this worker before sending the task again. ${error instanceof Error ? error.message : String(error)}` };

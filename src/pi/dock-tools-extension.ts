@@ -76,10 +76,8 @@ type UnreportedStop = Omit<Extract<DockToolsRequest, { type: "unreported_stop" }
 class OwedResult {
   /** From the task or a parent message until a final result reaches the parent, by any call. */
   private owed = false;
-  /** The first prompt a child Work gets is the task it was created for; later ones are the user's own. */
-  private taskSeen = false;
   /** The number of the parent's latest message that went into the conversation. */
-  private read = 0;
+  private read = -1;
   /** This turn carries the parent's work: the task, a parent message, or for a lead its own child Works' work. */
   private carriesParentWork = false;
   /** The last top-level call of the turn so far delivered a message to the parent. */
@@ -95,26 +93,17 @@ class OwedResult {
   constructor(private readonly lead: boolean) {}
 
   restore(progress: WorkProgress, parentRead: number): void {
-    this.taskSeen = true;
-    this.read = Math.min(parentRead, progress.next - 1);
-    this.owed = Math.max(progress.answered, progress.closed) < Math.max(progress.handed, this.read);
+    this.read = Math.max(parentRead, progress.handed >= 0 ? 0 : -1);
+    this.owed = Math.max(progress.answered, progress.closed) < Math.max(progress.handed, parentRead);
   }
 
   /** Sent with a final result: a newer parent message is still owed after it (card #674). */
   get parentMessagesRead(): number { return this.read; }
 
-  /** A turn starts with the user's prompt; only the first is the task. */
-  userPrompt(): void {
-    if (this.taskSeen) return;
-    this.taskSeen = true;
-    this.owed = true;
-    this.parentWork();
-  }
-
   /** A parent message went into the conversation. New work from the parent is owed a report again. */
   parentMessage(number: number | undefined): void {
     this.owed = true;
-    if (number !== undefined && number > this.read) this.read = number;
+    this.read = Math.max(this.read, number ?? 0);
     this.parentWork();
   }
 
@@ -233,7 +222,7 @@ export class DockToolsBridge {
   restore(recovery: WorkRecovery) {
     this.children.restoreFromHost(recovery.children);
     const restored = this.receipts?.restore(recovery, this.children);
-    if (recovery.own) this.owed?.restore(recovery.own, restored?.parentRead ?? 0);
+    if (recovery.own) this.owed?.restore(recovery.own, restored?.parentRead ?? -1);
     return restored?.corrections;
   }
 
@@ -329,11 +318,15 @@ export class DockToolsBridge {
   /** Pi defers what is sent while it settles or binds a runtime; deliver once it is done. */
   deliverWorkMessagesSoon(): void { setTimeout(() => this.deliverWorkMessages(), 0); }
 
-  runStarting(messageType: "user" | "custom"): void {
+  receivedTask(): void {
+    this.receipts?.receiveTask();
+    this.owed?.parentMessage(0);
+  }
+
+  runStarting(): void {
     // The new turn answers whatever waits in the conversation.
     this.stoppedByUser = false;
     this.turnRequested = false;
-    if (messageType === "user") this.owed?.userPrompt();
   }
 
   messageStarted(message: ObservedMessage): void {
@@ -554,7 +547,7 @@ function registerWorkMessages(pi: ExtensionAPI, bridge: DockToolsBridge): void {
   pi.on("agent_settled", (event) => bridge.settled(event.aborted));
   pi.on("session_compact", () => bridge.deliverWorkMessagesSoon());
   pi.on("session_compact_failed", () => bridge.deliverWorkMessagesSoon());
-  pi.on("before_agent_start", (event) => { bridge.runStarting(event.messageType); });
+  pi.on("before_agent_start", () => bridge.runStarting());
   pi.on("message_start", (event) => bridge.messageStarted(event.message as ObservedMessage));
   pi.on("message_end", (event) => { bridge.messageEnded(event.message as ObservedMessage); });
   pi.on("tool_execution_start", (event) => bridge.toolStarted(event.toolCallId, event.parentToolCallId));

@@ -224,6 +224,8 @@ test("what a child Work owes its parent is settled by the numbers of the message
   const helper = new ManagedInstance({ id: "helper", name: "Helper", cwd: process.cwd(), session: new DelayedAgentWorkerConnection("helper"), parentId: parent.id });
   works.set(helper.id, helper);
   messages.childStarted(helper.id);
+  await messages.issueFirstTask(helper.id);
+  await messages.receivedFirstTask(helper.id);
   parentView.noteWork({ type: "spawn", taskStatus: "accepted", instance: { ...child, id: helper.id, name: "Helper" } });
   sessions.parent.failWorkMessages = 1;
   messages.childLeaving(helper);
@@ -245,6 +247,7 @@ test("a parent whose interrupt was refused still hears when its child Work stops
   registry.bindDockToolsMutationPort({ interrupt: async () => { throw new Error("The Work is busy taking back its Queue."); } } as never);
   const parent = await registry.create({ operationId: "parent", cwd: process.cwd(), name: "Coordinator" });
   const child = await registry.create({ operationId: "child", cwd: process.cwd(), name: "Reviewer", child: { parentId: parent.id } });
+  await registry.invokeDockTool(parent.id, { type: "send", operationId: "assign", message: "Review it.", target: child.id });
   await assert.rejects(registry.invokeDockTool(parent.id, { type: "interrupt", operationId: "interrupt", target: child.id }), /busy/u);
   await registry.invokeDockTool(child.id, { type: "unreported_stop", reason: "ended" });
   assert.deepEqual(sessions.get(parent.id)!.workMessages.map((message) => message.type), ["child_stopped"]);

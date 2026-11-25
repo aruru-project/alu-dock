@@ -13,6 +13,7 @@ export interface WorkNote {
   lastSaid?: string;
   /** It still owes her a result for work she handed it. */
   owes?: boolean;
+  unconfirmed?: boolean;
 }
 
 export interface StatusInput {
@@ -54,7 +55,7 @@ export function renderStatus(input: StatusInput): string {
       for (const work of mine.slice(0, MAX_LISTED_WORKS)) lines.push(`- ${describeWork(work, input.now, input.notes.get(work.id), work.parentId === input.selfId)}`);
       if (mine.length > MAX_LISTED_WORKS) lines.push(`- 还有 ${mine.length - MAX_LISTED_WORKS} 个，用 dock_list 看。`);
       // Each idle child Work keeps a process and a line here until she stops it.
-      if (mine.some((work) => work.parentId === input.selfId && work.lifecycle === "active" && work.execution === "idle" && input.notes.get(work.id)?.owes !== true)) {
+      if (mine.some((work) => work.parentId === input.selfId && work.lifecycle === "active" && work.execution === "idle" && !input.notes.get(work.id)?.owes && !input.notes.get(work.id)?.unconfirmed)) {
         lines.push("空闲的子 Work 里，活已经了结、后面用不到的，用 dock_stop 停掉。");
       }
     }
@@ -75,7 +76,7 @@ function describeWork(work: ObservedInstanceStatus, now: Date, note: WorkNote | 
     : work.execution === "running" ? `在干活（${since}）`
     : work.execution === "failed" ? `出错停下了（${since}前）`
     : `空闲（${since}前停下）`;
-  const owes = child && note?.owes ? "；还欠你结果" : "";
+  const owes = (child && note?.owes ? "；还欠你结果" : "") + (child && note?.unconfirmed ? "；中断前最后一条派活可能已送达，可以用 dock_send 问它收到了什么" : "");
   const said = note?.lastSaid ? `；最近说：${note.lastSaid}` : "";
   return `${child ? "子 Work" : "Work"}${name}${state}${owes}${said}`;
 }

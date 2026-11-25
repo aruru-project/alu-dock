@@ -5,6 +5,7 @@ import type { ChildMessages } from "../worker/child-messages.js";
 import type { WorkMessage } from "../core/dock-tools.js";
 import { WORK_MESSAGE_TYPE, workMessageEntry } from "../worker/dock-tools-client.js";
 
+const TASK_RECEIVED = "dock-work-task-received";
 const RECEIVED = "dock-work-received";
 const IN_WAIT = "dock-work-in-wait";
 
@@ -18,6 +19,8 @@ export class WorkMessageReceipts {
   receive(message: WorkMessage): void {
     this.ids.set(message, this.session().appendCustomEntry(RECEIVED, { workId: this.workId, message }));
   }
+
+  receiveTask(): void { this.session().appendCustomEntry(TASK_RECEIVED, { workId: this.workId }); }
 
   id(message: WorkMessage): string | undefined { return this.ids.get(message); }
 
@@ -39,9 +42,11 @@ export class WorkMessageReceipts {
     const session = this.session();
     const pending = new Map<string, WorkMessage>();
     const waits = new Map<string, string[]>();
-    let parentRead = 0;
+    let parentRead = -1;
     for (const entry of session.getBranch()) {
       if (entry.id === notes?.checkpoint) afterCheckpoint = true;
+      if (entry.type === "custom" && entry.customType === TASK_RECEIVED && (entry.data as { workId?: string })?.workId === this.workId
+        && recovery.own && recovery.own.next > 0) parentRead = Math.max(parentRead, 0);
       if (entry.type === "custom" && entry.customType === RECEIVED) {
         const data = entry.data as { workId?: unknown; message?: unknown } | undefined;
         if (data?.workId !== this.workId) continue;
@@ -60,7 +65,9 @@ export class WorkMessageReceipts {
             }
           }
         }
-        if (message.from.relation === "parent" && message.type === "message") parentRead = Math.max(parentRead, message.number ?? 0);
+        if (message.from.relation === "parent" && message.type === "message" && message.number !== undefined && recovery.own && message.number < recovery.own.next) {
+          parentRead = Math.max(parentRead, message.number);
+        }
       } else if (entry.type === "custom_message" && entry.customType === WORK_MESSAGE_TYPE) {
         const id = (entry.details as { receiptId?: string } | undefined)?.receiptId;
         if (id !== undefined) pending.delete(id);
@@ -77,6 +84,7 @@ export class WorkMessageReceipts {
       const entry = workMessageEntry(message, children.owes(message.from.id), id);
       session.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
     }
+    if (recovery.own && parentRead > recovery.own.handed) corrections.set(this.workId, { id: this.workId, handed: parentRead });
     return { parentRead, corrections: [...corrections.values()] };
   }
 }

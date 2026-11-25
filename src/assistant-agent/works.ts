@@ -52,6 +52,11 @@ export class WorkDesk {
     return corrections;
   }
 
+  childReceiptsChecked(id: string, handed?: number): void {
+    this.children.checked(id, handed);
+    this.updateOwed();
+  }
+
   get notes(): ReadonlyMap<string, WorkNote> { return this.works; }
   /** The child Work still owes her the result of the latest work she handed it. */
   owes(id: string): boolean { return this.children.owes(id); }
@@ -140,7 +145,9 @@ export class WorkDesk {
 
   private updateOwed(): void {
     const owed = new Set(this.children.waiting.map((child) => child.id));
+    const unknown = new Set(this.children.unconfirmed.map((child) => child.id));
     for (const [id, work] of this.works) {
+      if (unknown.has(id)) work.unconfirmed = true; else delete work.unconfirmed;
       if (owed.has(id)) work.owes = true; else delete work.owes;
       if (work.onNamedMachine) Object.assign(work, this.children.progress(id));
     }

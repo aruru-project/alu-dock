@@ -1,3 +1,4 @@
+import { childTaskOperation } from "../core/dock-tools.js";
 import type { RecoveredChildReceipt, WorkRecovery } from "../core/work-progress.js";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_ASSISTANT_DISPLAY_NAME } from "../core/assistant.js";
@@ -738,7 +739,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       if (child.parentId !== record.id || child.childGrant?.mainParent || child.lifecycle !== "host_lost" || !child.workProgress) return [];
       return [{ id: child.mainIdentity?.child ?? child.id, name: child.name ?? child.id, ...child.workProgress }];
     });
-    let receipts: RecoveredChildReceipt[] = [];
+    let receipts: RecoveredChildReceipt[] | undefined;
     const candidate = await this.factory({
       onRecoveredChildReceipts: (received) => { receipts = received; },
       id: record.id,
@@ -791,8 +792,12 @@ export class DockRegistry implements LocalDockToolsHostPort {
       await candidate.disposeUnpublished().catch(() => {});
       throw new Error("Reopen factory returned an identity outside the catalog transaction");
     }
+    const previousProgress = record.workProgress;
+    const own = previousProgress && { ...previousProgress };
+    const received = receipts?.find((receipt) => receipt.id === record.id)?.handed;
+    if (own && received !== undefined && received < own.next) own.handed = Math.max(own.handed, received);
     candidate.restoreChildState({
-      ...(record.workProgress === undefined ? {} : { workProgress: record.workProgress }),
+      ...(own === undefined ? {} : { workProgress: own }),
       ...(record.mainIdentity === undefined ? {} : { mainIdentity: record.mainIdentity }),
     });
     const previous = this.instances.get(record.id);
@@ -801,8 +806,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const publish = async () => {
       if (child) await this.followSpeedOnStart(candidate);
       this.bindInstanceCatalog(candidate);
-      const corrected = await this.catalog.reopen(candidate.catalogRecord(), operationId, receipts);
+      const corrected = await this.catalog.reopen(candidate.catalogRecord(), operationId, receipts ?? []);
       for (const [id, progress] of corrected) this.workMessages.childStarted(id, progress);
+      if (own && received !== undefined) this.workMessages.restoreHanded(record.id, own.handed);
       candidate.markCatalogCommitted();
       this.instances.set(record.id, candidate);
     };
@@ -815,6 +821,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
 
     this.trackInstanceForObservation(candidate);
+    if (receipts && child && !record.childGrant?.mainParent && own && previousProgress
+      && previousProgress.next - 1 > Math.max(previousProgress.handed, previousProgress.answered, previousProgress.closed)) {
+      // This is a receipt, not work. A disappearing parent does not veto an already committed reopen.
+      void this.instances.get(child.parentId)?.childReceiptsChecked(record.mainIdentity?.child ?? record.id, own.handed).catch(() => {});
+    }
     for (const listener of this.runtimeReopenListeners) {
       try { listener(record.id); } catch { /* A stale client cannot roll back a committed reopen. */ }
     }
@@ -962,6 +973,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     return request.target !== undefined && this.workMessages.ownChild(source, request.target) !== undefined;
   }
 
+  issueFirstTask(childId: string): Promise<void> { return this.workMessages.issueFirstTask(childId); }
+
   async noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): Promise<void> {
     if (result.type !== "spawn") return;
     const creation = childCreationOperation(spawnOperationId);
@@ -1106,8 +1119,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
     // Through the Host's Dock tools port: a SubHost Work's watches live on Main.
     const detachSink = this.dockToolsHostPort.attachObservationSink(instance.id, (notification) => instance.deliverObservation(notification));
     this.instanceObservationSinkDetachments.set(instance.id, detachSink);
-    this.instanceObservationSubscriptions.set(instance.id, instance.subscribe(() => {
+    this.instanceObservationSubscriptions.set(instance.id, instance.subscribe((event) => {
       if (this.instances.get(instance.id) !== instance) return;
+      if (instance.parentId && event.type === "message.submitted" && event.data.operationId === childTaskOperation(instance.creationOperationId)) {
+        void this.workMessages.receivedFirstTask(instance.id).catch(() => {}); // Post-effect write failure faults the catalog.
+      }
       const snapshot = instance.snapshot();
       // Children leave with their parent however it stops. The owning Host observes
       // the real runtime lifecycle, never Main's offline projection.
