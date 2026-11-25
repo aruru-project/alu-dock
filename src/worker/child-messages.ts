@@ -1,4 +1,4 @@
-import type { WorkRecovery } from "../core/work-progress.js";
+import { unconfirmedDelivery, type WorkRecovery } from "../core/work-progress.js";
 import type { DockToolsResult, WorkMessage } from "../core/dock-tools.js";
 
 export const DEFAULT_WAIT_SECONDS = 1_800;
@@ -55,7 +55,8 @@ export class ChildMessages {
   }
 
   restoreFromHost(children: WorkRecovery["children"]): void {
-    this.restore(children.map(({ id, name, handed, answered, closed, next }) => ({ id, name, handed, settled: Math.max(answered, closed), unconfirmed: next - 1 })));
+    this.restore(children.map((child) => ({ id: child.id, name: child.name, handed: child.handed,
+      settled: Math.max(child.answered, child.closed), unconfirmed: unconfirmedDelivery(child) })));
   }
 
   checked(id: string, handed = -1): void {

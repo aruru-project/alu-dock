@@ -1,34 +1,11 @@
 import assert from "node:assert/strict";
-import { fork } from "node:child_process";
-import { once } from "node:events";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 
-import { DockClient } from "../src/control/dock-client.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { launchHost, startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
-
-function launchHost(team: { root: string; cwd: string; environment: NodeJS.ProcessEnv }, signal: AbortSignal) {
-  const child = fork(new URL("./fixtures/native-team-host.js", import.meta.url), [team.root], {
-    cwd: team.cwd, env: team.environment, execArgv: [], stdio: ["ignore", "ignore", "inherit", "ipc"],
-  });
-  const exit = once(child, "exit");
-  return {
-    ready: Promise.race([once(child, "message", { signal }), exit]).then(([message]) => assert.equal(message, "ready")),
-    client: new DockClient({ socketPath: join(team.root, "dock.sock") }),
-    async crash() {
-      child.kill("SIGKILL");
-      assert.equal((await exit)[1], "SIGKILL");
-    },
-    async stop() {
-      if (child.connected) child.disconnect();
-      const watchdog = setTimeout(() => child.kill("SIGKILL"), 8_000);
-      try { await exit; } finally { clearTimeout(watchdog); }
-    },
-  };
-}
 
 // Card #681: after systemd-oomd killed the Host, the coordinator lost all four children despite their intact sessions.
 test("after a Host is killed the reopened parent finds its interrupted child and gets the result from its original conversation", { timeout: 90_000 }, async (context) => {

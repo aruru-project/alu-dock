@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,6 +169,27 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: models }));
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: names[0], defaultModel: "fixture", defaultThinkingLevel: options.thinkingLevel ?? "high", compaction: { enabled: false }, retry: { enabled: false }, ...options.settings }));
   return team;
+}
+
+/** Launch this fixture's Host separately so a test can interrupt it without running shutdown. */
+export function launchHost(team: { root: string; cwd: string; environment: NodeJS.ProcessEnv }, signal: AbortSignal) {
+  const child = fork(new URL("../fixtures/native-team-host.js", import.meta.url), [team.root], {
+    cwd: team.cwd, env: team.environment, execArgv: [], stdio: ["ignore", "ignore", "inherit", "ipc"],
+  });
+  const exit = once(child, "exit");
+  return {
+    ready: Promise.race([once(child, "message", { signal }), exit]).then(([message]) => assert.equal(message, "ready")),
+    client: new DockClient({ socketPath: join(team.root, "dock.sock") }),
+    async crash() {
+      child.kill("SIGKILL");
+      assert.equal((await exit)[1], "SIGKILL");
+    },
+    async stop() {
+      if (child.connected) child.disconnect();
+      const watchdog = setTimeout(() => child.kill("SIGKILL"), 8_000);
+      try { await exit; } finally { clearTimeout(watchdog); }
+    },
+  };
 }
 
 export async function trustOnce<T>(operation: (trust?: { challengeId: string; decision: "trust_once" }) => Promise<T>): Promise<T> {

@@ -3,6 +3,8 @@ export interface WorkProgress {
   /** Never reused, even if a delivery fails. */
   next: number;
   handed: number;
+  /** On reopen the Worker checked its saved inbox for every reservation through this number. */
+  checkedThrough?: number;
   /** The latest number its delivered final results answered. */
   answered: number;
   /** The latest taken back or accounted for by a notice that the child left. */
@@ -17,14 +19,21 @@ export interface WorkRecovery {
   children: Array<WorkProgress & { id: string; name: string }>;
 }
 
+/** A reserved number is uncertain only until there is delivery, settlement, or an inbox check covering it. */
+export function unconfirmedDelivery(progress: WorkProgress): number | undefined {
+  const last = progress.next - 1;
+  return last > Math.max(progress.handed, progress.answered, progress.closed, progress.checkedThrough ?? -1) ? last : undefined;
+}
+
 export function parseWorkProgress(raw: unknown): WorkProgress {
-  if (!raw || typeof raw !== "object" || Object.keys(raw).some((key) => !(Object.hasOwn(INITIAL_WORK_PROGRESS, key)))) {
+  if (!raw || typeof raw !== "object" || Object.keys(raw).some((key) => key !== "checkedThrough" && !Object.hasOwn(INITIAL_WORK_PROGRESS, key))) {
     throw new Error("Invalid child Work progress");
   }
-  const { next, handed, answered, closed } = raw as WorkProgress;
+  const { next, handed, answered, closed, checkedThrough } = raw as WorkProgress;
+  if (checkedThrough !== undefined && (!Number.isSafeInteger(checkedThrough) || checkedThrough < 0 || checkedThrough >= next)) throw new Error("Invalid checked child Work number");
   if (![next, handed, answered, closed].every(Number.isSafeInteger) || next < 0 || handed < -1 || answered < -1 || closed < -1
     || Math.max(handed, answered, closed) >= next) throw new Error("Invalid child Work message numbers");
-  return { next, handed, answered, closed };
+  return { next, handed, answered, closed, ...(checkedThrough === undefined ? {} : { checkedThrough }) };
 }
 
 export function parseWorkRecovery(raw: unknown): WorkRecovery {

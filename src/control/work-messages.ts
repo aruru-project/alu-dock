@@ -74,9 +74,10 @@ export class WorkMessages {
     await this.save(id, ledger, "pre_effect");
   }
 
-  restoreHanded(id: string, handed: number): void {
+  restoreInbox(id: string, progress: WorkProgress): void {
     const ledger = this.ledger(id);
-    ledger.handed = Math.max(ledger.handed, handed);
+    ledger.handed = Math.max(ledger.handed, progress.handed);
+    if (progress.checkedThrough !== undefined) ledger.checkedThrough = Math.max(ledger.checkedThrough ?? -1, progress.checkedThrough);
   }
 
   async receivedFirstTask(id: string): Promise<void> {
@@ -248,8 +249,8 @@ export class WorkMessages {
     return ledger;
   }
 
-  private save(id: string, { next, handed, answered, closed }: Ledger, effect: "pre_effect" | "post_effect" = "post_effect"): Promise<void> | undefined {
-    return this.port.save?.(id, { next, handed, answered, closed }, effect);
+  private save(id: string, { held: _held, takingBack: _takingBack, ...progress }: Ledger, effect: "pre_effect" | "post_effect" = "post_effect"): Promise<void> | undefined {
+    return this.port.save?.(id, progress, effect);
   }
 
   private childSender(child: InstanceSnapshot): WorkMessageSender {

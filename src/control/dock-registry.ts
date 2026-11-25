@@ -1,5 +1,5 @@
 import { childTaskOperation } from "../core/dock-tools.js";
-import type { RecoveredChildReceipt, WorkRecovery } from "../core/work-progress.js";
+import { unconfirmedDelivery, type RecoveredChildReceipt, type WorkRecovery } from "../core/work-progress.js";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_ASSISTANT_DISPLAY_NAME } from "../core/assistant.js";
 import type { SystemService } from "./system-service.js";
@@ -794,6 +794,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     const previousProgress = record.workProgress;
     const own = previousProgress && { ...previousProgress };
+    const checked = previousProgress && receipts ? unconfirmedDelivery(previousProgress) : undefined;
+    if (own && checked !== undefined) own.checkedThrough = checked;
     const received = receipts?.find((receipt) => receipt.id === record.id)?.handed;
     if (own && received !== undefined && received < own.next) own.handed = Math.max(own.handed, received);
     candidate.restoreChildState({
@@ -808,7 +810,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       this.bindInstanceCatalog(candidate);
       const corrected = await this.catalog.reopen(candidate.catalogRecord(), operationId, receipts ?? []);
       for (const [id, progress] of corrected) this.workMessages.childStarted(id, progress);
-      if (own && received !== undefined) this.workMessages.restoreHanded(record.id, own.handed);
+      if (own && (received !== undefined || checked !== undefined)) this.workMessages.restoreInbox(record.id, own);
       candidate.markCatalogCommitted();
       this.instances.set(record.id, candidate);
     };
@@ -821,8 +823,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
 
     this.trackInstanceForObservation(candidate);
-    if (receipts && child && !record.childGrant?.mainParent && own && previousProgress
-      && previousProgress.next - 1 > Math.max(previousProgress.handed, previousProgress.answered, previousProgress.closed)) {
+    if (checked !== undefined && child && !record.childGrant?.mainParent && own) {
       // This is a receipt, not work. A disappearing parent does not veto an already committed reopen.
       void this.instances.get(child.parentId)?.childReceiptsChecked(record.mainIdentity?.child ?? record.id, own.handed).catch(() => {});
     }

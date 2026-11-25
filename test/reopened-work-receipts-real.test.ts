@@ -5,7 +5,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { CatalogInstanceRecord } from "../src/core/catalog.js";
 import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
-import { startNativeTeam } from "./support/native-team.js";
+import { launchHost, startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -111,26 +111,49 @@ test("opening interrupted children distinguishes a received assignment from a nu
     } });
   }
   await new FileCatalogStore(join(team.root, "catalog.json")).commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "previous", instances }, { kind: "fixture", effect: "pre_effect" });
-  const client = await team.startHost();
-  await client.reopen(parent.id, "open-parent");
-  await client.prompt(parent.id, "Check the reviews.");
-  const { coordinator } = team.providers;
-  (await coordinator.request(0)).tools({ id: "before", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
-  const before = await coordinator.request(1);
-  assert.match(String(before.body.messages?.at(-1)?.content), /delivery unconfirmed/i);
-  assert.equal((await client.status("reviewer")).lifecycle, "host_lost");
-  await client.reopen("reviewer", "inspect-reviewer");
-  await client.reopen("not-sent", "inspect-not-sent");
-  assert.ok(JSON.stringify((await client.history("reviewer")).entries).includes("Review the new change."));
-  before.tools({ id: "after", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
-  const after = await coordinator.request(2);
-  assert.equal(String(after.body.messages?.at(-1)?.content).split("Still working: ")[1], '"reviewer" id=reviewer');
-  after.text("Waiting for the new review.");
-  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "Parent did not settle");
-  await client.stop("reviewer", "stop-interrupted-review");
-  const notice = await coordinator.request(3);
-  assert.match(JSON.stringify(notice.body.messages?.at(-1)?.content), /reviewer/);
-  notice.text("Saw the stop.");
+  let host = launchHost(team, context.signal);
+  try {
+    await host.ready;
+    const client = host.client;
+    await client.reopen(parent.id, "open-parent");
+    await client.prompt(parent.id, "Check the reviews.");
+    const { coordinator } = team.providers;
+    (await coordinator.request(0)).tools({ id: "before", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
+    const before = await coordinator.request(1);
+    assert.match(String(before.body.messages?.at(-1)?.content), /delivery unconfirmed/i);
+    assert.equal((await client.status("reviewer")).lifecycle, "host_lost");
+    await client.reopen("reviewer", "inspect-reviewer");
+    await client.reopen("not-sent", "inspect-not-sent");
+    assert.ok(JSON.stringify((await client.history("reviewer")).entries).includes("Review the new change."));
+    before.tools({ id: "after", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
+    const after = await coordinator.request(2);
+    assert.equal(String(after.body.messages?.at(-1)?.content).split("Still working: ")[1], '"reviewer" id=reviewer');
+    after.text("Waiting for the new review.");
+    await waitFor(async () => (await client.status(parent.id)).execution === "idle", "Parent did not settle");
+    // #681 repeated interruption: the latest reservation never reached not-sent. Opening the
+    // parent alone after another real kill must retain that finding, without reusing the number.
+    client.closeActiveConnections();
+    await host.crash();
+    host = launchHost(team, context.signal);
+    await host.ready;
+    await host.client.reopen(parent.id, "open-parent-again");
+    await host.client.prompt(parent.id, "What reviews are still pending?");
+    (await coordinator.request(3)).tools({ id: "again", name: "dock_wait", arguments: { all: true, timeoutSeconds: 1 } });
+    const again = await coordinator.request(4);
+    assert.equal(String(again.body.messages?.at(-1)?.content).split("Still working: ")[1], '"reviewer" id=reviewer');
+    const missing = (await new FileCatalogStore(join(team.root, "catalog.json")).load())!.instances.find(i => i.id === "not-sent")!.workProgress!;
+    assert.deepEqual([missing.next, missing.handed, missing.answered, missing.closed], [2, 0, 0, -1], "Checking an inbox neither reuses a number nor counts the missing assignment as delivered or settled");
+    again.text("Only the received review is pending.");
+    await waitFor(async () => (await host.client.status(parent.id)).execution === "idle", "Parent did not settle");
+    await host.client.reopen("reviewer", "reopen-reviewer-again");
+    await host.client.stop("reviewer", "stop-interrupted-review");
+    const notice = await coordinator.request(5);
+    assert.match(JSON.stringify(notice.body.messages?.at(-1)?.content), /reviewer/);
+    notice.text("Saw the stop.");
+  } finally {
+    host.client.closeActiveConnections();
+    await host.stop();
+  }
 });
 
 test("after Main restarts the assistant's status keeps the latest note and credits the result she received", { timeout: 45_000 }, async context => {
