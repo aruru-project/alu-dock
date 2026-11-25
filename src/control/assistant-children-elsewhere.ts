@@ -85,7 +85,8 @@ export class AssistantChildrenElsewhere implements MainRemoteChildren, RemoteChi
       const { parentId, lifecycle, creationOperationId } = route.snapshot;
       if (parentId === undefined || this.port.local(parentId) === undefined) continue;
       listed.add(creationOperationId);
-      if (lifecycle !== "active" && lifecycle !== "runtime_error") continue;
+      // A SubHost can return with an interrupted child but no process yet. Its parent's Stop still applies.
+      if (lifecycle !== "active" && lifecycle !== "runtime_error" && lifecycle !== "host_lost") continue;
       const child = this.children.get(creationOperationId);
       if (child?.machineId === machineId && this.hers(child, parentId)) {
         child.reported = true;
@@ -104,7 +105,7 @@ export class AssistantChildrenElsewhere implements MainRemoteChildren, RemoteChi
   async retire(parentId: string): Promise<void> {
     for (const [operation, child] of this.children) if (child.parentId === parentId) this.children.delete(operation);
     const elsewhere = this.port.snapshots().filter((work) => work.parentId === parentId && work.hostId !== undefined
-      && this.port.local(work.id) === undefined && (work.lifecycle === "active" || work.lifecycle === "runtime_error"));
+      && this.port.local(work.id) === undefined && (work.lifecycle === "active" || work.lifecycle === "runtime_error" || work.lifecycle === "host_lost"));
     await Promise.allSettled(elsewhere.map(async (work) => {
       // An offline Machine keeps it until it reconnects and Main finds its parent gone.
       if (await this.port.machineAvailable(work.hostId!)) await this.port.stop(work.id);
