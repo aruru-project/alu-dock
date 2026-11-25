@@ -39,6 +39,12 @@ export interface CatalogInterruption {
   at: string;
 }
 
+/** An interrupted child keeps its file; an inactive top-level Work still permits explicit “Open as new”. */
+export function reservesSessionFile(work: { lifecycle: InstanceLifecycle; parentId?: string }): boolean {
+  return work.lifecycle === "active" || work.lifecycle === "stopping"
+    || (work.parentId !== undefined && work.lifecycle !== "stopped");
+}
+
 export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
 
 export interface CatalogInstanceRecord {

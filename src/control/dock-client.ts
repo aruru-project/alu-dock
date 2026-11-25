@@ -1051,8 +1051,15 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if("operationId" in params&&typeof params.operationId==="string"){
     const receipt=record.receipt as {operationId?:unknown}|undefined;
     if(receipt&&receipt.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Receipt operationId does not match request operationId");
-    if((type==="instance.create"||type==="instance.adopt")&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
-    if(type==="instance.adopt"&&snapshots[0]?.executor.sessionFile!==resolvePortableAbsoluteLocalPath((params as Extract<ControlRequest,{type:"instance.adopt"}>["params"]).sessionFile))throw new ProtocolValidationError("invalid_response","Adopted instance session file does not match the request");
+    if(type==="instance.create"&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
+    if (type === "instance.adopt") {
+      const adopt = params as Extract<ControlRequest, { type: "instance.adopt" }>["params"];
+      const opened = snapshots[0];
+      if (!opened || opened.executor.sessionFile !== resolvePortableAbsoluteLocalPath(adopt.sessionFile) || opened.parentId !== adopt.child?.parentId) {
+        throw new ProtocolValidationError("invalid_response", "The opened Work does not match the requested session and parent");
+      }
+      if (!adopt.child && opened.creationOperationId !== adopt.operationId) throw new ProtocolValidationError("invalid_response", "Created instance operationId does not match request operationId");
+    }
     if(type==="instance.reopen"&&record.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Reopen operationId does not match request operationId");
   }
 }

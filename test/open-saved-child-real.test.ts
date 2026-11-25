@@ -46,6 +46,10 @@ test("open a saved child under its original parent, then open the same file agai
   assert.equal(child.executor.sessionFile, file);
   assert.equal(child.execution, "idle");
   assert.deepEqual((await client.tools(child.id)).tools.map(tool => tool.name), ["dock_send"]);
+  // A client with just the file and the parent's ID can do the same thing, without inspecting the catalog.
+  const existing = await client.adopt(file, undefined, undefined, undefined, parent.hostId, { parentId: parent.id, allowedTools: ["read"] });
+  assert.equal(existing.instance.id, child.id);
+  await assert.rejects(client.adopt(file, undefined, undefined, undefined, assistant.hostId, { parentId: assistant.id }), /already belongs/u);
   await open("--allow-tool", "read"); // Existing Work keeps its grants.
   assert.deepEqual((await client.list()).filter(work => work.parentId === parent.id).map(work => work.id), [child.id]);
   assert.deepEqual((await client.tools(child.id)).tools.map(tool => tool.name), ["dock_send"]);

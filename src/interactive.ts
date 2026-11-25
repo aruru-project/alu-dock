@@ -243,26 +243,11 @@ async function createWithNotice(
 }
 
 async function openSavedChild(client: DockClient, selection: NonNullable<OpenDockOptions["savedChild"]>): Promise<InstanceSnapshot> {
-  const works = await client.list("all");
-  const parent = requireHumanTarget(works, selection.parent);
-  const linked = works.filter(work => work.hostId === parent.hostId && work.lifecycle !== "stopped"
-    && work.executor.sessionFile === selection.sessionFile);
-  if (linked.length) {
-    const work = linked[0]!;
-    if (linked.length > 1 || work.parentId !== parent.id) {
-      throw new Error("This file already belongs to other Work. Open it from the Hub; it has not been moved.");
-    }
-    if (!isContinuable(work)) throw new Error(lifecycleActionError(work));
-    process.stdout.write(`Opening the existing child Work ${displayName(work)}. Its tools stay unchanged.\n`);
-    return work.lifecycle === "active" ? work : reopenWithNotice(client, work, selection.sessionFile);
-  }
-  if (parent.lifecycle !== "active") throw new Error(`Resume ${displayName(parent)} before opening its saved child Work.`);
-  process.stdout.write(`Opening the saved conversation as a new child of ${displayName(parent)}…\n`);
-  const work = await adoptSession(client, selection.sessionFile, undefined, parent.hostId, {
+  const parent = requireHumanTarget(await client.list("all"), selection.parent);
+  process.stdout.write(`Opening the saved child Work under ${displayName(parent)}…\n`);
+  return adoptSession(client, selection.sessionFile, undefined, parent.hostId, {
     parentId: parent.id, allowedTools: selection.allowedTools,
   });
-  process.stdout.write(`Opened ${displayName(work)} as new child Work. No task was sent.\n`);
-  return work;
 }
 
 async function adoptSession(
@@ -282,18 +267,17 @@ async function adoptSession(
 async function reopenWithNotice(
   client: DockClient,
   record: InstanceSnapshot,
-  sessionFile?: string,
 ): Promise<InstanceSnapshot> {
   if (!record.reopenable) throw new Error(`${displayName(record)} has no saved session to reopen. Run \`aludock\` and start new work instead.`);
   process.stdout.write(`Reopening ${displayName(record)} from its saved session…\n`);
   const operationId = randomUUID();
   try {
-    return (await client.reopen(record.id, operationId, sessionFile)).instance;
+    return (await client.reopen(record.id, operationId)).instance;
   } catch (error) {
     const challenge = projectTrustChallenge(error, operationId);
     if (!challenge) throw error;
     const decision = await askProjectTrust(challenge.cwd);
-    return (await client.reopen(record.id, operationId, sessionFile, {
+    return (await client.reopen(record.id, operationId, undefined, {
       challengeId: challenge.challengeId,
       decision,
     })).instance;

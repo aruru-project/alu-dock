@@ -9,6 +9,7 @@ import {
   type CatalogCommitPort,
   type CatalogInstanceRecord,
   type CatalogStore,
+  reservesSessionFile,
   validateInstanceKey,
 } from "../core/catalog.js";
 import { AgentModelNotFoundError, AgentStartupTimeoutError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
@@ -610,14 +611,27 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (!this.reopenTargetResolver) throw new Error("Persisted Pi session adoption is unavailable");
     if (!isNativeAbsoluteLocalPath(input.sessionFile)) throw new Error("Pi session file is not an absolute path on this Host");
     const sessionFile = resolve(input.sessionFile);
+    if (input.child) {
+      const { parentId } = input.child;
+      const linked = this.sessionFileReferences(sessionFile);
+      const owner = linked[0];
+      if (owner && (linked.length !== 1 || owner.parentId !== parentId)) {
+        throw new Error("This session already belongs to another Work. Open that Work in the Hub; the file has not been moved.");
+      }
+      if (this.instances.get(parentId)?.lifecycle !== "active") {
+        throw new Error("Resume the original parent Work in the Hub, then open this saved child again.");
+      }
+      if (owner) {
+        // The parent and file select an identity, not a new grant. Only creation below uses allowedTools.
+        const live = this.instances.get(owner.id);
+        if (live?.lifecycle === "active" && live.snapshot().executor.sessionFile === sessionFile) return live;
+        if (owner.lifecycle === "stopping") throw new Error("This child Work is stopping. Wait for it to finish before opening its file.");
+        const { operationId, trustChallengeId, projectTrustDecision } = input;
+        return (await this.reopen({ instanceId: owner.id, sessionFile, operationId, trustChallengeId, projectTrustDecision })).instance;
+      }
+    }
     const releaseClaim = this.claimSessionFile(`adopt:${input.operationId}`, input.operationId, sessionFile);
     try {
-      // An interrupted Work still owns its history, including while it is waiting for its parent.
-      if (this.catalog.current().instances.some(record => record.lifecycle !== "stopped"
-        && (input.child !== undefined || record.parentId !== undefined)
-        && (record.sessionFile === sessionFile || record.recoverySessionFile === sessionFile))) {
-        throw new Error("This session already belongs to a Work. Open that Work or choose Resume in the Hub.");
-      }
       const target = await this.reopenTargetResolver.resolve(sessionFile);
       // The conversation provides no grants. A new child can only report unless tools are newly selected.
       const { operationId, child, name, trustChallengeId, projectTrustDecision } = input;
@@ -630,16 +644,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
   }
 
+  /** A newly started Worker may already name its file before the first durable turn. */
+  private sessionFileReferences(file: string): CatalogInstanceRecord[] {
+    return this.catalog.current().instances.filter(record => record.lifecycle !== "stopped"
+      && (record.sessionFile === file || record.recoverySessionFile === file
+        || this.instances.get(record.id)?.snapshot().executor.sessionFile === file));
+  }
+
   claimSessionFile(ownerId: string, operationId: string, rawSessionFile: string): () => void {
     if (!isNativeAbsoluteLocalPath(rawSessionFile)) throw new Error("Pi session file is not an absolute path on this Host");
     const sessionFile = resolve(rawSessionFile);
-    const liveOwner = [...this.instances.values()].find((instance) => {
-      const snapshot = instance.snapshot();
-      return instance.id !== ownerId
-        && (snapshot.lifecycle === "active" || snapshot.lifecycle === "stopping")
-        && snapshot.executor.sessionFile === sessionFile;
-    });
-    if (liveOwner) throw new InstanceBusyError(liveOwner.id, "use persisted session");
+    const owner = this.sessionFileReferences(sessionFile).find(work => work.id !== ownerId && reservesSessionFile(work));
+    if (owner) {
+      if (owner.lifecycle === "active" || owner.lifecycle === "stopping") throw new InstanceBusyError(owner.id, "use persisted session");
+      throw new Error("This session belongs to an interrupted child Work. Resume that Work from its parent or the Hub.");
+    }
     const pending = this.sessionFileClaims.get(sessionFile);
     if (pending && (pending.ownerId !== ownerId || pending.operationId !== operationId)) {
       throw new InstanceBusyError(pending.ownerId, "use persisted session");

@@ -29,6 +29,7 @@ import { MAX_CHILD_MODELS, type ChildModelsResult, type MachineDto, type ModelRe
 import { modelKey } from "../control/model-visibility.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import type { PiEnvironmentSnapshot, PiLoginInteraction } from "../pi/pi-environment.js";
+import { reservesSessionFile } from "../core/catalog.js";
 import { humanInstanceStatus, modelLabel } from "../core/instance-display-name.js";
 import { humanRelativeTime } from "../human-time.js";
 import { sessionDisplayName } from "../session-display.js";
@@ -516,11 +517,7 @@ async function chooseSessionAction(
       actionEntries.push({ value: `resume:${instance.id}`, label: `Resume ${displayName(instance)}`, description: "continue from the saved conversation" });
     }
   }
-  // An interrupted child's identity and parent stay with the file; ordinary saved sessions
-  // keep their existing explicit "Open as new work" option when no Worker owns the file.
-  const reserved = linked.some((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping"
-    || (instance.parentId !== undefined && instance.lifecycle !== "stopped"));
-  if (!reserved) {
+  if (!linked.some(reservesSessionFile)) {
     actionEntries.push({ value: "adopt", label: "Open as new work", description: "start new Dock work from this saved Pi session" });
   }
   actionEntries.push({ value: BACK, label: "Back to Pi Sessions", description: "Return to saved sessions" });
