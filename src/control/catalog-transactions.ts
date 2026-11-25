@@ -11,6 +11,8 @@ import {
   validateCatalogRecord,
 } from "../core/catalog.js";
 
+import { catalogBranches } from "./catalog-family.js";
+
 export type CatalogHealth = "healthy" | "mutation_faulted" | "draining";
 
 export interface CatalogFault {
@@ -99,6 +101,18 @@ export class CatalogTransactionCoordinator {
     }).then((removed) => removed[0]);
   }
 
+  /** Removing an unavailable parent retires its still-interrupted descendants in the same write. */
+  removeWithInterruptedChildren(
+    instanceId: string, context: CatalogMutationContext, assertEligible: (record: Readonly<CatalogInstanceRecord>) => void,
+  ): Promise<CatalogInstanceRecord[]> {
+    return this.enqueueRemoval(context, (records) => {
+      const root = records.find((record) => record.id === instanceId);
+      if (!root) return [];
+      assertEligible(root);
+      return catalogBranches([root], records.filter((record) => record.lifecycle === "host_lost"));
+    });
+  }
+
   removeWhere(
     context: CatalogMutationContext,
     predicate: (record: Readonly<CatalogInstanceRecord>) => boolean,
@@ -128,7 +142,10 @@ export class CatalogTransactionCoordinator {
         const records = new Map(this.projection.instances.map((item) => [item.id, item]));
         if (mode === "create" && records.has(record.id)) throw new Error(`Catalog instance already exists: ${record.id}`);
         if (mode === "replace" && !records.has(record.id)) throw new Error(`Catalog instance is not committed: ${record.id}`);
-        records.set(record.id, structuredClone(record));
+        // The role and tool ceiling belong to the Work, not the particular Worker
+        // reporting its latest state. Only creation grants them, never a later commit.
+        const grant = records.get(record.id)?.childGrant;
+        records.set(record.id, structuredClone(grant === undefined ? record : { ...record, childGrant: grant }));
         const candidate: CatalogProjection = {
           schemaVersion: 1,
           revision: this.projection.revision + 1,

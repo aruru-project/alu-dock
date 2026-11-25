@@ -6,6 +6,7 @@ import {
 import { projectInstanceDisplayName } from "../core/instance-display-name.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import { ASSISTANT_EXECUTOR_KIND } from "../core/assistant.js";
+import { catalogBranches } from "./catalog-family.js";
 import { DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
 
 export interface CatalogReconcileResult {
@@ -33,8 +34,13 @@ export function reconcileCatalogProjection(
 
   validateCatalogProjection(loaded);
   let normalizedCount = 0;
-  // Retire temporary child identities at boot; their Pi session files are untouched.
-  const instances = loaded.instances.filter((record) => record.parentId === undefined).map((record) => {
+  // Keep interrupted children only in a surviving branch. A parent may have stopped
+  // before its children's individual retirements finished writing. Order is immaterial.
+  const interrupted = loaded.instances.filter((record) => record.lifecycle === "active" && record.shutdownRequestedAt === undefined
+    || record.lifecycle === "host_lost" && record.interruption?.reason === "host_crash");
+  const roots = interrupted.filter((record) => record.parentId === undefined || record.childGrant?.mainParent);
+  const surviving = new Set(catalogBranches(roots, interrupted));
+  const instances = loaded.instances.filter((record) => record.parentId === undefined || surviving.has(record)).map((record) => {
     if (record.lifecycle === "active" || record.lifecycle === "stopping") {
       normalizedCount += 1;
       return normalizePriorLiveRecord(record, timestamp);
@@ -98,8 +104,9 @@ export function catalogSnapshotFromRecord(
   record: CatalogInstanceRecord,
   currentHostEpoch: string,
 ): InstanceSnapshot {
-  const reopenable = record.parentId === undefined && catalogReopenSessionFile(record) !== undefined
-    && (record.lifecycle === "host_lost" || record.lifecycle === "runtime_error");
+  const recoveryFile = record.recoverySessionFile ?? record.sessionFile;
+  const sessionFile = record.execution === "unavailable" ? recoveryFile : record.sessionFile;
+  const reopenable = catalogReopenSessionFile(record) !== undefined;
   return {
     id: record.id,
     creationOperationId: record.creationOperationId,
@@ -122,7 +129,7 @@ export function catalogSnapshotFromRecord(
       // The catalog does not record which Agent ran a Work: one opened as the assistant ran hers, every other Pi.
       ...(record.assistant ? { kind: ASSISTANT_EXECUTOR_KIND, version: DOCK_VERSION } : { kind: "pi-sdk", version: PI_SDK_VERSION }),
       piSessionId: record.piSessionId,
-      ...(record.sessionFile === undefined ? {} : { sessionFile: record.sessionFile }),
+      ...(sessionFile === undefined ? {} : { sessionFile }),
       ...(record.model === undefined ? {} : { model: { ...record.model } }),
       ...(record.thinkingLevel === undefined ? {} : { thinkingLevel: record.thinkingLevel }),
     },
@@ -146,6 +153,7 @@ export function catalogSnapshotFromRecord(
 export function catalogReopenSessionFile(record: CatalogInstanceRecord): string | undefined {
   if (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") return undefined;
   if (record.ownerReleaseUnconfirmed) return undefined;
+  if (record.parentId !== undefined && (!record.childGrant || record.interruption?.reason !== "host_crash" || record.lifecycle !== "host_lost")) return undefined;
   return record.recoverySessionFile ?? record.sessionFile;
 }
 
@@ -194,6 +202,11 @@ function normalizePriorLiveRecord(
       : "Previous Alu Dock Host ended; explicitly reopen to continue this session context",
     updatedAt,
   };
+  if (record.parentId !== undefined) {
+    normalized.lastError = !record.childGrant ? "这个子 Work 没有保存原来的工具权限，无法安全继续。请让父 Work 重新分派任务。"
+      : recoverySessionFile === undefined ? "子 Work 中断前没有保存可继续的会话。请让父 Work 重新分派任务。"
+      : "Host 意外退出，子 Work 已中断。父 Work 可以发消息继续原对话。";
+  }
   delete normalized.ownerHostEpoch;
   delete normalized.activeCommandId;
   delete normalized.admissionOperationId;

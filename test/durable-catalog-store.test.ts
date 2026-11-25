@@ -102,6 +102,34 @@ test("catalog keeps Work trust unknown for legacy records and restores the old d
   await assert.rejects(store.load(), CatalogCorruptError);
 });
 
+test("after a Host crash the original child Works and their tool choices survive, but stopped branches stay gone", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  const time = "2026-07-15T00:00:00.000Z";
+  const shutdown = { lifecycle: "host_lost", execution: "unavailable", ownerHostEpoch: undefined, interruption: { reason: "host_shutdown", at: time } } as const;
+  await store.commit(projection(1, [
+    record("parent"),
+    record("lead", { parentId: "parent", childGrant: { role: "lead", allowedTools: ["dock_spawn", "read"] } }),
+    record("helper", { parentId: "lead", childGrant: { role: "helper", allowedTools: [] } }),
+    record("remote", { parentId: "parent-on-main", childGrant: { role: "helper", mainParent: true } }),
+    record("legacy", { parentId: "parent" }),
+    record("stopping", { parentId: "parent", lifecycle: "stopping", stopRequestedAt: time }),
+    record("below-stopping", { parentId: "stopping" }),
+    record("closed", shutdown), record("below-closed", { parentId: "closed" }),
+    record("crashed-worker", { parentId: "parent", lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined }),
+  ]), { kind: "fixture", effect: "pre_effect" });
+  const loaded = (await store.load())!;
+  const recovered = reconcileCatalogProjection(loaded, "new-host").projection;
+  const next = reconcileCatalogProjection(recovered, "next-host").projection;
+  const children = next.instances.filter((item) => item.parentId !== undefined);
+  assert.deepEqual(children.map((item) => [item.id, item.parentId, item.childGrant, catalogSnapshotFromRecord(item, "next-host").reopenable]), [
+    ["helper", "lead", { role: "helper", allowedTools: [] }, true],
+    ["lead", "parent", { role: "lead", allowedTools: ["dock_spawn", "read"] }, true],
+    ["legacy", "parent", undefined, false],
+    ["remote", "parent-on-main", { role: "helper", mainParent: true }, true],
+  ]);
+});
+
 test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   const { path } = await temporaryCatalog();
   const store = new FileCatalogStore(path);

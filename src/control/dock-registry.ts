@@ -52,7 +52,7 @@ import type {
 } from "./project-trust.js";
 
 export interface InstanceFactoryInput {
-  /** Not persisted: a child Work is never reopened. */
+  /** Includes the original role and tool ceiling when continuing an interrupted child. */
   child?: DockChildStart;
   modelSpeed?: ModelSpeedSelection;
   id: string;
@@ -140,8 +140,8 @@ export class InstanceUnavailableError extends Error {
 }
 
 export class InstanceNotReopenableError extends Error {
-  constructor(readonly instanceId: string) {
-    super(`Instance ${instanceId} has no validated session context to reopen`);
+  constructor(readonly instanceId: string, reason = `Instance ${instanceId} has no validated session context to reopen`) {
+    super(reason);
     this.name = "InstanceNotReopenableError";
   }
 }
@@ -182,7 +182,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly childRetirements = new WeakMap<ManagedInstance, Promise<void>>();
   /** Children whose Worker is still starting, per parent runtime. */
   private readonly childStarts = new WeakMap<ManagedInstance, Set<Promise<unknown>>>();
-  /** What each child Work was started with: its role and tool ceiling. A child is never reopened. */
+  /** Active child Works' roles and ceilings, as saved at creation. */
   private readonly childGrants = new WeakMap<ManagedInstance, DockChildStart>();
   /**
    * Works that left the list, stopped or removed, and stay in `instances` only until their own child Works
@@ -197,6 +197,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly remoteChildren: RemoteChildrenPort | undefined;
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
+  private readonly stoppingInterrupted = new Set<string>();
   private readonly reopenInFlight = new Map<string, Promise<unknown>>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private readonly keyEnsureTails = new Map<string, Promise<void>>();
@@ -451,13 +452,16 @@ export class DockRegistry implements LocalDockToolsHostPort {
       || instance.creationOperationId !== input.operationId
       || instance.hostEpoch !== this.hostEpoch
       || instance.key !== key
+      || instance.parentId !== child?.parentId
     ) {
       await instance.disposeUnpublished().catch(() => {});
       throw new Error("Instance factory returned an identity outside the registry Host domain");
     }
     this.bindInstanceCatalog(instance);
     try {
-      await this.catalog.create(instance.catalogRecord(), {
+      const record = instance.catalogRecord();
+      if (child !== undefined) record.childGrant = { role: child.role, allowedTools: child.allowedTools, ...(mainParented ? { mainParent: true } : {}) };
+      await this.catalog.create(record, {
         kind: key === undefined ? "instance.create" : "instance.ensure",
         effect: "rollback_contained",
         operationId: input.operationId,
@@ -478,14 +482,16 @@ export class DockRegistry implements LocalDockToolsHostPort {
       await this.stop(id, randomUUID()).catch(() => {});
       throw new Error("The parent Work stopped before its child could start.");
     }
-    // Creation may have taken time; use the parent's current choice before the first task is sent.
-    if (child !== undefined) await this.changeModelSpeed(this.treeRoot(instance), async () => {
-      const tier = this.speedFollowed(instance);
-      if (instance.modelSpeed === undefined && tier !== "standard") {
-        await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
-      }
-    });
+    if (child !== undefined) await this.changeModelSpeed(this.treeRoot(instance), () => this.followSpeedOnStart(instance));
     return instance;
+  }
+
+  /** A new or continued child takes its parent's current choice before the first message. */
+  private async followSpeedOnStart(child: ManagedInstance): Promise<void> {
+    const tier = this.speedFollowed(child);
+    if (child.modelSpeed === undefined && tier !== "standard") {
+      await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
+    }
   }
 
   /** Change one Work's setting; only Works below it still following it take a group speed change. */
@@ -683,7 +689,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   async reopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     this.assertCatalogReady();
     this.catalog.assertWritable();
-    if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
+    if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId) || this.stoppingInterrupted.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
     return this.trackReopen(input.instanceId, () => this.performReopen(input));
   }
 
@@ -703,14 +709,27 @@ export class DockRegistry implements LocalDockToolsHostPort {
 
   private async performReopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     const record = this.catalogRecord(input.instanceId);
-    if (record.parentId !== undefined || (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error")) throw new InstanceNotReopenableError(input.instanceId);
+    if (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") throw new InstanceNotReopenableError(input.instanceId);
     if (record.ownerReleaseUnconfirmed) throw new InstanceNotReopenableError(input.instanceId);
     const previousLifecycle = record.lifecycle;
-    const sessionFile = input.sessionFile ?? catalogReopenSessionFile(record);
+    const savedFile = catalogReopenSessionFile(record);
+    const parent = record.parentId === undefined || record.childGrant?.mainParent ? undefined : this.instances.get(record.parentId);
+    if (record.parentId !== undefined) {
+      if (!savedFile || (input.sessionFile !== undefined && resolve(input.sessionFile) !== savedFile)) {
+        throw new InstanceNotReopenableError(record.id, "无法沿原来的会话和工具权限继续这个子 Work。请查看它的状态，或由父 Work 重新分派任务。");
+      }
+      if (record.childGrant?.mainParent ? !this.mainParent : parent?.lifecycle !== "active") {
+        throw new InstanceNotReopenableError(record.id, "父 Work 尚未打开。请先继续原来的父 Work，再继续这个子 Work。");
+      }
+    }
+    const sessionFile = input.sessionFile ?? savedFile;
     if (!sessionFile || !this.reopenTargetResolver) throw new InstanceNotReopenableError(input.instanceId);
     const releaseClaim = this.claimSessionFile(record.id, input.operationId, sessionFile);
     try {
-      return await this.performClaimedReopen(input, record, previousLifecycle, sessionFile);
+      const opened = await this.performClaimedReopen(input, record, previousLifecycle, sessionFile);
+      // A parent's concurrent Stop waits for this reopen, then retires the child.
+      if (parent && (this.instances.get(parent.id) !== parent || parent.lifecycle !== "active")) throw new InstanceNotReopenableError(record.id, "子 Work 打开时父 Work 已停止，子 Work 将随它一起收回。");
+      return opened;
     } finally {
       releaseClaim();
     }
@@ -722,7 +741,13 @@ export class DockRegistry implements LocalDockToolsHostPort {
     previousLifecycle: "host_lost" | "runtime_error",
     sessionFile: string,
   ): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
-    const target = await this.reopenTargetResolver!.resolve(sessionFile);
+    const target = await this.reopenTargetResolver!.resolve(sessionFile).catch(async (error: unknown) => {
+      if (record.parentId === undefined) throw error;
+      const message = "无法打开子 Work 原来的会话。请检查它所在机器的会话文件和工作目录，修复后重试。";
+      await this.catalog.forInstance(record.id).commit({ ...record, lastError: message, updatedAt: new Date().toISOString() },
+        { kind: "instance.reopen.failed", effect: "rollback_contained", operationId: input.operationId, instanceId: record.id });
+      throw new InstanceNotReopenableError(record.id, message);
+    });
     let trust: ProjectTrustResolution;
     if (record.assistant && this.assistantWorkspace !== undefined) {
       trust = { canonicalCwd: await canonicalDirectory(this.assistantWorkspace), projectTrusted: false };
@@ -746,6 +771,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     sessionFile?: string, previousLifecycle?: "host_lost" | "runtime_error",
   ): Promise<ManagedInstance> {
     const nextGeneration = record.runtimeGeneration + 1;
+    const child = record.parentId !== undefined && record.childGrant !== undefined
+      ? { parentId: record.parentId, role: record.childGrant.role, allowedTools: record.childGrant.allowedTools } : undefined;
     const candidate = await this.factory({
       id: record.id,
       creationOperationId: record.creationOperationId,
@@ -756,6 +783,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       projectTrusted: trust.projectTrusted,
       sessionFile,
       initialRuntimeGeneration: nextGeneration,
+      ...(child === undefined ? {} : { child }),
       createdAt: record.createdAt,
       ...(previousLifecycle === undefined || sessionFile === undefined ? {} : { reopenedFrom: previousLifecycle }),
       dockToolsHostPort: this.dockToolsHostPort,
@@ -787,27 +815,36 @@ export class DockRegistry implements LocalDockToolsHostPort {
       || candidate.creationOperationId !== record.creationOperationId
       || candidate.hostEpoch !== this.hostEpoch
       || candidate.key !== record.key
+      || candidate.parentId !== record.parentId
+      || (child !== undefined && candidate.snapshot().executor.sessionFile !== sessionFile)
       || candidate.runtimeGeneration !== nextGeneration
       || candidate.snapshot().lifecycle !== "active"
     ) {
       await candidate.disposeUnpublished().catch(() => {});
       throw new Error("Reopen factory returned an identity outside the catalog transaction");
     }
-    this.bindInstanceCatalog(candidate);
-    try {
+    const previous = this.instances.get(record.id);
+    if (child) this.childGrants.set(candidate, child);
+    if (record.childGrant?.mainParent) this.mainParented.add(candidate);
+    const publish = async () => {
+      if (child) await this.followSpeedOnStart(candidate);
+      this.bindInstanceCatalog(candidate);
       await this.catalog.forInstance(record.id).commit(candidate.catalogRecord(), {
         kind: "instance.reopen",
         effect: "rollback_contained",
         operationId,
         instanceId: record.id,
       });
+      candidate.markCatalogCommitted();
+      this.instances.set(record.id, candidate);
+    };
+    try {
+      if (child) await this.changeModelSpeed(this.treeRoot(candidate), publish);
+      else await publish();
     } catch (error) {
       await candidate.disposeUnpublished().catch(() => {});
       throw error;
     }
-    candidate.markCatalogCommitted();
-    const previous = this.instances.get(record.id);
-    this.instances.set(record.id, candidate);
     this.trackInstanceForObservation(candidate);
     for (const listener of this.runtimeReopenListeners) {
       try { listener(record.id); } catch { /* A stale client cannot roll back a committed reopen. */ }
@@ -1139,6 +1176,19 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   async stop(instanceId: string, operationId: string): Promise<{ receipt: StopReceipt; instance: InstanceSnapshot }> {
+    this.assertCatalogReady();
+    if (!this.instances.has(instanceId)) {
+      const record = this.catalogRecord(instanceId);
+      if (record.parentId !== undefined && record.lifecycle === "host_lost") {
+        const reopening = this.reopenInFlight.get(instanceId);
+        if (reopening) await reopening.catch(() => {});
+        if (!this.instances.has(instanceId)) {
+          this.stoppingInterrupted.add(instanceId);
+          try { return await this.stopInterruptedChild(instanceId, operationId); }
+          finally { this.stoppingInterrupted.delete(instanceId); }
+        }
+      }
+    }
     const instance = this.get(instanceId);
     // A crashed top-level Work offers Continue or Remove; only a crashed child is collected by Stop.
     if (instance.parentId === undefined && instance.lifecycle === "runtime_error") throw new InstanceNotActiveError(instanceId, "runtime_error");
@@ -1170,17 +1220,42 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
   }
 
+  /** Interrupted children have no Worker to stop. Their sessions stay on disk. */
+  private async stopInterruptedChild(instanceId: string, operationId: string): Promise<{ receipt: StopReceipt; instance: InstanceSnapshot }> {
+    const removed = await this.catalog.removeWithInterruptedChildren(instanceId, { kind: "instance.stop", effect: "post_effect", instanceId, operationId }, (record) => {
+      if (record.parentId === undefined || record.lifecycle !== "host_lost") throw new InstanceBusyError(instanceId, "stop");
+    });
+    const record = removed[0];
+    if (!record) throw new InstanceNotFoundError(instanceId);
+    const ids = removed.map((item) => item.id);
+    this.notifyCatalogRemoval(ids);
+    await this.cleanupObservationForForgottenTargets(ids);
+    const instance = catalogSnapshotFromRecord(record, this.hostEpoch);
+    instance.lifecycle = "stopped";
+    instance.reopenable = false;
+    instance.updatedAt = new Date().toISOString();
+    delete instance.interruption;
+    delete instance.lastError;
+    return { instance, receipt: { instanceId, operationId, alreadyStopped: false, stopped: true } };
+  }
+
   /** Never rejects: a child whose cleanup fails stays listed, and Stop can be retried on it. */
   private retireChildren(parent: ManagedInstance): Promise<void> {
     const pending = this.childRetirements.get(parent);
     if (pending) return pending;
-    const children = [...this.instances.values()].filter((child) => child.parentId === parent.id);
+    // Keep departed live children in this set too: a grandchild may still be stopping.
+    const children = new Set([...this.instances.values()]
+      .filter((child) => child.parentId === parent.id && !this.mainParented.has(child)).map((child) => child.id));
+    for (const child of this.catalog.current().instances) {
+      if (child.parentId === parent.id && !child.childGrant?.mainParent && child.lifecycle === "host_lost") children.add(child.id);
+    }
     // A child still starting stops itself once it sees this parent gone; wait for that too,
     // so no child process outlives its parent's Stop.
     const starting = [...(this.childStarts.get(parent) ?? [])];
     // Main's resident assistant may have child Works on other Machines too (card #676).
     const elsewhere = this.remoteChildren?.retire(parent.id) ?? Promise.resolve();
-    const task = Promise.allSettled([...children.map((child) => this.stop(child.id, randomUUID())), ...starting, elsewhere]).then(() => {
+    const stops = Array.from(children, (id) => this.stop(id, randomUUID()));
+    const task = Promise.allSettled([...stops, ...starting, elsewhere]).then(() => {
       if (this.childRetirements.get(parent) === task) this.childRetirements.delete(parent);
     });
     this.childRetirements.set(parent, task);
@@ -1266,7 +1341,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (this.catalogMaintenancePending || this.reopenInFlight.has(instanceId)) throw new InstanceBusyError(instanceId, "forget");
     this.catalogMaintenancePending = true;
     try {
-      const removed = await this.catalog.remove(instanceId, {
+      const family = await this.catalog.removeWithInterruptedChildren(instanceId, {
         kind: "instance.forget",
         // The atomic rename may have removed the record even if durability
         // acknowledgement fails; never invite an automatic destructive retry.
@@ -1279,6 +1354,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
           throw new InstanceForgetRejectedError(instanceId, record.lifecycle);
         }
       });
+      const removed = family[0];
       if (!removed) throw new InstanceNotFoundError(instanceId);
       // A crashed child Work's own child Works may still be retiring: until they are, a Stop of a Work above
       // it still finds it and waits for them (card #674). The record is gone at once either way.
@@ -1289,8 +1365,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
         this.departed.add(instance!);
         void retiring.then(() => { if (this.instances.get(instanceId) === instance) this.instances.delete(instanceId); });
       }
-      await this.cleanupObservationForForgottenTargets([instanceId]);
-      this.notifyCatalogRemoval([instanceId]);
+      const ids = family.map((item) => item.id);
+      await this.cleanupObservationForForgottenTargets(ids);
+      this.notifyCatalogRemoval(ids);
       return { forgottenId: removed.id, previousLifecycle: removed.lifecycle as "stopped" | "host_lost" | "runtime_error" };
     } finally {
       this.catalogMaintenancePending = false;
@@ -1370,6 +1447,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const results = await Promise.allSettled(active.map((instance) => instance.shutdownForHostDrain()));
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failures.length > 0) throw new AggregateError(failures.map((failure) => failure.reason), "One or more instances failed durable Host shutdown");
+    // A clean Host shutdown also ends children not yet continued since an earlier crash.
+    await this.catalog.removeWhere({ kind: "host.shutdown.children", effect: "post_effect" }, (record) => record.parentId !== undefined, Infinity);
   }
 
   async disposeAllForHostDrain(): Promise<void> {

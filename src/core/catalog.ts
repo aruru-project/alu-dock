@@ -1,4 +1,6 @@
 import type { InstanceExecution, InstanceLifecycle, LastRunResult } from "./managed-instance.js";
+import type { ChildRole } from "./dock-tools.js";
+import { parseAllowedTools } from "./worker-tool-policy.js";
 import type { AgentProjectTrust, ThinkingLevel } from "./agent-worker.js";
 import { isNativeAbsoluteLocalPath } from "./local-path.js";
 import type { JsonObject } from "./json-value.js";
@@ -39,10 +41,12 @@ export interface CatalogInterruption {
 export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
 
 export interface CatalogInstanceRecord {
-  /** Set on a child Work: the top-level Work it belongs to. */
+  /** The Work that started this child (possibly a lead child Work itself). */
   parentId?: string;
   /** SubHost only: the IDs in the parent's conversation when Main created its child. */
   mainIdentity?: { child: string; parent?: string };
+  /** The role and tool ceiling actually granted at creation; absent on older child records. */
+  childGrant?: { role: ChildRole; allowedTools?: string[]; mainParent?: true };
   /** Opened as the personal assistant (card #295); a reopen keeps it. */
   assistant?: true;
   id: string;
@@ -195,6 +199,11 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.collaborationVersion !== undefined && record.collaborationVersion !== 1) throw new Error("Catalog collaboration version is unsupported");
   if (record.dockToolsEnabled !== undefined && typeof record.dockToolsEnabled !== "boolean") throw new Error("Catalog Dock tools switch must be boolean");
   if (record.parentId !== undefined) requiredBoundedText(record.parentId, 128, "Catalog parent ID");
+  if (record.childGrant !== undefined) {
+    if (record.parentId === undefined || !["lead", "helper"].includes(record.childGrant.role)) throw new Error("Catalog child grant needs a parent and role");
+    if (record.childGrant.mainParent !== undefined && record.childGrant.mainParent !== true) throw new Error("Catalog Main parent mark must be true when present");
+    if (record.childGrant.allowedTools !== undefined) parseAllowedTools(record.childGrant.allowedTools);
+  }
   if (record.assistant !== undefined && record.assistant !== true) throw new Error("Catalog assistant mark must be true when present");
   if (record.mainIdentity !== undefined) {
     if (record.parentId === undefined) throw new Error("Only a child Work has a parent-facing identity");
