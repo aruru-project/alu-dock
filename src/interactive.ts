@@ -11,8 +11,7 @@ import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-acces
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot } from "./control/machine-state.js";
 import { currentMachineRole, MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
-import type { DockChildSelection } from "./core/dock-tools.js";
-import type { InstanceSnapshot } from "./core/managed-instance.js";
+import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
 import { humanInstanceStatus } from "./core/instance-display-name.js";
 import { requireHumanTarget } from "./human-target.js";
 import { runDockHub, runSubHostHub, type DockHubAction } from "./tui/dock-hub.js";
@@ -26,7 +25,6 @@ export interface OpenDockOptions {
   name?: string;
   target?: string;
   forceNew?: boolean;
-  savedChild?: { sessionFile: string; parent: string; allowedTools: string[] };
 }
 
 /** Human entry point. Only an explicit Hub action or direct Work command may construct a runtime. */
@@ -77,13 +75,6 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
       new SubHostMachineState(machineStateRoot(catalogPath)),
     );
     instance = await executeHubAction(client, action);
-  } else if (options.savedChild) {
-    try {
-      instance = await openSavedChild(client, options.savedChild);
-    } catch (error) {
-      if (!(error instanceof ControlClientError) || error.code !== "model_not_found") throw error;
-      throw new Error(`${terminalSafe(error.message)}. Restore the saved model or sign in to its provider, then open this file again. Your session is unchanged.`);
-    }
   } else {
     instance = await resolveWorkInstance(client, {
       mode: options.mode,
@@ -128,9 +119,7 @@ async function executeHubAction(
   if (action.kind === "attach") return assertAttachable(action.instance);
   if (action.kind === "new") return createWithNotice(client, action.cwd, undefined, action.systemChoice);
   if (action.kind === "reopen") return reopenWithNotice(client, action.instance);
-  const session = action.session;
-  process.stdout.write(`Opening saved Pi work for ${terminalSafe(session.name?.trim() || session.cwd)}…\n`);
-  return adoptSession(client, session.sessionFile, session.name);
+  return adoptWithNotice(client, action.session);
 }
 
 async function resolveWorkInstance(
@@ -242,25 +231,22 @@ async function createWithNotice(
   return undefined;
 }
 
-async function openSavedChild(client: DockClient, selection: NonNullable<OpenDockOptions["savedChild"]>): Promise<InstanceSnapshot> {
-  const parent = requireHumanTarget(await client.list("all"), selection.parent);
-  process.stdout.write(`Opening the saved child Work under ${displayName(parent)}…\n`);
-  return adoptSession(client, selection.sessionFile, undefined, parent.hostId, {
-    parentId: parent.id, allowedTools: selection.allowedTools,
-  });
-}
-
-async function adoptSession(
-  client: DockClient, sessionFile: string, name?: string, hostId?: string, child?: Omit<DockChildSelection, "withParentContext">,
+async function adoptWithNotice(
+  client: DockClient,
+  session: SessionDto,
 ): Promise<InstanceSnapshot> {
+  process.stdout.write(`Opening saved Pi work for ${terminalSafe(session.name?.trim() || session.cwd)}…\n`);
   const operationId = randomUUID();
   try {
-    return (await client.adopt(sessionFile, name, operationId, undefined, hostId, child)).instance;
+    return (await client.adopt(session.sessionFile, session.name, operationId)).instance;
   } catch (error) {
     const challenge = projectTrustChallenge(error, operationId);
     if (!challenge) throw error;
     const decision = await askProjectTrust(challenge.cwd);
-    return (await client.adopt(sessionFile, name, operationId, { challengeId: challenge.challengeId, decision }, hostId, child)).instance;
+    return (await client.adopt(session.sessionFile, session.name, operationId, {
+      challengeId: challenge.challengeId,
+      decision,
+    })).instance;
   }
 }
 

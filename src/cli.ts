@@ -7,9 +7,6 @@ import { realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { isPortableAbsoluteLocalPath, resolvePortableAbsoluteLocalPath } from "./core/local-path.js";
-import { parseAllowedTools } from "./core/worker-tool-policy.js";
-import type { OpenDockOptions } from "./interactive.js";
 import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
 import { humanListWidth, renderHumanInstanceList, selectHumanInstanceList } from "./cli-list.js";
 import { ControlClientError, DockClient } from "./control/dock-client.js";
@@ -831,23 +828,7 @@ async function manageMachine(args: string[]): Promise<void> {
 function parseInteractiveArgs(
   command: "hub" | "continue" | "open" | "new" | "attach",
   args: string[],
-): Omit<OpenDockOptions, "socketPath"> {
-  if (command === "open" && args.some(arg => ["--session-file", "--parent", "--allow-tool"].includes(arg))) {
-    let file: string | undefined;
-    let parent: string | undefined;
-    const tools: string[] = [];
-    for (let i = 0; i < args.length; i += 2) {
-      const flag = args[i], value = args[i + 1];
-      if (!value?.trim() || value.startsWith("--")) throw new Error(`${flag} requires a value`);
-      if (flag === "--session-file" && !file) file = value;
-      else if (flag === "--parent" && !parent) parent = value;
-      else if (flag === "--allow-tool") tools.push(value);
-      else throw new Error("To open a saved child, use --session-file FILE --parent PARENT and optionally --allow-tool TOOL.");
-    }
-    if (!file || !parent) throw new Error("Name the saved file and its original parent: aludock open --session-file FILE --parent PARENT.");
-    const sessionFile = isPortableAbsoluteLocalPath(file) ? resolvePortableAbsoluteLocalPath(file) : resolve(file);
-    return { mode: "open", cwd: process.cwd(), savedChild: { sessionFile, parent, allowedTools: parseAllowedTools(tools) } };
-  }
+): { mode: "hub" | "continue" | "open" | "new" | "attach"; cwd: string; name?: string; target?: string; forceNew?: boolean } {
   let cwd = process.cwd();
   let name: string | undefined;
   let target: string | undefined;

@@ -373,20 +373,16 @@ export class DockRegistry implements LocalDockToolsHostPort {
     // Main names a parent this Host does not run only for its resident assistant (card #676).
     if (input.child !== undefined && this.mainParent !== undefined
       && !this.catalog.current().instances.some((record) => record.id === input.child!.parentId)) return this.startForMainParent(input, key);
-    return this.startOnThisMachine(input, key);
-  }
-
-  private async startOnThisMachine(input: CreateRegistryInstanceInput, key?: string, adoptedFile?: string): Promise<ManagedInstance> {
     const parent = input.child === undefined ? undefined : this.get(input.child.parentId);
     const parentActive = () => parent === undefined || (this.instances.get(parent.id) === parent
       && this.mayStartChildren(parent) && parent.lifecycle === "active");
     if (!parentActive()) throw new Error("A child Work needs an active Work on this machine that may start child Works as its parent.");
-    if (parent === undefined) return this.startNew(input, key, undefined, parentActive, { adoptedFile });
+    if (parent === undefined) return this.startNew(input, key, undefined, parentActive);
     const child = this.childStart(parent, input.child!);
     // A parent that starts stopping from here on waits for this child, which then stops itself.
     const starting = this.childStarts.get(parent) ?? new Set<Promise<unknown>>();
     this.childStarts.set(parent, starting);
-    const creation = this.startNew(input, key, parent, parentActive, { child, adoptedFile });
+    const creation = this.startNew(input, key, parent, parentActive, { child });
     starting.add(creation);
     try {
       return await creation;
@@ -614,34 +610,12 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (!this.reopenTargetResolver) throw new Error("Persisted Pi session adoption is unavailable");
     if (!isNativeAbsoluteLocalPath(input.sessionFile)) throw new Error("Pi session file is not an absolute path on this Host");
     const sessionFile = resolve(input.sessionFile);
-    if (input.child) {
-      const { parentId } = input.child;
-      const linked = this.sessionFileReferences(sessionFile);
-      const owner = linked[0];
-      if (owner && (linked.length !== 1 || owner.parentId !== parentId)) {
-        throw new Error("This session already belongs to another Work. Open that Work in the Hub; the file has not been moved.");
-      }
-      if (this.instances.get(parentId)?.lifecycle !== "active") {
-        throw new Error("Resume the original parent Work in the Hub, then open this saved child again.");
-      }
-      if (owner) {
-        // The parent and file select an identity, not a new grant. Only creation below uses allowedTools.
-        const live = this.instances.get(owner.id);
-        if (live?.lifecycle === "active" && live.snapshot().executor.sessionFile === sessionFile) return live;
-        if (owner.lifecycle === "stopping") throw new Error("This child Work is stopping. Wait for it to finish before opening its file.");
-        const { operationId, trustChallengeId, projectTrustDecision } = input;
-        return (await this.reopen({ instanceId: owner.id, sessionFile, operationId, trustChallengeId, projectTrustDecision })).instance;
-      }
-    }
     const releaseClaim = this.claimSessionFile(`adopt:${input.operationId}`, input.operationId, sessionFile);
     try {
       const target = await this.reopenTargetResolver.resolve(sessionFile);
-      // The conversation provides no grants. A new child can only report unless tools are newly selected.
-      const { operationId, child, name, trustChallengeId, projectTrustDecision } = input;
-      return await this.startOnThisMachine({
-        operationId, cwd: target.cwd, trustChallengeId, projectTrustDecision,
-        ...(child ? { child: { parentId: child.parentId, allowedTools: child.allowedTools ?? [] } } : { name }),
-      }, undefined, sessionFile);
+      const { operationId, name, trustChallengeId, projectTrustDecision } = input;
+      return await this.startNew({ operationId, cwd: target.cwd, name, trustChallengeId, projectTrustDecision },
+        undefined, undefined, () => true, { adoptedFile: sessionFile });
     } finally {
       releaseClaim();
     }

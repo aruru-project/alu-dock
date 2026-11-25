@@ -401,7 +401,7 @@ export type ControlRequest =
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
   | Request<"instance.create", { operationId: string; cwd: string; createDirectory?: boolean; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; child?: DockChildSelection; assistant?: boolean }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
-  | Request<"instance.adopt", { operationId: string; sessionFile: string; child?: Omit<DockChildSelection, "withParentContext">; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
   | Request<"instance.get_by_key", { key: string }>
   | Request<"instance.get", { instanceId: string }>
@@ -954,7 +954,6 @@ export function requestOptionCapabilities(request: ControlRequest): string[] {
   if ((request.type === "interaction.respond" || request.type === "extension.widget_viewport.set") && request.params.leaseToken === undefined) return [SHARED_INTERACTIONS_CAPABILITY];
   if (request.type === "session.inventory" && request.params.cursor !== undefined) return [SESSION_INVENTORY_PAGES_CAPABILITY];
   if (request.type === "instance.create") return createOptionCapabilities(request.params);
-  if (request.type === "instance.adopt" && request.params.child !== undefined) return [COLLABORATION_CAPABILITY];
   if (request.type === "system.default.set" && request.params.assistant === true) return [INSTANCE_ASSISTANT_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
@@ -1147,9 +1146,9 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
 }
 
 /** A child Work's settings, chosen by its top-level parent and accepted only together. */
-function parseChildSelection(input: unknown, adopting = false): DockChildSelection {
+function parseChildSelection(input: unknown): DockChildSelection {
   const value = object(input, "params.child", "invalid_request");
-  exact(value, adopting ? ["parentId", "allowedTools"] : ["parentId", "allowedTools", "withParentContext", "sessionFile"], "invalid_request");
+  exact(value, ["parentId", "allowedTools", "withParentContext", "sessionFile"], "invalid_request");
   const sessionFile = optionalString(value.sessionFile, "params.child.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
   if (sessionFile !== undefined && (!isPortableAbsoluteLocalPath(sessionFile) || value.withParentContext === true)) throw validation("invalid_request", "Give an absolute sessionFile without withParentContext");
   let allowedTools: string[] | undefined;
@@ -1232,16 +1231,14 @@ export function parseControlRequest(input: unknown): ControlRequest {
       } };
     }
     case "instance.adopt": {
-      exact(params, ["operationId", "sessionFile", "child", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      exact(params, ["operationId", "sessionFile", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       const sessionFile = string(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
       if (!isPortableAbsoluteLocalPath(sessionFile)) throw validation("invalid_request", "params.sessionFile must be absolute");
       const selectedHost = hostId();
-      const child = params.child === undefined ? undefined : parseChildSelection(params.child, true);
-      if (child && params.name !== undefined) throw validation("invalid_request", "A saved child Work keeps its session name");
-      return { ...base, type, params: { operationId: operationId(), sessionFile, ...(child === undefined ? {} : { child }), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision } };
+      return { ...base, type, params: { operationId: operationId(), sessionFile, name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision } };
     }
     case "instance.list": {
       exact(params, ["selector", "cursor", "limit"], "invalid_request");
