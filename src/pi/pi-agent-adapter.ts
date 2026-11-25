@@ -2148,7 +2148,9 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     const { model, thinkingLevel, ...piCreateOptions } = (currentWorkerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
     const startingCopy = !sessionStartEvent && options.newConversationCopy;
     const startingNew = startingCopy || (sessionStartEvent ? sessionStartEvent.reason === "new" : !options.sessionManager);
-    const startingModel = await resolvePiStartingModel(startingNew ? model : undefined, services.modelRuntime, sessionManager);
+    // Ordinary Works use Pi's own resume path, including opening its model picker when a provider is gone.
+    // A delegated child may start working immediately after opening; don't substitute a billable fallback.
+    const startingModel = await resolvePiStartingModel(startingNew ? model : undefined, services.modelRuntime, options.child ? sessionManager : undefined);
     // Pi starts a model that lacks the requested thinking level at the nearest level it has.
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,

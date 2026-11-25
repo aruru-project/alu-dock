@@ -12,12 +12,13 @@ import { AgentModelNotFoundError } from "../core/agent-worker.js";
 export async function resolvePiStartingModel(
   input: unknown,
   modelRuntime: Pick<ModelRuntime, "getModel" | "checkAuth">,
-  sessionManager: Pick<SessionManager, "getBranch">,
+  childConversation?: Pick<SessionManager, "getBranch">,
 ): Promise<ReturnType<ModelRuntime["getModel"]>> {
   if (input === undefined) {
+    if (!childConversation) return undefined;
     // A model_change names the chosen model, even if a different physical model answered
     // for it. Older conversations may have only the model on their assistant messages.
-    const branch = sessionManager.getBranch();
+    const branch = childConversation.getBranch();
     const choice = branch.findLast(entry => entry.type === "model_change");
     const answer = choice ? undefined : branch.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
     if (choice) return requireModel(modelRuntime, choice.provider, choice.modelId);

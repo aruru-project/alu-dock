@@ -263,6 +263,9 @@ test("stopping the assistant while her child Work is stopping still waits for th
       await heldAck;
     }
   });
+  // A child that has merely been created owes no result. Give it real work before killing its Worker.
+  await team.registry!.invokeDockTool(reopened.id, { type: "send", operationId: "ask-crashing-lead", target: crashing.id, message: "Report on the review." });
+  await team.providers.implementer.request(0);
   process.kill(crashingPid, "SIGKILL");
   await waitFor(async () => (await client.status(crashing.id)).lifecycle === "runtime_error", "The lead's crash was not observed");
   await waitFor(() => arrived, "The assistant did not receive the crash notice");
