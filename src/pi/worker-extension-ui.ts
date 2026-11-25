@@ -111,7 +111,7 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
     this.fire("ui.setStatus", { key, ...(text === undefined ? {} : { text }) });
   }
 
-  setWidget(key: string, lines: string[] | undefined, placement: "aboveEditor" | "belowEditor" = "aboveEditor"): void {
+  setWidget(key: string, lines: readonly string[] | undefined, placement: "aboveEditor" | "belowEditor" = "aboveEditor"): void {
     this.fire("ui.setWidget", { key, ...(lines === undefined ? {} : { lines }), placement });
   }
 

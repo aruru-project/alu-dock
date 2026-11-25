@@ -15,7 +15,7 @@ export interface PiExtensionUiPort {
   getToolsExpanded(): boolean;
   setToolsExpanded(expanded: boolean): void;
   setStatus(key: string, text: string | undefined): void;
-  setWidget(key: string, lines: string[] | undefined, placement?: "aboveEditor" | "belowEditor"): void;
+  setWidget(key: string, lines: readonly string[] | undefined, placement?: "aboveEditor" | "belowEditor"): void;
   reportWidgetError(key: string, error: unknown): void;
   unsupported(feature: string): void;
   bindWidgetRenderer(renderer: ExtensionWidgetRenderer): void;
