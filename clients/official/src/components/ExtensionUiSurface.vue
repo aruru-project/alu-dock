@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { AlertTriangle, ChevronRight } from '@lucide/vue'
+import { AlertTriangle, ChevronDown, ChevronRight } from '@lucide/vue'
 import {
   acquireExtensionControl,
   isTauri,
@@ -28,6 +28,7 @@ const surfaces = useSurfacesStore()
 const resident = computed(() => isResidentAssistant(props.work))
 const root = ref<HTMLElement | null>(null)
 const dialog = ref<HTMLElement | null>(null)
+const resumeButton = ref<HTMLButtonElement | null>(null)
 const acquiringError = ref('')
 const responseError = ref('')
 const phase = ref<'idle' | 'submitting'>('idle')
@@ -82,15 +83,23 @@ watch(() => request.value?.interactionId, async (id) => {
     answer.value = request.value?.method === 'editor' ? request.value.prefill ?? '' : ''
   }
   await nextTick()
-  if (request.value?.interactionId === id && !props.focusSuspended) focusDialog()
+  if (request.value?.interactionId === id && !props.focusSuspended && !surfaces.questionHidden) focusDialog()
 })
-function focusDialog() { dialog.value?.querySelector<HTMLElement>('input, textarea, button')?.focus() }
-watch(() => props.focusSuspended, async (suspended) => {
-  if (suspended || !request.value) return
+function focusDialog() {
+  const element = dialog.value?.querySelector<HTMLElement>('input, textarea') ?? dialog.value?.querySelector<HTMLElement>('footer button')
+  element?.focus({ preventScroll: true })
+}
+watch(() => !props.focusSuspended && !surfaces.questionHidden, async (visible) => {
+  if (!visible || !request.value) return
   const id = request.value.interactionId
   await nextTick()
-  if (!props.focusSuspended && request.value?.interactionId === id) focusDialog()
+  if (!props.focusSuspended && !surfaces.questionHidden && request.value?.interactionId === id) focusDialog()
 })
+async function hideQuestion() {
+  surfaces.hideQuestion()
+  await nextTick()
+  if (!props.focusSuspended) resumeButton.value?.focus({ preventScroll: true })
+}
 watch(() => extension.controller?.handle, () => scheduleViewport())
 watch(() => extension.shared ? `${extension.instanceId}:${extension.runtimeGeneration}` : '', (key) => { if (key) scheduleViewport() })
 watch(() => extension.editorText?.id, () => { if (extension.editorText) emit('editorText', extension.editorText.text) })
@@ -336,6 +345,9 @@ function interactionMethodLabel(method: string) {
       <span v-for="(text, key) in visibleStatus" :key="key">{{ key }}: {{ text }}</span>
     </component>
 
+    <button v-if="request && surfaces.questionHidden && !focusSuspended" ref="resumeButton" type="button" class="extension-resume" @click="surfaces.showQuestion()">
+      <span>待回答 · {{ request.title }}</span><strong>继续回答 ↑</strong>
+    </button>
     <slot />
 
     <div class="extension-widgets below">
@@ -346,9 +358,9 @@ function interactionMethodLabel(method: string) {
     </div>
 
     <Teleport to="body">
-      <div v-if="request" v-show="!focusSuspended" class="extension-dialog-layer" role="presentation">
+      <div v-if="request" v-show="!focusSuspended && !surfaces.questionHidden" class="extension-dialog-layer" role="presentation">
         <section ref="dialog" class="extension-dialog" role="dialog" aria-modal="true" :aria-labelledby="`extension-dialog-${request.interactionId}`" @keydown.esc="cancelByEscape">
-          <header><div><small>互动 · {{ interactionMethodLabel(request.method) }}</small><h2 :id="`extension-dialog-${request.interactionId}`">{{ request.title }}</h2></div><span v-if="secondsRemaining !== null">{{ secondsRemaining }}s</span></header>
+          <header><div><small>互动 · {{ interactionMethodLabel(request.method) }}</small><h2 :id="`extension-dialog-${request.interactionId}`">{{ request.title }}</h2></div><span v-if="secondsRemaining !== null">{{ secondsRemaining }}s</span><button type="button" class="extension-hide" @click="hideQuestion"><ChevronDown :size="14" aria-hidden="true" />收起</button></header>
 
           <template v-if="request.method === 'select'">
             <input v-model="search" type="search" placeholder="搜索全部选项" :disabled="locked" />
@@ -411,6 +423,10 @@ button.alu-extension-status { max-width: 100%; text-align: left; }
 .extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: var(--alu-scrim-light); backdrop-filter: blur(8px); place-items: center; }
 .extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--alu-window-bg); border: 1px solid var(--alu-border-light); border-radius: 15px; box-shadow: var(--alu-panel-shadow); }
 .extension-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.extension-resume { width: 100%; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; padding: 4px 8px; cursor: pointer; border: 0; background: transparent; color: var(--alu-text-dim); text-align: left; }
+.extension-resume span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extension-resume strong { flex: none; color: var(--alu-accent); }
+.extension-hide { display: inline-flex; align-items: center; gap: 3px; flex: none; margin-left: auto; padding: 5px 8px; background: transparent; color: var(--alu-text-dim); border: 0; cursor: pointer; }
 .extension-dialog header small { color: var(--alu-accent); font-size: var(--alu-micro-size); letter-spacing: .14em; }
 .extension-dialog h2 { margin: 4px 0 0; font: 600 17px/1.4 var(--font-reading); overflow-wrap: anywhere; }
 .extension-dialog header > span { color: var(--alu-warning); font-size: var(--alu-meta-size); }

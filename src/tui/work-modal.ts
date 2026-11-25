@@ -20,7 +20,7 @@ export interface FixedActionItem<T extends string = string> {
 export class WorkModalFrame implements Component, Focusable {
   private focusedValue = false;
 
-  constructor(private readonly child: Component) {}
+  constructor(private readonly child: Component, private readonly footer?: string) {}
 
   get focused(): boolean { return this.focusedValue; }
   set focused(value: boolean) {
@@ -36,7 +36,8 @@ export class WorkModalFrame implements Component, Focusable {
     const innerWidth = Math.max(1, safeWidth - 4);
     const top = paint.accent(`╭${"─".repeat(Math.max(0, safeWidth - 2))}╮`);
     const bottom = paint.accent(`╰${"─".repeat(Math.max(0, safeWidth - 2))}╯`);
-    const rows = this.child.render(innerWidth).map((line) => {
+    const content = this.child.render(innerWidth);
+    const rows = (this.footer ? [...content, paint.muted(this.footer)] : content).map((line) => {
       const clipped = truncateToWidth(line, innerWidth, "");
       const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
       return `${paint.accent("│")} ${clipped}${padding} ${paint.accent("│")}`;

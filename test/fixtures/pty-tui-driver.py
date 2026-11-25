@@ -663,9 +663,18 @@ def main() -> int:
                     while marker not in output and time.monotonic() < dialog_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
-                    os.write(fd, response)
-                    time.sleep(0.1)
-                    read_available(fd, output, 0.05)
+                    # Read the conversation without losing the select/confirm choice or input draft.
+                    if response[:-1]:
+                        write_input(fd, output, response[:-1])
+                    before_hide = len(output)
+                    write_input(fd, output, b"\x1bOQ")  # F2
+                    until = time.monotonic() + 2
+                    while b"F2 resume answer" not in output[before_hide:] and time.monotonic() < until:
+                        read_available(fd, output, 0.05)
+                    if b"F2 resume answer" not in output[before_hide:]:
+                        raise RuntimeError("F2 did not reveal the conversation and the way back to the question")
+                    write_input(fd, output, b"\x1bOQ")
+                    write_input(fd, output, b"\r")
                 os.write(fd, b"\x03")  # Clear the injected main-editor draft before detach.
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)

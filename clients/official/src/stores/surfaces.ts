@@ -22,7 +22,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const composerComposing = ref(false)
   /** The New Work dialog is committing; Back and closing wait for it. */
   const directoryBusy = ref(false)
-  const extensionActive = () => !!extensionUi.activeRequest
+  const questionView = ref<{ id: string; place: 'hidden' | 'over-commands' }>()
+  const currentQuestionView = computed(() => questionView.value?.id === extensionUi.activeRequest?.interactionId ? questionView.value?.place : undefined)
+  const questionHidden = computed(() => currentQuestionView.value === 'hidden')
+  const extensionActive = () => !!extensionUi.activeRequest && !questionHidden.value
   const selected = computed(() => app.selectedWork)
   watch(() => extensionUi.controller?.handle, (handle) => {
     if (!handle) restoreDocumentTitle()
@@ -87,7 +90,22 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
   let modalTrigger: HTMLElement | null = null
 
-  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || machineSettingsOpen.value || assistantOpen.value || composerExpanded.value || !!confirmDialog.value || !!projectTrustDialog.value || !!imagePreview.value || !!messageTextView.value)
+  const otherModalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || appSettingsOpen.value || hostSettingsOpen.value || machineSettingsOpen.value || assistantOpen.value || composerExpanded.value || !!confirmDialog.value || !!projectTrustDialog.value || !!imagePreview.value || !!messageTextView.value)
+  const modalOpen = computed(() => commandOpen.value || otherModalOpen.value)
+
+  // Keep the runner mounted beneath its question. Other dialogs keep their usual priority.
+  const answeringOverCommands = computed(() => commandOpen.value && controlSection.value === 'commands'
+    && !otherModalOpen.value && currentQuestionView.value === 'over-commands')
+  function showQuestion(fromCommands = false) {
+    const question = extensionUi.activeRequest
+    questionView.value = fromCommands && question ? { id: question.interactionId, place: 'over-commands' } : undefined
+    if (fromCommands && !question) closeControl() // Older Hosts may still be opening the question.
+  }
+  function hideQuestion() {
+    if (extensionUi.activeRequest) questionView.value = { id: extensionUi.activeRequest.interactionId, place: 'hidden' }
+  }
+  watch(commandOpen, open => { if (!open && questionView.value?.place === 'over-commands') questionView.value = undefined })
+  watch(() => extensionUi.activeSummary?.id, id => { if (questionView.value?.id !== id) questionView.value = undefined })
 
   /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
      每一层打开的浮层/抽屉各压入一个占位历史条目，返回键触发 popstate 时只关闭最上面
@@ -276,7 +294,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function handleGlobalModalKeydown(event: KeyboardEvent) {
-    if (!modalOpen.value || event.key !== 'Escape' || event.isComposing || composerComposing.value) return
+    if (answeringOverCommands.value || !modalOpen.value || event.key !== 'Escape' || event.isComposing || composerComposing.value) return
     event.preventDefault()
     event.stopPropagation()
     if (confirmDialog.value) settleConfirm(false)
@@ -499,5 +517,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsTarget, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { questionHidden, answeringOverCommands, showQuestion, hideQuestion, composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsTarget, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

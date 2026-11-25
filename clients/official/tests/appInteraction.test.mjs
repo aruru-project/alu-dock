@@ -3938,10 +3938,16 @@ try {
     assert.equal(!!button('中止命令'), true, 'the command has a visible cancel action even though chat is idle')
     // #671 browser acceptance: the command modal covered its own confirmation without a way to open it.
     await click('回答问题')
-    assert.equal(!!dialog(), false, 'answering leaves the command overlay and exposes the existing question')
+    assert.equal(dialog().parent.style.display, 'none', 'answering temporarily covers the runner without destroying its result')
     assert.ok(text(teleport).includes('确认扩展操作'))
-    await click('打开命令中心')
-    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    const answeredBefore = calls.filter(call => call.command === 'respond_shared_interaction').length
+    find(teleport, item => item.type === 'button' && text(item) === '收起').props.onClick(); await settle()
+    event('interaction.requested', { interactionId: 'command-confirm', method: 'confirm', title: '确认扩展操作', message: '等待主人确认。', issuedAt: 'now' }); await settle()
+    assert.notEqual(dialog().parent.style.display, 'none', 'receiving the same question again leaves the command result readable')
+    assert.equal(calls.filter(call => call.command === 'respond_shared_interaction').length, answeredBefore, 'hiding is not an answer')
+    await click('继续回答')
+    assert.equal(dialog().parent.style.display, 'none')
+    find(teleport, item => item.type === 'button' && text(item) === '收起').props.onClick(); await settle()
     abortNative = () => { throw { code: 'busy', message: '输入框先前的中止失败，请重试。' } }
     await actions.abortCurrentRun(); await settle()
     abortNative = () => { throw { code: 'connection_failed', message: '连接中断。请重试。' } }

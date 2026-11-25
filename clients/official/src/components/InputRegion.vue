@@ -50,7 +50,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
       <div class="alu-input-float-scroll"><button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button></div>
       <div class="alu-input-float-stop"><StopRunPill /></div>
     </div>
-    <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
+    <ExtensionUiSurface :focus-suspended="modalOpen && !surfaces.answeringOverCommands" :work="selected" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
       <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span></div>
       <div v-if="actionNotice" class="alu-composer-notice" role="status"><span>{{ actionNotice }}</span></div>
       <div v-for="operation in returnedOperations" :key="operation.operationId" class="alu-composer-notice" role="status">

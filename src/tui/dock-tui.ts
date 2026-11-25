@@ -10,6 +10,8 @@ import {
   matchesKey,
   ProcessTerminal,
   TuiMainScreen,
+  truncateToWidth,
+  type OverlayHandle,
   type AutocompleteItem,
   type AutocompleteProvider,
   type AutocompleteSuggestions,
@@ -111,7 +113,7 @@ export async function runDockTui(
   let controllerId: string | undefined;
   let pendingEditorDirective: { runtimeGeneration: number; text: string } | undefined;
   let pendingTitleDirective: { runtimeGeneration: number; title: string } | undefined;
-  let activeExtensionDialog: { interactionId: string; closeFromHost: () => void; closed: Promise<void> } | undefined;
+  let activeExtensionDialog: { interactionId: string; title: string; overlay: OverlayHandle; closeFromHost: () => void; closed: Promise<void> } | undefined;
   let screenStarted = false;
   // The question to show next: one that arrived before the screen and editor existed (shown
   // earlier, the editor would take its focus), or one waiting for the question on screen to
@@ -1069,7 +1071,7 @@ export async function runDockTui(
           title: request.title,
           footer: "type to filter · ↑↓ choose · Enter select · Esc cancel",
           maxVisible: Math.min(request.options.length, 14),
-          maxRows: () => pickerContentRowBudget(terminal.rows),
+          maxRows: () => pickerContentRowBudget(terminal.rows) - 1,
           requestRender: () => tui.requestRender(),
         },
       );
@@ -1094,7 +1096,7 @@ export async function runDockTui(
         ...(request.method === "editor" && request.prefill !== undefined ? { prefill: request.prefill } : {}),
         requestRender: () => tui.requestRender(),
         tui,
-        maxRows: () => pickerContentRowBudget(terminal.rows),
+        maxRows: () => pickerContentRowBudget(terminal.rows) - 1,
       });
       dialog.onSubmit = (value) => finish({ response: { method: request.method, value }, fromHost: false });
       dialog.onCancel = () => finish({ response: { method: request.method, cancelled: true }, fromHost: false });
@@ -1102,15 +1104,14 @@ export async function runDockTui(
     }
 
     let markClosed!: () => void;
+    const frame = new WorkModalFrame(component, "  F2 hide");
+    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
     const shown = {
-      interactionId: request.interactionId,
+      interactionId: request.interactionId, title: request.title, overlay,
       closeFromHost: () => finish({ fromHost: true }),
       closed: new Promise<void>((resolve) => { markClosed = resolve; }),
     };
     activeExtensionDialog = shown;
-    const frame = new WorkModalFrame(component);
-    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
-    tui.setFocus(frame);
     try {
       return await result;
     } finally {
@@ -2128,7 +2129,11 @@ export async function runDockTui(
   const workFlow = new Container();
   workFlow.addChild(conversation);
   workFlow.addChild(widgetsAboveEditor);
-  workFlow.addChild(activity);
+  workFlow.addChild({
+    render: (width) => activeExtensionDialog?.overlay.isHidden()
+      ? [truncateToWidth(paint.accent(` F2 resume answer · ${terminalSafe(activeExtensionDialog.title)}`), width)] : activity.render(width),
+    invalidate: () => activity.invalidate(),
+  });
   workFlow.addChild(pendingQueue);
   workFlow.addChild(editor);
   workFlow.addChild(widgetsBelowEditor);
@@ -2139,6 +2144,11 @@ export async function runDockTui(
   restoreTerminalTitle();
 
   const removeInputListener = tui.addInputListener((data) => {
+    const question = activeExtensionDialog?.overlay;
+    if (question && matchesKey(data, Key.f2) && (question.isFocused() || (question.isHidden() && !tui.hasOverlay()))) {
+      question.setHidden(!question.isHidden());
+      return { consume: true };
+    }
     if (tui.hasOverlay()) return undefined;
     if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
       finish("detached");

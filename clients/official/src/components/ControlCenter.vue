@@ -66,6 +66,10 @@ const { openMachineSettings } = workActions
 const surfaces = useSurfacesStore()
 const extensionUi = useExtensionUiStore()
 const commandQuestion = computed(() => extensionUi.isCurrent(props.work) && !!(extensionUi.activeRequest || extensionUi.activeSummary))
+const questionButton = ref<HTMLButtonElement | null>(null)
+watch(() => surfaces.answeringOverCommands, async (answering, wasAnswering) => {
+  if (!answering && wasAnswering) { await nextTick(); questionButton.value?.focus({ preventScroll: true }) }
+})
 const commandCancellable = computed(() => commandConsole.hasActiveOperation || commandQuestion.value)
 const commandAbortError = ref('')
 const commandOutput = ref<HTMLElement | null>(null)
@@ -683,7 +687,7 @@ function isCurrentModel(model: ModelInfo) {
 
     <template v-else-if="section === 'commands'">
       <div v-if="commandAbortError" class="alu-dialog-error">{{ commandAbortError }}<button type="button" class="alu-link-button" :disabled="workActions.aborting" @click="cancelCommand">重试中止</button></div>
-      <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>{{ commandQuestion ? '有问题等待你回答。' : '命令正在执行。' }}</span><button v-if="commandQuestion" type="button" class="button secondary" @click="$emit('close')">回答问题</button><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
+      <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>{{ commandQuestion ? '有问题等待你回答。' : '命令正在执行。' }}</span><button v-if="commandQuestion" ref="questionButton" type="button" class="button secondary" @click="surfaces.showQuestion(true)">{{ surfaces.questionHidden ? '继续回答' : '回答问题' }}</button><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
       <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>

@@ -1,5 +1,6 @@
 import {
   Box,
+  hyperlink,
   Markdown,
   truncateToWidth,
   visibleWidth,
@@ -19,6 +20,7 @@ import { systemPromptChangeText, usageRecordText } from "../core/runtime-record-
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import type { AttachmentDto } from "../core/instance-attachments.js";
+import { MAX_TEXT_CHARS } from "../core/instance-dto.js";
 import { renderWorkAlu } from "./alu-mascot.js";
 import { knownCompactionFeedback } from "./compaction-feedback.js";
 import type { RunActivityState } from "./run-activity.js";
@@ -1265,7 +1267,19 @@ function renderNotice(text: string, width: number, tone: "info" | "warning" | "e
   const painter = tone === "error" ? paint.error : tone === "warning" ? paint.warning : paint.muted;
   if (width < 3) return wrapPlainText(text, width).map(painter);
   const bodyWidth = width - 2;
-  return wrapPlainText(text, bodyWidth).map((line, index) => {
+  // Hard-wrapped notice rows have visual margins. Let the terminal copy the original address
+  // from its first visible piece, without duplicating an entire long URL on every row (Pi #12416).
+  const rows = text.split("\n").flatMap(source => {
+    const wrapped = wrapTextWithAnsi(source || " ", bodyWidth);
+    // The extension notification bound also keeps longer local diagnostics out of OSC 8.
+    const first = wrapped[0];
+    if (first && source.length <= MAX_TEXT_CHARS && /^https?:\/\//iu.test(source)
+      && !/[\s\u0000-\u001f\u007f-\u009f]/u.test(source) && URL.canParse(source)) {
+      wrapped[0] = hyperlink(first, source);
+    }
+    return wrapped;
+  });
+  return rows.map((line, index) => {
     const marker = index === 0 ? (tone === "info" ? "·" : "!") : "│";
     return `${tone === "info" ? paint.faint(marker) : painter(marker)} ${painter(line)}`;
   });
