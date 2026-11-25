@@ -23,12 +23,7 @@ import type { ExtractionTiming } from "../../src/assistant/extraction.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
 import { PlanGoalProvider, waitFor } from "./plan-goal-provider.js";
 
-/**
- * A real Host, real Pi Workers and one scripted model provider per name. The first name is
- * the Pi default. Only provider HTTP replies are fake.
- */
-export async function startNativeTeam<Name extends string>(context: TestContext, names: readonly [Name, ...Name[]], options: {
-  prefix: string;
+interface NativeTeamOptions {
   thinkingLevel?: string;
   /** Run Main's model service, as the installed Host does; its Workers then hold no providers. */
   modelService?: boolean;
@@ -50,10 +45,11 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   attachments?: boolean;
   /** Shorter waits for her memory passes. */
   assistantTiming?: Partial<ExtractionTiming>;
-}) {
-  const root = await mkdtemp(join(tmpdir(), options.prefix));
+}
+
+/** The same isolated Host can run here, or in a separate process against this team's saved state. */
+export function nativeTeamHost(root: string, options: NativeTeamOptions) {
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
-  const providers = Object.fromEntries(names.map((name) => [name, new PlanGoalProvider()])) as Record<Name, PlanGoalProvider>;
   const workerPids: number[] = [];
   const environment = isolatedProcessEnvironment(home, {
     PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
@@ -70,7 +66,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     ? new AttachmentService(new AttachmentStorageState(join(root, "attachment-state"), join(root, "attachments")))
     : undefined;
   const team = {
-    root, cwd, agentDir, providers, workerPids, modelService,
+    root, cwd, agentDir, sessionDir, home, environment, workerPids, modelService,
     registry: undefined as DockRegistry | undefined,
     host: undefined as DockHost | undefined,
     client: undefined as DockClient | undefined,
@@ -142,14 +138,23 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
       return (await team.client!.list()).find((work) => work.assistant && work.lifecycle === "active")!;
     },
   };
+  return team;
+}
+
+/** Real Pi Workers and one scripted provider per name. The first is the Pi default. */
+export async function startNativeTeam<Name extends string>(context: TestContext, names: readonly [Name, ...Name[]], options: NativeTeamOptions & { prefix: string }) {
+  const root = await mkdtemp(join(tmpdir(), options.prefix));
+  const providers = Object.fromEntries(names.map((name) => [name, new PlanGoalProvider()])) as Record<Name, PlanGoalProvider>;
+  const team = Object.assign(nativeTeamHost(root, options), { providers });
+  const { cwd, agentDir, sessionDir, home } = team;
   context.after(async () => {
     team.onCleanup?.();
     team.client?.closeActiveConnections();
     // A failed test can leave a model request unanswered, and the Host's stop would wait for that turn.
     await Promise.all(Object.values<PlanGoalProvider>(providers).map((provider) => provider.stop()));
     await team.host?.stop().catch(() => {});
-    await modelService?.stop();
-    await assistantService?.stop();
+    await team.modelService?.stop();
+    await team.stopAssistantService();
     await rm(root, { recursive: true, force: true });
   });
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
