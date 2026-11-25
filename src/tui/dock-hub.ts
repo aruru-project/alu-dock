@@ -516,8 +516,11 @@ async function chooseSessionAction(
       actionEntries.push({ value: `resume:${instance.id}`, label: `Resume ${displayName(instance)}`, description: "continue from the saved conversation" });
     }
   }
-  const hasCurrentWork = linked.some((instance) => instance.lifecycle !== "stopped");
-  if (!hasCurrentWork) {
+  // An interrupted child's identity and parent stay with the file; ordinary saved sessions
+  // keep their existing explicit "Open as new work" option when no Worker owns the file.
+  const reserved = linked.some((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping"
+    || (instance.parentId !== undefined && instance.lifecycle !== "stopped"));
+  if (!reserved) {
     actionEntries.push({ value: "adopt", label: "Open as new work", description: "start new Dock work from this saved Pi session" });
   }
   actionEntries.push({ value: BACK, label: "Back to Pi Sessions", description: "Return to saved sessions" });

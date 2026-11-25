@@ -609,6 +609,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     try {
       // An interrupted Work still owns its history, including while it is waiting for its parent.
       if (this.catalog.current().instances.some(record => record.lifecycle !== "stopped"
+        && (input.child !== undefined || record.parentId !== undefined)
         && (record.sessionFile === sessionFile || record.recoverySessionFile === sessionFile))) {
         throw new Error("This session already belongs to a Work. Open that Work or choose Resume in the Hub.");
       }
