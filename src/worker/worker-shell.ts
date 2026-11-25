@@ -45,6 +45,7 @@ export interface WorkerAgent {
   modelFallbackMessage?: string;
   /** The name the reopened conversation already has. */
   persistedName?: string;
+  recoveredChildReceipts?: import("../core/work-progress.js").RecoveredChildReceipt[];
 }
 
 /** What the Host lets this Worker ask of it. */
@@ -207,6 +208,7 @@ export async function runAgentWorker<Init>(options: AgentWorkerOptions<Init>): P
     diagnostics: running.diagnostics.map((item) => boundedError(item)),
     ...(running.modelFallbackMessage === undefined ? {} : { modelFallbackMessage: running.modelFallbackMessage }),
     ...(running.persistedName === undefined ? {} : { persistedName: running.persistedName }),
+    ...(running.recoveredChildReceipts?.length ? { recoveredChildReceipts: running.recoveredChildReceipts } : {}),
     pid: process.pid,
   });
 

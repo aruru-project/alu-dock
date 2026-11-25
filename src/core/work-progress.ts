@@ -14,7 +14,7 @@ export const INITIAL_WORK_PROGRESS: Readonly<WorkProgress> = { next: 1, handed: 
 export interface WorkRecovery {
   afterHostCrash?: true;
   own?: WorkProgress;
-  children: Array<{ id: string; name: string; handed: number; settled: number }>;
+  children: Array<WorkProgress & { id: string; name: string }>;
 }
 
 export function parseWorkProgress(raw: unknown): WorkProgress {
@@ -29,9 +29,17 @@ export function parseWorkProgress(raw: unknown): WorkProgress {
 
 export function parseWorkRecovery(raw: unknown): WorkRecovery {
   const { own, children, afterHostCrash } = (raw ?? {}) as WorkRecovery;
-  if (!Array.isArray(children) || !children.every((child) => child && typeof child.id === "string" && typeof child.name === "string"
-    && Number.isSafeInteger(child.handed) && Number.isSafeInteger(child.settled) && child.handed >= 0 && child.settled >= -1)) {
-    throw new Error("Invalid child Work progress on reopen");
-  }
-  return { children, ...(afterHostCrash === true ? { afterHostCrash } : {}), ...(own === undefined ? {} : { own: parseWorkProgress(own) }) };
+  if (!Array.isArray(children)) throw new Error("Invalid child Work progress on reopen");
+  const parsed = children.map(({ id, name, ...progress }) => {
+    if (typeof id !== "string" || typeof name !== "string") throw new Error("Invalid child Work on reopen");
+    return { id, name, ...parseWorkProgress(progress) };
+  });
+  return { children: parsed, ...(afterHostCrash === true ? { afterHostCrash } : {}), ...(own === undefined ? {} : { own: parseWorkProgress(own) }) };
+}
+
+/** Only numbered final results and actual departures advance the Host's corresponding facts. */
+export interface RecoveredChildReceipt {
+  id: string;
+  answered?: number;
+  closed?: number;
 }

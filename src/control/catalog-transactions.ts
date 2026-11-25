@@ -11,6 +11,7 @@ import {
   validateCatalogRecord,
 } from "../core/catalog.js";
 
+import type { RecoveredChildReceipt, WorkProgress } from "../core/work-progress.js";
 import { catalogBranches } from "./catalog-family.js";
 
 export type CatalogHealth = "healthy" | "mutation_faulted" | "draining";
@@ -88,6 +89,30 @@ export class CatalogTransactionCoordinator {
     return this.enqueue(record, { ...context, instanceId: record.id }, "create");
   }
 
+  /** Publish the reopened parent and its verified receipts together. A child that was stopped
+   * while the Worker was opening has already left the catalog and stays retired. */
+  async reopen(record: CatalogInstanceRecord, operationId: string, receipts: readonly RecoveredChildReceipt[]): Promise<Map<string, WorkProgress>> {
+    const received = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+    const corrected = new Map<string, WorkProgress>();
+    await this.enqueue(record, { kind: "instance.reopen", effect: "rollback_contained", operationId, instanceId: record.id }, "replace", (records) => {
+      if (received.size === 0) return;
+      for (const child of records.values()) {
+        if (child.parentId !== record.id || child.childGrant?.mainParent || child.lifecycle !== "host_lost" || !child.workProgress) continue;
+        const receipt = received.get(child.mainIdentity?.child ?? child.id);
+        if (!receipt) continue;
+        const progress = { ...child.workProgress };
+        for (const field of ["answered", "closed"] as const) {
+          const through = receipt[field];
+          if (through !== undefined && through > progress[field] && through < progress.next) progress[field] = through;
+        }
+        if (progress.answered === child.workProgress.answered && progress.closed === child.workProgress.closed) continue;
+        records.set(child.id, { ...child, workProgress: progress });
+        corrected.set(child.id, progress);
+      }
+    });
+    return corrected;
+  }
+
   remove(
     instanceId: string,
     context: CatalogMutationContext,
@@ -131,7 +156,8 @@ export class CatalogTransactionCoordinator {
     return this.enqueue(record, context, "replace");
   }
 
-  private enqueue(record: CatalogInstanceRecord, context: CatalogMutationContext, mode: "create" | "replace"): Promise<void> {
+  private enqueue(record: CatalogInstanceRecord, context: CatalogMutationContext, mode: "create" | "replace",
+    updateChildren?: (records: Map<string, CatalogInstanceRecord>) => void): Promise<void> {
     const task = this.tail.then(async () => {
       if (this.healthValue !== "healthy") {
         if (context.effect === "post_effect") throw new CatalogEffectUnknownError(context, this.faultValue?.error);
@@ -141,11 +167,17 @@ export class CatalogTransactionCoordinator {
         validateCatalogRecord(record);
         const records = new Map(this.projection.instances.map((item) => [item.id, item]));
         if (mode === "create" && records.has(record.id)) throw new Error(`Catalog instance already exists: ${record.id}`);
-        if (mode === "replace" && !records.has(record.id)) throw new Error(`Catalog instance is not committed: ${record.id}`);
+        if (mode === "replace" && !records.has(record.id)) {
+          // Forget may retire a crashed child while its parent's acknowledgement of the
+          // crash is still coming back. There is no remaining child whose progress to save.
+          if (context.kind === "child.progress" && context.effect === "post_effect" && record.parentId !== undefined) return;
+          throw new Error(`Catalog instance is not committed: ${record.id}`);
+        }
         // The role and tool ceiling belong to the Work, not the particular Worker
         // reporting its latest state. Only creation grants them, never a later commit.
         const grant = records.get(record.id)?.childGrant;
         records.set(record.id, structuredClone(grant === undefined ? record : { ...record, childGrant: grant }));
+        updateChildren?.(records);
         const candidate: CatalogProjection = {
           schemaVersion: 1,
           revision: this.projection.revision + 1,

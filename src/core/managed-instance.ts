@@ -656,7 +656,8 @@ export class ManagedInstance {
     return this.enqueueTransition(async () => {
       if (this.state.lifecycle === "stopped") return; // Stop has already retired the record.
       const next = { ...this.childState, ...structuredClone(fields) };
-      await this.catalogPort?.commit({ ...this.catalogRecord(), ...next }, { kind: "child.progress", effect, instanceId: this.id });
+      const kind = fields.workProgress === undefined ? "child.identity" : "child.progress";
+      await this.catalogPort?.commit({ ...this.catalogRecord(), ...next }, { kind, effect, instanceId: this.id });
       this.childState = next;
     });
   }

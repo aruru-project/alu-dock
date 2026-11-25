@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
+import type { WorkMessage } from "../src/core/dock-tools.js";
 import type { DockClient } from "../src/control/dock-client.js";
 import { exited, startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
@@ -249,9 +250,24 @@ test("stopping the assistant while her child Work is stopping still waits for th
   void stranded.catch(() => {});
   await waitFor(() => held, "The second grandchild did not start");
   const strandedPid = team.workerPids.at(-1)!;
+  // #681: her Worker can acknowledge the crash notice after the owner removes the crashed Work.
+  // Hold that acknowledgement only; she receives the notice through her real Worker.
+  const parent = team.registry!.get(reopened.id), deliver = parent.deliverWorkMessage.bind(parent);
+  let arrived = false, acknowledge!: () => void;
+  const heldAck = new Promise<void>(resolve => { acknowledge = resolve; });
+  team.onCleanup = () => { acknowledge(); release?.(); };
+  context.mock.method(parent, "deliverWorkMessage", async (message: WorkMessage) => {
+    await deliver(message);
+    if (message.type === "child_stopped" && message.from.id === crashing.id) {
+      arrived = true;
+      await heldAck;
+    }
+  });
   process.kill(crashingPid, "SIGKILL");
   await waitFor(async () => (await client.status(crashing.id)).lifecycle === "runtime_error", "The lead's crash was not observed");
+  await waitFor(() => arrived, "The assistant did not receive the crash notice");
   await client.forget(crashing.id, "forget-crashed");
+  acknowledge();
   // She hands the work to a new Work of the same name while the removed one waits for its child: by name, she
   // reaches the new one only.
   const again = await client.create(team.cwd, "会崩的主 Work", "tree-again", undefined, undefined, { model: { provider: "implementer", id: "fixture" } }, { parentId: reopened.id });

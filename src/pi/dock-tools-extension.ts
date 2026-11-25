@@ -230,13 +230,11 @@ export class DockToolsBridge {
   }
 
   /** Bring acknowledged messages into the reopened conversation without starting a turn. */
-  restore(recovery: WorkRecovery): void {
-    this.children.restore(recovery.children);
-    const read = this.receipts?.restore((message) => {
-      this.children.receive(message);
-      return this.children.owes(message.from.id);
-    });
-    if (recovery.own) this.owed?.restore(recovery.own, read ?? 0);
+  restore(recovery: WorkRecovery) {
+    this.children.restoreFromHost(recovery.children);
+    const restored = this.receipts?.restore(recovery, this.children);
+    if (recovery.own) this.owed?.restore(recovery.own, restored?.parentRead ?? 0);
+    return restored?.corrections;
   }
 
   /** The number of the parent's latest message this child Work has read, sent with its final result. */

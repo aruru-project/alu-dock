@@ -1,6 +1,7 @@
 import type { DockToolsRequest, DockToolsResult, WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification, ObservedInstanceStatus } from "../core/instance-observation.js";
 import type { WorkRecovery } from "../core/work-progress.js";
+import type { WorkMessageReceipts } from "../pi/work-message-receipts.js";
 import { ChildMessages } from "../worker/child-messages.js";
 import type { WorkerHost } from "../worker/worker-shell.js";
 import { firstLine, type WorkNote } from "./status.js";
@@ -29,7 +30,7 @@ export class WorkDesk {
   restore(saved: unknown, recovery?: WorkRecovery): void {
     const { works, followed } = (saved ?? {}) as Partial<SavedWorks>;
     const restored = new Map(recovery?.children.map((child) => [child.id, child]));
-    this.children.restore([...restored.values()]);
+    this.children.restoreFromHost(recovery?.children ?? []);
     for (const [id, work] of Object.entries(works ?? {})) {
       if (!work || typeof work.name !== "string") continue;
       // A remote child's numbers live on its Machine, not in Main's catalog. On a Host crash
@@ -41,6 +42,14 @@ export class WorkDesk {
     }
     for (const child of restored.values()) if (!this.works.has(child.id)) this.works.set(child.id, { name: child.name, owes: this.children.owes(child.id) });
     for (const id of Array.isArray(followed) ? followed : []) if (typeof id === "string") this.followed.add(id);
+  }
+
+  restoreReceipts(recovery: WorkRecovery, receipts: WorkMessageReceipts, checkpoint?: string) {
+    const { corrections } = receipts.restore(recovery, this.children, { checkpoint, note: (message) => this.noteMessage(message) });
+    // These facts are already in the opened session. Keep the next status accurate, without
+    // making a new assistant-works entry every time she is opened.
+    this.updateOwed();
+    return corrections;
   }
 
   get notes(): ReadonlyMap<string, WorkNote> { return this.works; }
@@ -97,11 +106,15 @@ export class WorkDesk {
   heard(message: WorkMessage): void {
     this.children.receive(message);
     if (message.from.relation !== "child") return;
+    this.noteMessage(message);
+    this.syncOwed();
+  }
+
+  private noteMessage(message: WorkMessage): void {
     const known = this.works.get(message.from.id) ?? { name: message.from.name };
     known.name = message.from.name;
     known.lastSaid = message.type === "message" ? firstLine(message.text) : "（没交结果就停下了）";
     this.works.set(message.from.id, known);
-    this.syncOwed();
   }
 
   /** A watch of hers fired: the Work is no longer followed for it. */
@@ -121,12 +134,16 @@ export class WorkDesk {
   }
 
   private syncOwed(): void {
+    this.updateOwed();
+    this.persist();
+  }
+
+  private updateOwed(): void {
     const owed = new Set(this.children.waiting.map((child) => child.id));
     for (const [id, work] of this.works) {
       if (owed.has(id)) work.owes = true; else delete work.owes;
       if (work.onNamedMachine) Object.assign(work, this.children.progress(id));
     }
-    this.persist();
   }
 
   private persist(): void {

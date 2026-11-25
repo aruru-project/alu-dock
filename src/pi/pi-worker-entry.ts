@@ -45,7 +45,7 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),
     invoke: host.invokeDockTool,
   }, init.child, receipts);
-  if (reopened && init.workRecovery) dockToolsBridge.restore(init.workRecovery);
+  const recoveredChildReceipts = reopened && init.workRecovery ? dockToolsBridge.restore(init.workRecovery) : undefined;
   runtime = await createPiAgentAdapter({
     cwd: init.cwd,
     agentDir: init.agentDir,
@@ -84,6 +84,7 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     state: () => captureState(runtime),
     dispose: () => runtime.dispose(),
     diagnostics: runtime.diagnostics,
+    recoveredChildReceipts,
     ...(runtime.modelFallbackMessage === undefined ? {} : { modelFallbackMessage: runtime.modelFallbackMessage }),
     get persistedName() { return runtime.currentSession().sessionManager.getSessionName(); },
   };

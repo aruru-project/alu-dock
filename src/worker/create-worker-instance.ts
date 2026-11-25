@@ -30,6 +30,7 @@ export interface WorkerInstanceOptions {
   initialRuntimeGeneration?: number;
   createdAt?: string;
   workRecovery?: import("../core/work-progress.js").WorkRecovery;
+  onRecoveredChildReceipts?: (receipts: import("../core/work-progress.js").RecoveredChildReceipt[]) => void;
   reopenedFrom?: "host_lost" | "runtime_error";
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
   /** Test-only deterministic environment seam; production captures the workspace login shell. */
@@ -132,6 +133,7 @@ export async function createWorkerInstance(options: CreateWorkerInstanceOptions)
     instance.synchronizeModelState();
     for (const diagnostic of created.diagnostics) instance.recordExtensionError(diagnostic);
     if (created.modelFallbackMessage) instance.recordExtensionError(created.modelFallbackMessage);
+    if (created.recoveredChildReceipts) options.onRecoveredChildReceipts?.(created.recoveredChildReceipts);
     return instance;
   } catch (error) {
     await runtime.dispose().catch(() => {});

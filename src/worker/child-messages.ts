@@ -1,3 +1,4 @@
+import type { WorkRecovery } from "../core/work-progress.js";
 import type { DockToolsResult, WorkMessage } from "../core/dock-tools.js";
 
 export const DEFAULT_WAIT_SECONDS = 1_800;
@@ -48,6 +49,16 @@ export class ChildMessages {
   restore(children: readonly ChildLedger[]): void {
     for (const child of children) this.ledgers.set(child.id, { ...child });
     this.forgetSettled();
+  }
+
+  restoreFromHost(children: WorkRecovery["children"]): void {
+    this.restore(children.map(({ id, name, handed, answered, closed }) => ({ id, name, handed, settled: Math.max(answered, closed) })));
+  }
+
+  /** Restore just a numbered receipt, never a wait delivery or a retired child. */
+  settleKnown(id: string, through: number): void {
+    const child = this.ledgers.get(id);
+    if (child) child.settled = Math.max(child.settled, through);
   }
 
   /** The child Works that still owe this Work a result. */

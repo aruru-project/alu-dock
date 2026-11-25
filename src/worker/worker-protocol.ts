@@ -11,6 +11,7 @@ import {
   AgentSettingsWriteError,
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
+import type { RecoveredChildReceipt } from "../core/work-progress.js";
 import { MAX_PUBLISHED_FILE_REF_CHARS, PublishedFileUnavailableError } from "../core/published-file.js";
 import { parseAssistantRequest } from "../core/assistant.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
@@ -111,7 +112,7 @@ export interface WorkerErrorDto {
 }
 
 export type WorkerEnvelope =
-  | { kind: "ready"; state: AgentWorkerState; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }
+  | { kind: "ready"; state: AgentWorkerState; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; recoveredChildReceipts?: RecoveredChildReceipt[]; pid: number }
   | { kind: "agent_request"; callId: string; request: AgentRequest; context?: AgentInvokeContext }
   | { kind: "agent_control"; callId: string; control: AgentWorkerControl }
   | { kind: "call"; callId: string; capability: WorkerCapability; args: unknown }
@@ -256,9 +257,15 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
   const kind = boundedString(value.kind, 32, "Worker envelope kind");
   switch (kind) {
     case "ready": {
-      exactKeys(value, ["kind", "state", "diagnostics", "modelFallbackMessage", "persistedName", "pid"], "Worker ready envelope");
+      exactKeys(value, ["kind", "state", "diagnostics", "modelFallbackMessage", "persistedName", "recoveredChildReceipts", "pid"], "Worker ready envelope");
       const diagnostics = stringArray(value.diagnostics, 2_000, 2_048, "Worker diagnostics");
-      return { kind, state: parseAgentWorkerState(value.state), diagnostics, ...(optionalString(value.modelFallbackMessage, 2_048) === undefined ? {} : { modelFallbackMessage: optionalString(value.modelFallbackMessage, 2_048) }), ...(optionalString(value.persistedName, 256) === undefined ? {} : { persistedName: optionalString(value.persistedName, 256) }), pid: positiveInteger(value.pid, "Worker pid") };
+      return {
+        kind, state: parseAgentWorkerState(value.state), diagnostics,
+        ...(value.recoveredChildReceipts === undefined ? {} : { recoveredChildReceipts: parseRecoveredChildReceipts(value.recoveredChildReceipts) }),
+        ...(optionalString(value.modelFallbackMessage, 2_048) === undefined ? {} : { modelFallbackMessage: optionalString(value.modelFallbackMessage, 2_048) }),
+        ...(optionalString(value.persistedName, 256) === undefined ? {} : { persistedName: optionalString(value.persistedName, 256) }),
+        pid: positiveInteger(value.pid, "Worker pid"),
+      };
     }
     case "agent_request": {
       exactKeys(value, ["kind", "callId", "request", "context"], "Worker Agent request envelope");
@@ -870,6 +877,15 @@ function assertNoUnknownFields(raw: unknown, parsed: unknown, label: string): vo
     assertNoUnknownFields(item, canonical[key], `${label}.${key}`);
   }
 }
+function parseRecoveredChildReceipts(raw: unknown): RecoveredChildReceipt[] {
+  if (!Array.isArray(raw)) throw new Error("Invalid recovered child receipts");
+  return raw.map((item) => {
+    const value = record(item, "Recovered child receipt");
+    exactKeys(value, ["id", "answered", "closed"], "Recovered child receipt");
+    return { id: boundedString(value.id, 128, "Child ID"), answered: optionalNonNegativeInteger(value.answered, "Answered number"), closed: optionalNonNegativeInteger(value.closed, "Closed number") };
+  });
+}
+
 function record(raw: unknown, label: string): Record<string, unknown> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) throw new Error(`${label} must be a plain object`);
   return raw as Record<string, unknown>;

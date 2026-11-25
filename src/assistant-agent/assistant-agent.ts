@@ -229,6 +229,7 @@ class AssistantAgent implements WorkerAgent {
   };
   private lastUsageTokens: number | undefined;
   private readonly workReceipts: WorkMessageReceipts;
+  readonly recoveredChildReceipts?: WorkerAgent["recoveredChildReceipts"];
   private onDisk = false;
   private disposed: Promise<AgentCleanupResult> | undefined;
   private readonly unsubscribeSpeedSupport: () => void;
@@ -274,11 +275,8 @@ class AssistantAgent implements WorkerAgent {
       (reminders) => this.saveState(REMINDERS_STATE_TYPE, { reminders }),
       (reminder, lateMs) => this.reminderDue(reminder, lateMs),
     );
-    this.restoreState(workRecovery);
-    if (workRecovery) this.workReceipts.restore((message) => {
-      this.desk.heard(message);
-      return this.desk.owes(message.from.id);
-    });
+    const worksCheckpoint = this.restoreState(workRecovery);
+    if (workRecovery) this.recoveredChildReceipts = this.desk.restoreReceipts(workRecovery, this.workReceipts, worksCheckpoint);
     this.workTools = this.dockTools();
     this.tools = [
       createReadTool(cwd), createLsTool(cwd), createFindTool(cwd), createGrepTool(cwd),
@@ -770,12 +768,17 @@ class AssistantAgent implements WorkerAgent {
     this.session.appendCustomEntry(type, state);
   }
 
-  private restoreState(workRecovery?: WorkRecovery): void {
+  private restoreState(workRecovery?: WorkRecovery): string | undefined {
     const latest = new Map<string, unknown>();
-    for (const entry of this.session.getBranch()) if (entry.type === "custom") latest.set(entry.customType, entry.data);
+    let worksCheckpoint: string | undefined;
+    for (const entry of this.session.getBranch()) if (entry.type === "custom") {
+      latest.set(entry.customType, entry.data);
+      if (entry.customType === WORKS_STATE_TYPE) worksCheckpoint = entry.id;
+    }
     for (const [type, state] of latest) this.savedState.set(type, JSON.stringify(state));
     this.desk.restore(latest.get(WORKS_STATE_TYPE), workRecovery);
     this.reminders.restore((latest.get(REMINDERS_STATE_TYPE) as { reminders?: unknown } | undefined)?.reminders);
+    return worksCheckpoint;
   }
 
   private clearQueue(): ClearedAgentQueue {

@@ -1,4 +1,4 @@
-import type { WorkRecovery } from "../core/work-progress.js";
+import type { RecoveredChildReceipt, WorkRecovery } from "../core/work-progress.js";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_ASSISTANT_DISPLAY_NAME } from "../core/assistant.js";
 import type { SystemService } from "./system-service.js";
@@ -55,6 +55,7 @@ import type {
 
 export interface InstanceFactoryInput {
   workRecovery?: WorkRecovery;
+  onRecoveredChildReceipts?: (receipts: RecoveredChildReceipt[]) => void;
   /** Includes the original role and tool ceiling when continuing an interrupted child. */
   child?: DockChildStart;
   modelSpeed?: ModelSpeedSelection;
@@ -758,11 +759,12 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const child = record.parentId !== undefined && record.childGrant !== undefined
       ? { parentId: record.parentId, role: record.childGrant.role, allowedTools: record.childGrant.allowedTools } : undefined;
     const children = this.catalog.current().instances.flatMap((child) => {
-      if (child.parentId !== record.id || !child.workProgress) return [];
-      const { handed, answered, closed } = child.workProgress;
-      return [{ id: child.mainIdentity?.child ?? child.id, name: child.name ?? child.id, handed, settled: Math.max(answered, closed) }];
+      if (child.parentId !== record.id || child.childGrant?.mainParent || child.lifecycle !== "host_lost" || !child.workProgress) return [];
+      return [{ id: child.mainIdentity?.child ?? child.id, name: child.name ?? child.id, ...child.workProgress }];
     });
+    let receipts: RecoveredChildReceipt[] = [];
     const candidate = await this.factory({
+      onRecoveredChildReceipts: (received) => { receipts = received; },
       id: record.id,
       creationOperationId: record.creationOperationId,
       hostEpoch: this.hostEpoch,
@@ -823,12 +825,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const publish = async () => {
       if (child) await this.followSpeedOnStart(candidate);
       this.bindInstanceCatalog(candidate);
-      await this.catalog.forInstance(record.id).commit(candidate.catalogRecord(), {
-        kind: "instance.reopen",
-        effect: "rollback_contained",
-        operationId,
-        instanceId: record.id,
-      });
+      const corrected = await this.catalog.reopen(candidate.catalogRecord(), operationId, receipts);
+      for (const [id, progress] of corrected) this.workMessages.childStarted(id, progress);
       candidate.markCatalogCommitted();
       this.instances.set(record.id, candidate);
     };

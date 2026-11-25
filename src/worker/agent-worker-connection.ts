@@ -16,6 +16,8 @@ import {
   type DockCapability, type ReverseWorkerCapability, type UiCapability, type WorkerEnvelope, type WorkerIdentity,
 } from "./worker-protocol.js";
 
+type WorkerReady = Omit<Extract<WorkerEnvelope, { kind: "ready" }>, "kind" | "state">;
+
 interface PendingCall {
   label: string;
   resolve(value: unknown): void;
@@ -68,8 +70,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   private expectedExit = false;
   private unavailable = false;
   private lossPublished = false;
-  private readonly readyPromise: Promise<{ diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }>;
-  private resolveReady!: (value: { diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }) => void;
+  private readonly readyPromise: Promise<WorkerReady>;
+  private resolveReady!: (value: WorkerReady) => void;
   private rejectReady!: (error: unknown) => void;
   private expectedGeneration: number;
 
@@ -115,7 +117,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     });
   }
 
-  static async create(options: CreateAgentWorkerConnectionOptions): Promise<{ session: AgentWorkerConnection; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }> {
+  static async create(options: CreateAgentWorkerConnectionOptions): Promise<WorkerReady & { session: AgentWorkerConnection }> {
     const identity = { ...options.identity, workerIncarnation: randomUUID() };
     const workerEnvironment = options.workerEnvironment === undefined
       ? await captureWorkspaceShellEnvironment(options.cwd)
@@ -215,8 +217,9 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
 
   private async handleEnvelope(envelope: WorkerEnvelope): Promise<void> {
     if (envelope.kind === "ready") {
-      this.applyState(envelope.state);
-      this.resolveReady({ diagnostics: envelope.diagnostics, ...(envelope.modelFallbackMessage === undefined ? {} : { modelFallbackMessage: envelope.modelFallbackMessage }), ...(envelope.persistedName === undefined ? {} : { persistedName: envelope.persistedName }), pid: envelope.pid });
+      const { kind: _kind, state, ...ready } = envelope;
+      this.applyState(state);
+      this.resolveReady(ready);
       return;
     }
     if (envelope.kind === "accepted") { const pending = this.pending.get(envelope.callId); if (pending) pending.accepted = true; return; }
