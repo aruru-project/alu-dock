@@ -20,6 +20,7 @@ export interface PiWorkerInitOptions {
   projectTrusted: boolean;
   sessionFile?: string;
   parentConversation?: true;
+  forkFrom?: string;
   initialName?: string;
 }
 

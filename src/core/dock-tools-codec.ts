@@ -46,11 +46,13 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: value.type, operationId: boundedString(value.operationId, 128, "Operation ID"), target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Target") };
   }
   if (value.type === "spawn") {
-    exactKeys(value, ["type", "operationId", "task", "name", "cwd", "createDirectory", "machine", "model", "thinkingLevel", "allowedTools", "withContext"], "Spawn request");
+    exactKeys(value, ["type", "operationId", "task", "name", "cwd", "createDirectory", "machine", "model", "thinkingLevel", "allowedTools", "withContext", "sessionFile"], "Spawn request");
     if (value.withContext !== undefined && typeof value.withContext !== "boolean") throw new Error("withContext must be true or false");
     if (value.createDirectory !== undefined && typeof value.createDirectory !== "boolean") throw new Error("createDirectory must be boolean");
     const cwd = value.cwd === undefined ? undefined : boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Working directory");
     if (cwd !== undefined && !isPortableAbsoluteLocalPath(cwd)) throw new Error("Working directory must be absolute");
+    const sessionFile = value.sessionFile === undefined ? undefined : boundedString(value.sessionFile, MAX_DOCK_TOOL_CWD_CHARS, "Session file");
+    if (sessionFile !== undefined && (!isPortableAbsoluteLocalPath(sessionFile) || value.withContext)) throw new Error("Give an absolute sessionFile on the child machine, without withContext.");
     const machine = value.machine === undefined ? undefined : boundedString(value.machine, MAX_DOCK_TOOL_TARGET_CHARS, "Spawn Machine name");
     return {
       type: "spawn", operationId: boundedString(value.operationId, 128, "Operation ID"),
@@ -63,6 +65,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       ...(value.thinkingLevel === undefined ? {} : { thinkingLevel: oneOf(value.thinkingLevel, THINKING_LEVELS, "Thinking level") }),
       ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
       ...(value.withContext === true ? { withContext: true } : {}),
+      ...(sessionFile === undefined ? {} : { sessionFile }),
     };
   }
   if (value.type === "machines") { exactKeys(value, ["type"], "Dock Machines request"); return { type: "machines" }; }

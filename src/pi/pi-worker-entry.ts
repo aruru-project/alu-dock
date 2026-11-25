@@ -34,9 +34,9 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
   const modelOwner = host.models ? mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) : undefined;
   const modelSpeed = new ModelSpeedRuntime(modelOwner ? () => modelOwner.readConfiguration() : undefined);
   const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
-  const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
+  const sessionPath = init.forkFrom ?? init.sessionFile;
   const reopened = sessionPath
-    ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
+    ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd, init.forkFrom !== undefined)
     : undefined;
   if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
   let runtime: PiAgentAdapter;
@@ -60,7 +60,7 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     extensionUiContextPortFactory: () => ui.createGenerationPort(),
     setProcessCwd: (cwd) => process.chdir(cwd),
     ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
-    ...(init.parentConversation ? { parentConversation: true } : {}),
+    ...(init.parentConversation || init.forkFrom ? { newConversationCopy: true } : {}),
     dockToolsBridge,
     modelSpeed,
     ...(host.attachments === undefined ? {} : { dockAttachmentPort: { access: host.attachments } }),
@@ -117,7 +117,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
-  const allowed = new Set(["workRecovery", "cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "initialName"]);
+  const allowed = new Set(["workRecovery", "cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "parentConversation", "forkFrom", "initialName"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`Worker init contains unknown field ${key}`);
   const text = (input: unknown, limit: number, label: string, optional = false): string | undefined => {
     if (input === undefined && optional) return undefined;
@@ -144,6 +144,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
     projectTrusted: value.projectTrusted,
     ...(value.parentConversation ? { parentConversation: true } : {}),
+    ...(text(value.forkFrom, 16_384, "Source session file", true) === undefined ? {} : { forkFrom: value.forkFrom as string }),
     ...(text(value.sessionFile, 16_384, "Worker session file", true) === undefined ? {} : { sessionFile: value.sessionFile as string }),
     ...(text(value.initialName, 256, "Worker initial name", true) === undefined ? {} : { initialName: value.initialName as string }),
   };

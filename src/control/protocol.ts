@@ -1149,7 +1149,9 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
 /** A child Work's settings, chosen by its top-level parent and accepted only together. */
 function parseChildSelection(input: unknown, adopting = false): DockChildSelection {
   const value = object(input, "params.child", "invalid_request");
-  exact(value, adopting ? ["parentId", "allowedTools"] : ["parentId", "allowedTools", "withParentContext"], "invalid_request");
+  exact(value, adopting ? ["parentId", "allowedTools"] : ["parentId", "allowedTools", "withParentContext", "sessionFile"], "invalid_request");
+  const sessionFile = optionalString(value.sessionFile, "params.child.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
+  if (sessionFile !== undefined && (!isPortableAbsoluteLocalPath(sessionFile) || value.withParentContext === true)) throw validation("invalid_request", "Give an absolute sessionFile without withParentContext");
   let allowedTools: string[] | undefined;
   if (value.allowedTools !== undefined) {
     try { allowedTools = parseAllowedTools(value.allowedTools); }
@@ -1159,6 +1161,7 @@ function parseChildSelection(input: unknown, adopting = false): DockChildSelecti
     parentId: id(value.parentId, "params.child.parentId", "invalid_request"),
     ...(allowedTools === undefined ? {} : { allowedTools }),
     ...(optionalBoolean(value.withParentContext, "params.child.withParentContext", "invalid_request") ? { withParentContext: true } : {}),
+    ...(sessionFile === undefined ? {} : { sessionFile }),
   };
 }
 

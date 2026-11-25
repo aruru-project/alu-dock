@@ -37,9 +37,11 @@ export async function openValidatedPiSession(
   path: string,
   sessionDir?: string,
   cwdOverride?: string,
+  fork = false,
 ): Promise<{ cwd: string; manager: SessionManager }> {
+  if (!isNativeAbsoluteLocalPath(path)) throw new Error("Pi session file is not an absolute path on this Host");
   const before = await validateOwnedSessionPath(path);
-  const manager = SessionManager.open(path, sessionDir, cwdOverride);
+  const manager = fork && cwdOverride !== undefined ? SessionManager.forkFrom(path, cwdOverride, sessionDir) : SessionManager.open(path, sessionDir, cwdOverride);
   await assertSessionPathUnchanged(path, before);
   const cwd = manager.getHeader()?.cwd;
   if (!cwd || !isAbsolute(cwd)) throw new Error(`Pi session header has no absolute working directory: ${path}`);

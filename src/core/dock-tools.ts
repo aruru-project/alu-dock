@@ -88,7 +88,7 @@ export type DockToolsRequest =
   | { type: "models" }
   | { type: "speed"; operationId: string; target?: string; selection?: ModelSpeedSelection | null }
   /** `machine` is the resident assistant's alone: only her child Works may run on another Machine than their parent. */
-  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; createDirectory?: boolean; machine?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
+  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; createDirectory?: boolean; machine?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean; sessionFile?: string }
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
@@ -133,13 +133,15 @@ export interface DockChildSelection {
   allowedTools?: string[];
   /** Start from a copy of the parent's conversation so far instead of an empty one. */
   withParentContext?: boolean;
+  /** Start a new Pi conversation from this file on the child's machine. */
+  sessionFile?: string;
 }
 
 /**
  * What starts a child's Worker; the Registry has already turned `withParentContext` into its session file,
  * applied its parent's tool ceiling to `allowedTools` and decided its role.
  */
-export type DockChildStart = Omit<DockChildSelection, "withParentContext"> & { role: ChildRole };
+export type DockChildStart = Omit<DockChildSelection, "withParentContext" | "sessionFile"> & { role: ChildRole };
 
 export type DockToolsResult =
   | ObservationResult

@@ -227,8 +227,8 @@ export interface CreatePiAgentAdapterOptions {
   workerConfig?: JsonObject;
   /** A child Work, which reports only to the Work that created it; a lead also manages child Works of its own. */
   child?: ChildRole;
-  /** This session is a fresh copy from the parent, not the child's own saved conversation. */
-  parentConversation?: true;
+  /** This Worker is starting a new conversation from a copy, so creation choices apply once. */
+  newConversationCopy?: true;
   /** Exact tools this Work may ever use, enforced in Pi's tool registry. */
   allowedTools?: string[];
   projectTrusted: boolean;
@@ -2114,8 +2114,6 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
   let currentWorkerConfig = options.workerConfig;
   let preparedSystem: Awaited<ReturnType<typeof resolvePiBaseSystem>> | undefined;
-  let childSession: "parent_copy" | "saved_child" | undefined = options.parentConversation ? "parent_copy"
-    : options.child && options.sessionManager ? "saved_child" : undefined;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
     const settingsManager = SettingsManager.create(canonicalCwd, agentDir, {
@@ -2147,12 +2145,14 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       },
     });
     // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
-    const { model: requestedModel, ...piCreateOptions } = (currentWorkerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
-    // A fresh copy takes the model chosen for the child; its own old history keeps its recorded model.
-    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager, childSession);
+    const { model, thinkingLevel, ...piCreateOptions } = (currentWorkerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
+    const startingCopy = !sessionStartEvent && options.newConversationCopy;
+    const startingNew = startingCopy || (sessionStartEvent ? sessionStartEvent.reason === "new" : !options.sessionManager);
+    const startingModel = await resolvePiStartingModel(startingNew ? model : undefined, services.modelRuntime, sessionManager);
     // Pi starts a model that lacks the requested thinking level at the nearest level it has.
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
+      ...(startingNew && thinkingLevel !== undefined ? { thinkingLevel } : {}),
       ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...workerToolSelection(allowedTools, options.excludeTools ?? piCreateOptions.excludeTools),
@@ -2167,12 +2167,9 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     result.session.agent.streamFunction = (model, context, options) => stream(model, context, {
       ...options, onPayload: modelSpeed.wrap(options?.onPayload),
     });
-    if (childSession === "parent_copy") {
-      // Pi records these only for new sessions; without them a reload would restore the parent's.
-      if (result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);
-      sessionManager.appendThinkingLevelChange(result.session.thinkingLevel);
-    }
-    childSession = undefined;
+    // Pi already recorded settings for an empty session. On a copy, persist only this spawn's overrides.
+    if (startingCopy && model !== undefined && result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);
+    if (startingCopy && thinkingLevel !== undefined) sessionManager.appendThinkingLevelChange(result.session.thinkingLevel);
     return { ...result, services, diagnostics: services.diagnostics };
   };
   const sessionManager = options.sessionManager

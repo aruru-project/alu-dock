@@ -67,6 +67,8 @@ export interface InstanceFactoryInput {
   name?: string;
   projectTrusted: boolean;
   sessionFile?: string;
+  /** Source of a new conversation; never the file the child will write. */
+  forkFrom?: string;
   /** The file is a fresh copy of the parent's session, not the child's own history. */
   parentConversation?: true;
   initialRuntimeGeneration?: number;
@@ -453,7 +455,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(child === undefined ? {} : { child }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(input.child?.withParentContext ? { parentConversation: true } : {}), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(child === undefined ? {} : { child }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(input.child?.withParentContext ? { parentConversation: true } : {}), ...(input.child?.sessionFile ? { forkFrom: input.child.sessionFile } : {}), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId

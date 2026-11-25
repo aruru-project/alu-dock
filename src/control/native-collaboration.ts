@@ -67,19 +67,20 @@ export async function spawnDockWorker(
   // Ordinary Works keep the 2026-11-04 inheritance policy. The resident assistant's omitted
   // model goes through the target's normal Pi default; her chat settings are not engineering defaults.
   // Pi still clamps the requested thinking level to what the selected model supports.
-  const thinkingLevel = request.thinkingLevel ?? (residentAssistant ? ASSISTANT_CHILD_THINKING_LEVEL : source.executor.thinkingLevel);
+  const thinkingLevel = request.thinkingLevel ?? (request.sessionFile ? undefined : residentAssistant ? ASSISTANT_CHILD_THINKING_LEVEL : source.executor.thinkingLevel);
   let created: Awaited<ReturnType<typeof port.create>>;
   try {
     created = await port.create({
       type: "create", operationId: childCreationOperation(request.operationId),
       cwd: request.cwd ?? source.cwd, name: request.name,
       ...(request.createDirectory ? { createDirectory: true } : {}),
-      model: request.model ?? (residentAssistant ? undefined : source.executor.model),
+      model: request.model ?? (residentAssistant || request.sessionFile ? undefined : source.executor.model),
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       child: {
         parentId: source.id,
         ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
         ...(request.withContext ? { withParentContext: true } : {}),
+        ...(request.sessionFile === undefined ? {} : { sessionFile: request.sessionFile }),
       },
     });
   } catch (error) {

@@ -24,13 +24,14 @@ export interface CreatePiInstanceOptions extends Omit<WorkerInstanceOptions, "pa
   excludeTools?: string[];
   sessionFile?: string;
   parentConversation?: true;
+  forkFrom?: string;
   /** Test-only process seam; production always uses the default worker entry. */
   workerEntry?: string;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
-  const { child, cwd: requestedCwd, agentDir: requestedAgentDir, sessionDir, tools, excludeTools, sessionFile, parentConversation, workerEntry, ...shared } = options;
+  const { child, cwd: requestedCwd, agentDir: requestedAgentDir, sessionDir, tools, excludeTools, sessionFile, parentConversation, forkFrom, workerEntry, ...shared } = options;
   const cwd = resolve(requestedCwd);
   const init: PiWorkerInitOptions = {
     cwd,
@@ -45,6 +46,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     projectTrusted: options.projectTrusted,
     ...(sessionFile === undefined ? {} : { sessionFile: resolve(sessionFile) }),
     ...(parentConversation ? { parentConversation } : {}),
+    ...(forkFrom === undefined ? {} : { forkFrom }),
     // Only a fresh session or a copy of the parent's conversation takes a new name.
     ...(options.name === undefined || (sessionFile !== undefined && !parentConversation) ? {} : { initialName: options.name }),
   };
